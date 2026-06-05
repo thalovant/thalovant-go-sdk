@@ -1,6 +1,8 @@
 # Thalovant Go SDK
 
-Go SDK for direct Thalovant HiveMind HTTPS clients and agents.
+Go SDK for direct Thalovant hub HTTPS clients and agents.
+
+Full documentation: <https://docs.thalovant.com/developers/sdks/go/>
 
 ```bash
 go get github.com/thalovant/thalovant-go-sdk
@@ -33,20 +35,19 @@ func main() {
 
 This is an alpha SDK scaffold with identity, event, session, conversation,
 AES-GCM preshared-key helpers, and an HTTP transport shape compatible with the
-Thalovant SDK contract. The live transport targets the preshared-key HiveMind
-HTTP path used by Thalovant public hubs.
+Thalovant SDK contract. The live transport targets the preshared-key HTTP path
+used by Thalovant public hubs.
 
 ## Generic Client Context
 
 ```go
 context := thalovant.BuildClientContext(nil, thalovant.ClientContextOptions{
-	UserID:       "operator-42",
+	UserID:       "user-42",
 	UserName:     "Ada",
-	AuthToken:    "access-token",
 	AuthProvider: "oidc",
-	Roles:        []string{"operator"},
-	Platform:     "mobile",
-	Source:       "line-a-tablet-3",
+	Roles:        []string{"member"},
+	Platform:     "kiosk",
+	Source:       "checkout-kiosk",
 	Channel:      "chat",
 })
 
@@ -65,7 +66,7 @@ items := reply.DisplayItems(600)
 ```
 
 Identity files may include `default_path` for hubs exposed behind a reverse
-proxy path, for example `/hivemind/public`.
+proxy path, for example `/public`.
 
 ## Development
 
