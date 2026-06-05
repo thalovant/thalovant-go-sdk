@@ -1,0 +1,5 @@
+coverage.out
+dist/
+bin/
+.env
+_identity.json
