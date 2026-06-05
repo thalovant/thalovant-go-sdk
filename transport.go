@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 )
@@ -32,16 +31,16 @@ type HiveMessage struct {
 }
 
 type HTTPTransport struct {
-	Identity       Identity
-	UserAgent      string
-	PollInterval   time.Duration
-	HTTPClient     *http.Client
-	BusEvents      chan Event
-	connected      bool
-	handshake      bool
-	lastError      error
-	cancelPolling  context.CancelFunc
-	mu             sync.RWMutex
+	Identity      Identity
+	UserAgent     string
+	PollInterval  time.Duration
+	HTTPClient    *http.Client
+	BusEvents     chan Event
+	connected     bool
+	handshake     bool
+	lastError     error
+	cancelPolling context.CancelFunc
+	mu            sync.RWMutex
 }
 
 func NewHTTPTransport(identity Identity) *HTTPTransport {
@@ -55,9 +54,7 @@ func NewHTTPTransport(identity Identity) *HTTPTransport {
 }
 
 func (t *HTTPTransport) BaseURL() string {
-	host := strings.Replace(t.Identity.DefaultMaster, "wss://", "https://", 1)
-	host = strings.Replace(host, "ws://", "http://", 1)
-	return fmt.Sprintf("%s:%d", host, t.Identity.DefaultPort)
+	return t.Identity.EndpointBase()
 }
 
 func (t *HTTPTransport) Authorization() string {
@@ -128,10 +125,10 @@ func (t *HTTPTransport) Healthcheck() TransportHealth {
 
 func (t *HTTPTransport) EmitBus(ctx context.Context, eventType string, data Data, eventContext Context) error {
 	return t.sendHiveMessage(ctx, HiveMessage{
-		MsgType: "bus",
-		Payload: map[string]any{"type": eventType, "data": data, "context": eventContext},
+		MsgType:  "bus",
+		Payload:  map[string]any{"type": eventType, "data": data, "context": eventContext},
 		Metadata: map[string]any{},
-		Route: []any{},
+		Route:    []any{},
 	}, true)
 }
 
@@ -173,7 +170,7 @@ func (t *HTTPTransport) PollOnce(ctx context.Context) error {
 	defer resp.Body.Close()
 	var body struct {
 		Error    string `json:"error"`
-		Messages []any `json:"messages"`
+		Messages []any  `json:"messages"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return err
@@ -217,10 +214,10 @@ func (t *HTTPTransport) handleRawMessage(ctx context.Context, raw any) error {
 		return t.handleHandshake(ctx, message.Payload)
 	case "bus":
 		t.BusEvents <- Event{
-			Name: fmt.Sprint(message.Payload["type"]),
-			Data: mapValue(message.Payload["data"]),
+			Name:    fmt.Sprint(message.Payload["type"]),
+			Data:    mapValue(message.Payload["data"]),
 			Context: mapValue(message.Payload["context"]),
-			Raw: message,
+			Raw:     message,
 		}
 	}
 	return nil
@@ -234,12 +231,12 @@ func (t *HTTPTransport) handleHandshake(ctx context.Context, payload map[string]
 		if err := t.sendHiveMessage(ctx, HiveMessage{
 			MsgType: "hello",
 			Payload: map[string]any{
-				"pubkey": t.Identity.PublicKey,
+				"pubkey":  t.Identity.PublicKey,
 				"session": map[string]any{"session_id": "thalovant-go-" + NewSessionID()},
 				"site_id": t.Identity.SiteID,
 			},
 			Metadata: map[string]any{},
-			Route: []any{},
+			Route:    []any{},
 		}, false); err != nil {
 			return err
 		}

@@ -65,6 +65,44 @@ func (c *Client) SendUtterance(ctx context.Context, text string, opts RequestOpt
 	return c.Emit(ctx, EventRecognizerLoopUtterance, UtterancePayload(prompt, lang), eventContext)
 }
 
+func (c *Client) SendAction(ctx context.Context, payload string, opts ActionOptions) error {
+	prompt := strings.TrimSpace(payload)
+	if prompt == "" {
+		return fmt.Errorf("send action requires non-empty payload")
+	}
+	requestOpts := RequestOptions{
+		Lang:      opts.Lang,
+		Context:   MergeContext(opts.Context, Context{"input": map[string]any{"kind": "action", "title": opts.Title, "payload": prompt}}),
+		SessionID: opts.SessionID,
+		RequestID: opts.RequestID,
+	}
+	return c.SendUtterance(ctx, prompt, requestOpts)
+}
+
+func (c *Client) SendCode(ctx context.Context, value string, opts CodeOptions) error {
+	code := strings.TrimSpace(value)
+	if code == "" {
+		return fmt.Errorf("send code requires non-empty value")
+	}
+	lang := opts.Lang
+	if lang == "" {
+		lang = "en-us"
+	}
+	requestID := opts.RequestID
+	if requestID == "" {
+		requestID = NewRequestID()
+	}
+	kind := opts.Kind
+	if kind == "" {
+		kind = "code"
+	}
+	input := map[string]any{"kind": kind, "label": opts.Label, "value": code, "exact": true}
+	eventContext := ContextWithCorrelation(MergeContext(opts.Context, Context{"input": input}), opts.SessionID, c.Identity.SiteID, lang, requestID)
+	data := UtterancePayload(code, lang)
+	data["input"] = input
+	return c.Emit(ctx, EventRecognizerLoopUtterance, data, eventContext)
+}
+
 func (c *Client) Ask(ctx context.Context, text string, opts RequestOptions) (Reply, error) {
 	prompt := strings.TrimSpace(text)
 	if prompt == "" {
@@ -144,6 +182,23 @@ type RequestOptions struct {
 	RequestID string
 }
 
+type ActionOptions struct {
+	Title     string
+	Lang      string
+	Context   Context
+	SessionID string
+	RequestID string
+}
+
+type CodeOptions struct {
+	Kind      string
+	Label     string
+	Lang      string
+	Context   Context
+	SessionID string
+	RequestID string
+}
+
 type ConversationOptions struct {
 	SessionID string
 	Lang      string
@@ -171,4 +226,22 @@ func (c Conversation) SendUtterance(ctx context.Context, text string, opts Reque
 	}
 	opts.Context = MergeContext(c.Options.Context, opts.Context)
 	return c.Client.SendUtterance(ctx, text, opts)
+}
+
+func (c Conversation) SendAction(ctx context.Context, payload string, opts ActionOptions) error {
+	opts.SessionID = c.Options.SessionID
+	if opts.Lang == "" {
+		opts.Lang = c.Options.Lang
+	}
+	opts.Context = MergeContext(c.Options.Context, opts.Context)
+	return c.Client.SendAction(ctx, payload, opts)
+}
+
+func (c Conversation) SendCode(ctx context.Context, value string, opts CodeOptions) error {
+	opts.SessionID = c.Options.SessionID
+	if opts.Lang == "" {
+		opts.Lang = c.Options.Lang
+	}
+	opts.Context = MergeContext(c.Options.Context, opts.Context)
+	return c.Client.SendCode(ctx, value, opts)
 }

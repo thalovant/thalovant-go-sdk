@@ -3,6 +3,7 @@ package thalovant
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -15,6 +16,7 @@ type Identity struct {
 	SiteID        string `json:"site_id"`
 	DefaultMaster string `json:"default_master"`
 	DefaultPort   int    `json:"default_port"`
+	DefaultPath   string `json:"default_path,omitempty"`
 	PublicKey     string `json:"public_key,omitempty"`
 }
 
@@ -41,6 +43,7 @@ func IdentityFromEnv(prefix string) (Identity, error) {
 		"site_id":        os.Getenv(prefix + "SITE_ID"),
 		"default_master": firstNonEmpty(os.Getenv(prefix+"HUB_HTTP_HOST"), os.Getenv(prefix+"DEFAULT_MASTER")),
 		"default_port":   firstNonEmpty(os.Getenv(prefix+"HUB_HTTP_PORT"), os.Getenv(prefix+"DEFAULT_PORT")),
+		"default_path":   firstNonEmpty(os.Getenv(prefix+"HUB_HTTP_PATH"), os.Getenv(prefix+"DEFAULT_PATH")),
 	})
 }
 
@@ -59,6 +62,7 @@ func IdentityFromMap(values map[string]any) (Identity, error) {
 		SiteID:        required(value(values, "site_id", "siteId", "site"), "site_id"),
 		DefaultMaster: strings.TrimRight(required(value(values, "default_master", "host", "hub_http_host", "master"), "default_master"), "/"),
 		DefaultPort:   port,
+		DefaultPath:   normalizePath(optional(value(values, "default_path", "defaultPath", "hub_http_path", "path", "uri_path"))),
 		PublicKey:     optional(value(values, "public_key", "publicKey")),
 	}
 	if identity.AccessKey == "" || identity.Password == "" || identity.SiteID == "" || identity.DefaultMaster == "" {
@@ -67,11 +71,30 @@ func IdentityFromMap(values map[string]any) (Identity, error) {
 	return identity, nil
 }
 
+func (i Identity) EndpointBase() string {
+	host := strings.Replace(i.DefaultMaster, "wss://", "https://", 1)
+	host = strings.Replace(host, "ws://", "http://", 1)
+	if parsed, err := url.Parse(host); err == nil && parsed.Scheme != "" && parsed.Host != "" {
+		netloc := parsed.Host
+		hostPart := netloc
+		if at := strings.LastIndex(hostPart, "@"); at >= 0 {
+			hostPart = hostPart[at+1:]
+		}
+		if !strings.Contains(hostPart, ":") {
+			netloc = fmt.Sprintf("%s:%d", netloc, i.DefaultPort)
+		}
+		path := joinURLPath(parsed.Path, i.DefaultPath)
+		return fmt.Sprintf("%s://%s%s", parsed.Scheme, netloc, path)
+	}
+	return fmt.Sprintf("%s:%d%s", strings.TrimRight(host, "/"), i.DefaultPort, i.DefaultPath)
+}
+
 func (i Identity) Summary() map[string]any {
 	return map[string]any{
 		"site_id":        i.SiteID,
 		"default_master": i.DefaultMaster,
 		"default_port":   i.DefaultPort,
+		"default_path":   i.DefaultPath,
 	}
 }
 
@@ -126,4 +149,26 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+func normalizePath(path string) string {
+	path = strings.Trim(path, "/")
+	if path == "" {
+		return ""
+	}
+	return "/" + path
+}
+
+func joinURLPath(parts ...string) string {
+	var cleaned []string
+	for _, part := range parts {
+		part = strings.Trim(part, "/")
+		if part != "" {
+			cleaned = append(cleaned, part)
+		}
+	}
+	if len(cleaned) == 0 {
+		return ""
+	}
+	return "/" + strings.Join(cleaned, "/")
 }

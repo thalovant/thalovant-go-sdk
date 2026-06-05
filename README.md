@@ -36,6 +36,37 @@ AES-GCM preshared-key helpers, and an HTTP transport shape compatible with the
 Thalovant SDK contract. The live transport targets the preshared-key HiveMind
 HTTP path used by Thalovant public hubs.
 
+## Generic Client Context
+
+```go
+context := thalovant.BuildClientContext(nil, thalovant.ClientContextOptions{
+	UserID:       "operator-42",
+	UserName:     "Ada",
+	AuthToken:    "access-token",
+	AuthProvider: "oidc",
+	Roles:        []string{"operator"},
+	Platform:     "mobile",
+	Source:       "line-a-tablet-3",
+	Channel:      "chat",
+})
+
+reply, err := client.Ask(ctx, "Show the next instruction.", thalovant.RequestOptions{Context: context})
+```
+
+## Actions, Codes, And Rich Output
+
+```go
+conversation := client.Conversation(thalovant.ConversationOptions{SessionID: "work-session"})
+
+_ = conversation.SendAction(ctx, `/choose{"id":"42"}`, thalovant.ActionOptions{Title: "Choose item"})
+_ = conversation.SendCode(ctx, "SN-001-XYZ", thalovant.CodeOptions{Kind: "qr", Label: "serial"})
+
+items := reply.DisplayItems(600)
+```
+
+Identity files may include `default_path` for hubs exposed behind a reverse
+proxy path, for example `/hivemind/public`.
+
 ## Development
 
 ```bash
