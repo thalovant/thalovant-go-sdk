@@ -1,6 +1,6 @@
 # Thalovant Go SDK
 
-Go SDK for direct Thalovant hub HTTPS clients and agents.
+Go SDK for direct Thalovant hub data-plane clients and agents.
 
 Full documentation: <https://docs.thalovant.com/developers/sdks/go/>
 
@@ -34,9 +34,26 @@ func main() {
 ## Status
 
 This is an alpha SDK scaffold with identity, event, session, conversation,
-AES-GCM preshared-key helpers, and an HTTP transport shape compatible with the
-Thalovant SDK contract. The live transport targets the preshared-key HTTP path
-used by Thalovant public hubs.
+AES-GCM preshared-key helpers, protocol endpoint helpers, and an HTTP transport
+shape compatible with the Thalovant SDK contract. The live transport targets
+the preshared-key HTTPS HTTP-protocol path used by Thalovant public hubs.
+
+## Protocols
+
+Identity or hub payloads may include `data_plane_endpoints` for `https`, `wss`,
+and `mqtt`, plus `protocols.wss/http/mqtt.enabled` flags.
+
+```go
+identity, err := thalovant.IdentityFromFile("_identity.json")
+if err != nil {
+	panic(err)
+}
+
+fmt.Println(identity.EnabledProtocols())
+fmt.Println(identity.EndpointFor(thalovant.ProtocolHTTPS))
+fmt.Println(identity.EndpointFor(thalovant.ProtocolWSS))
+fmt.Println(identity.EndpointFor(thalovant.ProtocolMQTT))
+```
 
 ## Generic Client Context
 
@@ -66,7 +83,8 @@ items := reply.DisplayItems(600)
 ```
 
 Identity files may include `default_path` for hubs exposed behind a reverse
-proxy path, for example `/public`.
+proxy path, for example `/public`. Newer identities should prefer explicit
+`data_plane_endpoints` when the API provides them.
 
 ## Development
 

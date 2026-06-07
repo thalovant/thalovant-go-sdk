@@ -3,21 +3,22 @@ package thalovant
 import (
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
 )
 
 type Identity struct {
-	AccessKey     string `json:"access_key"`
-	Password      string `json:"password"`
-	CryptoKey     string `json:"crypto_key,omitempty"`
-	SiteID        string `json:"site_id"`
-	DefaultMaster string `json:"default_master"`
-	DefaultPort   int    `json:"default_port"`
-	DefaultPath   string `json:"default_path,omitempty"`
-	PublicKey     string `json:"public_key,omitempty"`
+	AccessKey          string                `json:"access_key"`
+	Password           string                `json:"password"`
+	CryptoKey          string                `json:"crypto_key,omitempty"`
+	SiteID             string                `json:"site_id"`
+	DefaultMaster      string                `json:"default_master"`
+	DefaultPort        int                   `json:"default_port"`
+	DefaultPath        string                `json:"default_path,omitempty"`
+	PublicKey          string                `json:"public_key,omitempty"`
+	DataPlaneEndpoints HubDataPlaneEndpoints `json:"data_plane_endpoints,omitempty"`
+	Protocols          HubProtocolSettings   `json:"protocols,omitempty"`
 }
 
 func IdentityFromFile(path string) (Identity, error) {
@@ -44,6 +45,11 @@ func IdentityFromEnv(prefix string) (Identity, error) {
 		"default_master": firstNonEmpty(os.Getenv(prefix+"HUB_HTTP_HOST"), os.Getenv(prefix+"DEFAULT_MASTER")),
 		"default_port":   firstNonEmpty(os.Getenv(prefix+"HUB_HTTP_PORT"), os.Getenv(prefix+"DEFAULT_PORT")),
 		"default_path":   firstNonEmpty(os.Getenv(prefix+"HUB_HTTP_PATH"), os.Getenv(prefix+"DEFAULT_PATH")),
+		"data_plane_endpoints": map[string]any{
+			"https": firstNonEmpty(os.Getenv(prefix+"HUB_HTTPS_HOST"), os.Getenv(prefix+"HUB_HTTP_HOST")),
+			"wss":   firstNonEmpty(os.Getenv(prefix+"HUB_WSS_HOST"), os.Getenv(prefix+"HUB_WEBSOCKET_HOST")),
+			"mqtt":  os.Getenv(prefix + "HUB_MQTT_HOST"),
+		},
 	})
 }
 
@@ -56,14 +62,16 @@ func IdentityFromMap(values map[string]any) (Identity, error) {
 		port = 5679
 	}
 	identity := Identity{
-		AccessKey:     required(value(values, "access_key", "key", "api_key"), "access_key"),
-		Password:      required(value(values, "password"), "password"),
-		CryptoKey:     optional(value(values, "crypto_key", "cryptoKey")),
-		SiteID:        required(value(values, "site_id", "siteId", "site"), "site_id"),
-		DefaultMaster: strings.TrimRight(required(value(values, "default_master", "host", "hub_http_host", "master"), "default_master"), "/"),
-		DefaultPort:   port,
-		DefaultPath:   normalizePath(optional(value(values, "default_path", "defaultPath", "hub_http_path", "path", "uri_path"))),
-		PublicKey:     optional(value(values, "public_key", "publicKey")),
+		AccessKey:          required(value(values, "access_key", "key", "api_key"), "access_key"),
+		Password:           required(value(values, "password"), "password"),
+		CryptoKey:          optional(value(values, "crypto_key", "cryptoKey")),
+		SiteID:             required(value(values, "site_id", "siteId", "site"), "site_id"),
+		DefaultMaster:      strings.TrimRight(required(value(values, "default_master", "host", "hub_http_host", "master"), "default_master"), "/"),
+		DefaultPort:        port,
+		DefaultPath:        normalizePath(optional(value(values, "default_path", "defaultPath", "hub_http_path", "path", "uri_path"))),
+		PublicKey:          optional(value(values, "public_key", "publicKey")),
+		DataPlaneEndpoints: DataPlaneEndpointsFromMap(values),
+		Protocols:          ProtocolSettingsFromMap(values),
 	}
 	if identity.AccessKey == "" || identity.Password == "" || identity.SiteID == "" || identity.DefaultMaster == "" {
 		return Identity{}, ErrIdentity
@@ -72,30 +80,35 @@ func IdentityFromMap(values map[string]any) (Identity, error) {
 }
 
 func (i Identity) EndpointBase() string {
-	host := strings.Replace(i.DefaultMaster, "wss://", "https://", 1)
-	host = strings.Replace(host, "ws://", "http://", 1)
-	if parsed, err := url.Parse(host); err == nil && parsed.Scheme != "" && parsed.Host != "" {
-		netloc := parsed.Host
-		hostPart := netloc
-		if at := strings.LastIndex(hostPart, "@"); at >= 0 {
-			hostPart = hostPart[at+1:]
-		}
-		if !strings.Contains(hostPart, ":") {
-			netloc = fmt.Sprintf("%s:%d", netloc, i.DefaultPort)
-		}
-		path := joinURLPath(parsed.Path, i.DefaultPath)
-		return fmt.Sprintf("%s://%s%s", parsed.Scheme, netloc, path)
+	return i.DataPlaneEndpoints.HTTPBase(i.DefaultMaster, i.DefaultPort, i.DefaultPath)
+}
+
+func (i Identity) EndpointFor(protocol HubProtocol) string {
+	if protocol == ProtocolHTTPS {
+		return i.EndpointBase()
 	}
-	return fmt.Sprintf("%s:%d%s", strings.TrimRight(host, "/"), i.DefaultPort, i.DefaultPath)
+	return i.DataPlaneEndpoints.EndpointFor(protocol)
+}
+
+func (i Identity) EnabledProtocols() []HubProtocol {
+	return i.Protocols.EnabledProtocols()
+}
+
+func (i Identity) SupportsProtocol(protocol HubProtocol) bool {
+	return i.Protocols.IsEnabled(protocol)
 }
 
 func (i Identity) Summary() map[string]any {
-	return map[string]any{
+	summary := map[string]any{
 		"site_id":        i.SiteID,
 		"default_master": i.DefaultMaster,
 		"default_port":   i.DefaultPort,
 		"default_path":   i.DefaultPath,
 	}
+	if endpoints := i.DataPlaneEndpoints.Map(true); len(endpoints) > 0 {
+		summary["data_plane_endpoints"] = endpoints
+	}
+	return summary
 }
 
 func value(values map[string]any, keys ...string) any {

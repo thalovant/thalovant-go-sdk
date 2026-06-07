@@ -25,6 +25,69 @@ func TestIdentityFromMapNormalizesAliases(t *testing.T) {
 	}
 }
 
+func TestIdentityUsesProtocolAwareDataPlaneEndpoints(t *testing.T) {
+	identity, err := IdentityFromMap(map[string]any{
+		"key":      "access",
+		"password": "secret",
+		"site":     "site",
+		"host":     "wss://hub.example.com",
+		"port":     443,
+		"path":     "/hivemind/public",
+		"data_plane_endpoints": map[string]any{
+			"https": "https://api.example.com/hivemind/public",
+			"wss":   "wss://socket.example.com/hivemind/public",
+			"mqtt":  "mqtts://mqtt.example.com:8883",
+		},
+		"protocols": map[string]any{
+			"wss":  map[string]any{"enabled": true},
+			"http": map[string]any{"enabled": true},
+			"mqtt": map[string]any{"enabled": true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if identity.EndpointBase() != "https://api.example.com:443/hivemind/public" {
+		t.Fatalf("unexpected endpoint %s", identity.EndpointBase())
+	}
+	if identity.EndpointFor(ProtocolWSS) != "wss://socket.example.com/hivemind/public" {
+		t.Fatalf("unexpected wss endpoint %s", identity.EndpointFor(ProtocolWSS))
+	}
+	if identity.EndpointFor(ProtocolMQTT) != "mqtts://mqtt.example.com:8883" {
+		t.Fatalf("unexpected mqtt endpoint %s", identity.EndpointFor(ProtocolMQTT))
+	}
+	if !identity.SupportsProtocol(ProtocolHTTPS) {
+		t.Fatal("expected https protocol support")
+	}
+	if got := identity.EnabledProtocols(); len(got) != 3 || got[0] != ProtocolWSS || got[1] != ProtocolHTTPS || got[2] != ProtocolMQTT {
+		t.Fatalf("unexpected protocols: %+v", got)
+	}
+}
+
+func TestDataPlaneEndpointsFromHubResource(t *testing.T) {
+	endpoints := DataPlaneEndpointsFromHub(map[string]any{
+		"domain": "jokes.thalovant.io",
+		"spec": map[string]any{
+			"protocols": map[string]any{
+				"wss":  map[string]any{"enabled": true},
+				"http": map[string]any{"enabled": true},
+				"mqtt": map[string]any{"enabled": false},
+			},
+		},
+	})
+
+	if endpoints.WSS != "wss://jokes.thalovant.io" {
+		t.Fatalf("unexpected wss endpoint %s", endpoints.WSS)
+	}
+	if endpoints.HTTPS != "https://jokes.thalovant.io" {
+		t.Fatalf("unexpected https endpoint %s", endpoints.HTTPS)
+	}
+	if endpoints.MQTT != "" {
+		t.Fatalf("unexpected mqtt endpoint %s", endpoints.MQTT)
+	}
+}
+
 func TestRuntimeCryptoKeyTruncates(t *testing.T) {
 	got := string(RuntimeCryptoKey("0123456789abcdef-extra"))
 	if got != "0123456789abcdef" {
