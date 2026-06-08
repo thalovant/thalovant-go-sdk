@@ -34,9 +34,9 @@ func main() {
 ## Status
 
 This is an alpha SDK scaffold with identity, event, session, conversation,
-AES-GCM preshared-key helpers, protocol endpoint helpers, and an HTTP transport
-shape compatible with the Thalovant SDK contract. The live transport targets
-the preshared-key HTTPS HTTP-protocol path used by Thalovant public hubs.
+AES-GCM preshared-key helpers, protocol endpoint helpers, and HTTPS, WSS, and
+MQTT runtime transports. MQTT uses the per-client broker credentials returned by
+the Thalovant API.
 
 ## Protocols
 

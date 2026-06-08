@@ -9,7 +9,7 @@ import (
 
 type Client struct {
 	Identity  Identity
-	Transport *HTTPTransport
+	Transport RuntimeTransport
 }
 
 type ClientOptions struct {
@@ -25,14 +25,23 @@ func NewClientWithOptions(identity Identity, opts ClientOptions) (*Client, error
 	if protocol == "" {
 		protocol = ProtocolHTTPS
 	}
-	if protocol != ProtocolHTTPS {
-		detail := ""
-		if endpoint := identity.EndpointFor(protocol); endpoint != "" {
-			detail = " at " + endpoint
+	switch protocol {
+	case ProtocolHTTPS:
+		return NewClient(identity), nil
+	case ProtocolWSS:
+		if identity.EndpointFor(ProtocolWSS) == "" {
+			return nil, fmt.Errorf("%w: identity does not include a WSS endpoint", ErrProtocol)
 		}
-		return nil, fmt.Errorf("%w: %s is enabled%s, but this SDK runtime currently connects through the HTTPS HiveMind HTTP protocol transport", ErrProtocol, strings.ToUpper(string(protocol)), detail)
+		return &Client{Identity: identity, Transport: NewWSSTransport(identity)}, nil
+	case ProtocolMQTT:
+		transport, err := NewMQTTTransport(identity)
+		if err != nil {
+			return nil, err
+		}
+		return &Client{Identity: identity, Transport: transport}, nil
+	default:
+		return nil, fmt.Errorf("%w: unsupported protocol %s", ErrProtocol, protocol)
 	}
-	return NewClient(identity), nil
 }
 
 func NewClientFromFile(path string) (*Client, error) {
@@ -153,7 +162,7 @@ func (c *Client) Ask(ctx context.Context, text string, opts RequestOptions) (Rep
 		select {
 		case <-ctx.Done():
 			return Reply{}, fmt.Errorf("%w: utterance handling timed out", ErrTimeout)
-		case event := <-c.Transport.BusEvents:
+		case event := <-c.Transport.Events():
 			if !EventMatchesContext(event, eventContext) {
 				continue
 			}

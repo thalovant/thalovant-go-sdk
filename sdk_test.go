@@ -138,7 +138,7 @@ func TestSelectDataPlaneEndpoint(t *testing.T) {
 	}
 }
 
-func TestNewClientWithOptionsRejectsUnsupportedRuntimeProtocol(t *testing.T) {
+func TestNewClientWithOptionsRequiresMQTTCredentials(t *testing.T) {
 	identity, err := IdentityFromMap(map[string]any{
 		"key":      "access",
 		"password": "secret",
@@ -148,8 +148,45 @@ func TestNewClientWithOptionsRejectsUnsupportedRuntimeProtocol(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewClientWithOptions(identity, ClientOptions{Protocol: ProtocolMQTT}); err == nil || !strings.Contains(err.Error(), "unsupported protocol") {
-		t.Fatalf("expected unsupported protocol error, got %v", err)
+	if _, err := NewClientWithOptions(identity, ClientOptions{Protocol: ProtocolMQTT}); err == nil || !strings.Contains(err.Error(), "MQTT") {
+		t.Fatalf("expected MQTT credential error, got %v", err)
+	}
+}
+
+func TestNewClientWithOptionsSelectsWSSAndMQTT(t *testing.T) {
+	identity, err := IdentityFromMap(map[string]any{
+		"key":        "access",
+		"password":   "secret",
+		"crypto_key": "0123456789abcdef",
+		"site":       "site",
+		"host":       "https://hub.example.com",
+		"data_plane_endpoints": map[string]any{
+			"https": "https://hub.example.com",
+			"wss":   "wss://hub.example.com",
+			"mqtt":  "mqtts://mqtt.example.com:8883",
+		},
+		"mqtt": map[string]any{
+			"endpoint":     "mqtts://mqtt.example.com:8883",
+			"username":     "access",
+			"password":     "broker-password",
+			"topic_prefix": "hivemind/hub/access",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client, err := NewClientWithOptions(identity, ClientOptions{Protocol: ProtocolWSS}); err != nil || client.Transport == nil {
+		t.Fatalf("expected WSS client, got client=%v err=%v", client, err)
+	}
+	if client, err := NewClientWithOptions(identity, ClientOptions{Protocol: ProtocolMQTT}); err != nil || client.Transport == nil {
+		t.Fatalf("expected MQTT client, got client=%v err=%v", client, err)
+	}
+	topics, err := MQTTTopicsForIdentity(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if topics.C2S != "hivemind/hub/c2s/access" || topics.S2C != "hivemind/hub/s2c/access" || topics.Status != "hivemind/hub/status/access" {
+		t.Fatalf("unexpected topics: %+v", topics)
 	}
 }
 
@@ -262,6 +299,13 @@ func TestControlPlaneBootstrapPreservesAPIReturnedMQTTCredentials(t *testing.T) 
 	}
 	if result.Identity.EndpointFor(ProtocolMQTT) != "mqtts://broker.thalovant.io:8883" {
 		t.Fatalf("unexpected mqtt endpoint %s", result.Identity.EndpointFor(ProtocolMQTT))
+	}
+	runtime, err := control.RequireRuntimeProtocol(result, ProtocolMQTT)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Protocol != ProtocolMQTT || runtime.Endpoint != "mqtts://broker.thalovant.io:8883" {
+		t.Fatalf("unexpected mqtt runtime endpoint: %+v", runtime)
 	}
 	identity := result.Summary(false)["identity"].(map[string]any)
 	if mqtt := identity["mqtt"].(map[string]any); mqtt["password"] != nil {

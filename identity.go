@@ -27,6 +27,12 @@ type MqttBrokerCredentials struct {
 	Username    string `json:"username"`
 	Password    string `json:"password"`
 	TopicPrefix string `json:"topic_prefix,omitempty"`
+	HubID       string `json:"hub_id,omitempty"`
+	C2STopic    string `json:"c2s_topic,omitempty"`
+	S2CTopic    string `json:"s2c_topic,omitempty"`
+	StatusTopic string `json:"status_topic,omitempty"`
+	HashTopics  bool   `json:"hash_topics,omitempty"`
+	QOS         byte   `json:"qos,omitempty"`
 	TLS         bool   `json:"tls"`
 }
 
@@ -46,6 +52,12 @@ func MqttBrokerCredentialsFromMap(raw any) *MqttBrokerCredentials {
 		Username:    username,
 		Password:    password,
 		TopicPrefix: optional(value(values, "topic_prefix", "topicPrefix")),
+		HubID:       optional(value(values, "hub_id", "hubId")),
+		C2STopic:    optional(value(values, "c2s_topic", "c2sTopic")),
+		S2CTopic:    optional(value(values, "s2c_topic", "s2cTopic")),
+		StatusTopic: optional(value(values, "status_topic", "statusTopic")),
+		HashTopics:  boolValue(value(values, "hash_topics", "hashTopics"), false),
+		QOS:         qosValue(value(values, "qos"), 1),
 		TLS:         boolValue(value(values, "tls"), strings.HasPrefix(endpoint, "mqtts://")),
 	}
 }
@@ -60,6 +72,24 @@ func (m MqttBrokerCredentials) Map(includeSecrets bool) map[string]any {
 		data["password"] = m.Password
 		if m.TopicPrefix != "" {
 			data["topic_prefix"] = m.TopicPrefix
+		}
+		if m.HubID != "" {
+			data["hub_id"] = m.HubID
+		}
+		if m.C2STopic != "" {
+			data["c2s_topic"] = m.C2STopic
+		}
+		if m.S2CTopic != "" {
+			data["s2c_topic"] = m.S2CTopic
+		}
+		if m.StatusTopic != "" {
+			data["status_topic"] = m.StatusTopic
+		}
+		if m.HashTopics {
+			data["hash_topics"] = true
+		}
+		if m.QOS != 1 {
+			data["qos"] = m.QOS
 		}
 	}
 	return data
@@ -99,6 +129,12 @@ func IdentityFromEnv(prefix string) (Identity, error) {
 			"username":     os.Getenv(prefix + "MQTT_USERNAME"),
 			"password":     os.Getenv(prefix + "MQTT_PASSWORD"),
 			"topic_prefix": os.Getenv(prefix + "MQTT_TOPIC_PREFIX"),
+			"hub_id":       os.Getenv(prefix + "MQTT_HUB_ID"),
+			"c2s_topic":    os.Getenv(prefix + "MQTT_C2S_TOPIC"),
+			"s2c_topic":    os.Getenv(prefix + "MQTT_S2C_TOPIC"),
+			"status_topic": os.Getenv(prefix + "MQTT_STATUS_TOPIC"),
+			"hash_topics":  os.Getenv(prefix + "MQTT_HASH_TOPICS"),
+			"qos":          os.Getenv(prefix + "MQTT_QOS"),
 		},
 	})
 }
@@ -242,6 +278,31 @@ func boolValue(raw any, fallback bool) bool {
 			return true
 		case "0", "false", "no", "off":
 			return false
+		}
+	}
+	return fallback
+}
+
+func qosValue(raw any, fallback byte) byte {
+	switch value := raw.(type) {
+	case int:
+		if value == 0 || value == 1 {
+			return byte(value)
+		}
+	case int64:
+		if value == 0 || value == 1 {
+			return byte(value)
+		}
+	case float64:
+		if value == 0 || value == 1 {
+			return byte(value)
+		}
+	case string:
+		switch strings.TrimSpace(value) {
+		case "0":
+			return 0
+		case "1":
+			return 1
 		}
 	}
 	return fallback

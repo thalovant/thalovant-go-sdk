@@ -30,6 +30,14 @@ type HiveMessage struct {
 	SourcePeer   any            `json:"source_peer"`
 }
 
+type RuntimeTransport interface {
+	Connect(ctx context.Context) error
+	Disconnect(ctx context.Context) error
+	Healthcheck() TransportHealth
+	EmitBus(ctx context.Context, eventType string, data Data, eventContext Context) error
+	Events() <-chan Event
+}
+
 type HTTPTransport struct {
 	Identity      Identity
 	UserAgent     string
@@ -130,6 +138,10 @@ func (t *HTTPTransport) EmitBus(ctx context.Context, eventType string, data Data
 		Metadata: map[string]any{},
 		Route:    []any{},
 	}, true)
+}
+
+func (t *HTTPTransport) Events() <-chan Event {
+	return t.BusEvents
 }
 
 func (t *HTTPTransport) IsHandshakeComplete() bool {

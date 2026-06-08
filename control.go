@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const DefaultControlUserAgent = "ThalovantGoSDK/0.2.3"
+const DefaultControlUserAgent = "ThalovantGoSDK/0.2.4"
 
 type ControlPlane struct {
 	APIURL      string
@@ -210,14 +210,14 @@ func (c *ControlPlane) RequireRuntimeProtocol(result BootstrapIdentityResult, pr
 	if protocol == "" {
 		protocol = ProtocolHTTPS
 	}
-	if protocol != ProtocolHTTPS {
-		return nil, fmt.Errorf("%w: %s endpoint metadata is available, but this SDK runtime currently connects through the HTTPS HiveMind HTTP protocol transport", ErrProtocol, strings.ToUpper(string(protocol)))
+	if protocol == ProtocolMQTT && result.Identity.MQTT == nil {
+		return nil, fmt.Errorf("%w: MQTT is enabled, but the API did not return client-scoped MQTT broker credentials", ErrProtocol)
 	}
-	endpoint := result.Identity.EndpointFor(ProtocolHTTPS)
+	endpoint := result.Identity.EndpointFor(protocol)
 	if endpoint == "" {
-		return nil, fmt.Errorf("%w: this hub does not expose an HTTPS endpoint for the SDK runtime", ErrProtocol)
+		return nil, fmt.Errorf("%w: this hub does not expose a %s endpoint for the SDK runtime", ErrProtocol, strings.ToUpper(string(protocol)))
 	}
-	return &SelectedHubEndpoint{Protocol: ProtocolHTTPS, Endpoint: endpoint}, nil
+	return &SelectedHubEndpoint{Protocol: protocol, Endpoint: endpoint}, nil
 }
 
 func (c *ControlPlane) request(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool) (map[string]any, error) {
