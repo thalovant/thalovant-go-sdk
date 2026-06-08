@@ -55,6 +55,27 @@ fmt.Println(identity.EndpointFor(thalovant.ProtocolWSS))
 fmt.Println(identity.EndpointFor(thalovant.ProtocolMQTT))
 ```
 
+You can also create a hub client through the Thalovant API:
+
+```go
+control := thalovant.NewControlPlane("https://dash.thalovant.com/api", "")
+_, _ = control.Login(ctx, "you@example.com", "password", "")
+
+result, err := control.CreateClientIdentityForHubID(ctx, "hub-id", thalovant.BootstrapIdentityOptions{
+	Name: "kiosk-1",
+})
+if err != nil {
+	panic(err)
+}
+
+client := thalovant.NewClient(result.Identity)
+```
+
+The SDK generates `apiKey`, `password`, and `cryptoKey` locally and sends them
+to the API once. The API can store them in Vault and return only secret
+references; `result.Identity` is the usable local client identity. Do not log
+`result.Summary(true)`.
+
 ## Generic Client Context
 
 ```go

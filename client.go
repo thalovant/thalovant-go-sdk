@@ -12,8 +12,27 @@ type Client struct {
 	Transport *HTTPTransport
 }
 
+type ClientOptions struct {
+	Protocol HubProtocol
+}
+
 func NewClient(identity Identity) *Client {
 	return &Client{Identity: identity, Transport: NewHTTPTransport(identity)}
+}
+
+func NewClientWithOptions(identity Identity, opts ClientOptions) (*Client, error) {
+	protocol := opts.Protocol
+	if protocol == "" {
+		protocol = ProtocolHTTPS
+	}
+	if protocol != ProtocolHTTPS {
+		detail := ""
+		if endpoint := identity.EndpointFor(protocol); endpoint != "" {
+			detail = " at " + endpoint
+		}
+		return nil, fmt.Errorf("%w: %s is enabled%s, but this SDK runtime currently connects through the HTTPS HiveMind HTTP protocol transport", ErrProtocol, strings.ToUpper(string(protocol)), detail)
+	}
+	return NewClient(identity), nil
 }
 
 func NewClientFromFile(path string) (*Client, error) {

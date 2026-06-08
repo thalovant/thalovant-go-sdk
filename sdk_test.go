@@ -1,7 +1,11 @@
 package thalovant
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -85,6 +89,88 @@ func TestDataPlaneEndpointsFromHubResource(t *testing.T) {
 	}
 	if endpoints.MQTT != "" {
 		t.Fatalf("unexpected mqtt endpoint %s", endpoints.MQTT)
+	}
+}
+
+func TestSelectDataPlaneEndpoint(t *testing.T) {
+	selected := SelectDataPlaneEndpoint(
+		HubDataPlaneEndpoints{HTTPS: "https://hub.example.com/public", WSS: "wss://hub.example.com/public"},
+		HubProtocolSettings{WSS: true, HTTP: true},
+		[]HubProtocol{ProtocolMQTT, ProtocolWSS, ProtocolHTTPS},
+	)
+	if selected == nil || selected.Protocol != ProtocolWSS || selected.Endpoint != "wss://hub.example.com/public" {
+		t.Fatalf("unexpected selected endpoint: %+v", selected)
+	}
+}
+
+func TestNewClientWithOptionsRejectsUnsupportedRuntimeProtocol(t *testing.T) {
+	identity, err := IdentityFromMap(map[string]any{
+		"key":      "access",
+		"password": "secret",
+		"site":     "site",
+		"host":     "https://hub.example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewClientWithOptions(identity, ClientOptions{Protocol: ProtocolMQTT}); err == nil || !strings.Contains(err.Error(), "unsupported protocol") {
+		t.Fatalf("expected unsupported protocol error, got %v", err)
+	}
+}
+
+func TestControlPlaneBootstrapKeepsGeneratedSecretsLocal(t *testing.T) {
+	var sawAuthorization bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/v1/auth/token":
+			_, _ = w.Write([]byte(`{"access_token":"token","expires_in":3600}`))
+		case "/v1/hubs/hub-1":
+			if r.Header.Get("authorization") == "Bearer token" {
+				sawAuthorization = true
+			}
+			_, _ = w.Write([]byte(`{"id":"hub-1","name":"joke-garden","domain":"jokes.thalovant.io","spec":{"protocols":{"wss":{"enabled":true},"http":{"enabled":true},"mqtt":{"enabled":false}}}}`))
+		case "/v1/clients":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			spec := mapValue(payload["spec"])
+			if spec["apiKey"] == "" || spec["password"] == "" || spec["cryptoKey"] == "" {
+				t.Fatalf("missing generated credentials in payload: %+v", spec)
+			}
+			_, _ = w.Write([]byte(`{"id":"client-1","name":"kiosk","hub_id":"hub-1","spec":{"version":"1","apiKeyRef":{"name":"secret","key":"apiKey"}}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	control := NewControlPlane(server.URL, "")
+	if _, err := control.Login(context.Background(), "ada@example.com", "secret", ""); err != nil {
+		t.Fatal(err)
+	}
+	result, err := control.CreateClientIdentityForHubID(context.Background(), "hub-1", BootstrapIdentityOptions{Name: "kiosk"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !sawAuthorization {
+		t.Fatal("expected authenticated hub request")
+	}
+	if result.Identity.AccessKey == "" || result.Identity.Password == "" || result.Identity.CryptoKey == "" {
+		t.Fatalf("expected local identity secrets: %+v", result.Identity)
+	}
+	if result.Identity.EndpointFor(ProtocolHTTPS) != "https://jokes.thalovant.io:443" {
+		t.Fatalf("unexpected endpoint %s", result.Identity.EndpointFor(ProtocolHTTPS))
+	}
+	if result.SelectedProtocol() != ProtocolHTTPS {
+		t.Fatalf("unexpected selected protocol %s", result.SelectedProtocol())
+	}
+	if _, ok := result.Summary(false)["identity"].(map[string]any)["access_key"]; ok {
+		t.Fatal("summary should redact identity secrets by default")
+	}
+	if _, ok := result.Summary(true)["identity"].(map[string]any)["access_key"]; !ok {
+		t.Fatal("summary should include secrets when requested")
 	}
 }
 

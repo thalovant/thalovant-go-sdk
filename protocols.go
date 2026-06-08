@@ -14,6 +14,13 @@ const (
 	ProtocolMQTT  HubProtocol = "mqtt"
 )
 
+var DefaultProtocolPreference = []HubProtocol{ProtocolHTTPS, ProtocolWSS, ProtocolMQTT}
+
+type SelectedHubEndpoint struct {
+	Protocol HubProtocol `json:"protocol"`
+	Endpoint string      `json:"endpoint"`
+}
+
 type HubProtocolSettings struct {
 	WSS  bool `json:"wss"`
 	HTTP bool `json:"http"`
@@ -154,6 +161,22 @@ func (e HubDataPlaneEndpoints) Map(redactCredentials bool) map[string]string {
 		data[key] = endpoint
 	}
 	return data
+}
+
+func SelectDataPlaneEndpoint(endpoints HubDataPlaneEndpoints, protocols HubProtocolSettings, preferred []HubProtocol) *SelectedHubEndpoint {
+	if len(preferred) == 0 {
+		preferred = DefaultProtocolPreference
+	}
+	for _, protocol := range preferred {
+		if !protocols.IsEnabled(protocol) {
+			continue
+		}
+		endpoint := endpoints.EndpointFor(protocol)
+		if endpoint != "" {
+			return &SelectedHubEndpoint{Protocol: protocol, Endpoint: endpoint}
+		}
+	}
+	return nil
 }
 
 func EndpointFromDomain(domain string, protocol HubProtocol) string {
