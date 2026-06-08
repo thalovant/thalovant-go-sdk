@@ -149,7 +149,7 @@ func (t *WSSTransport) handleRawMessage(ctx context.Context, raw []byte) error {
 		return err
 	}
 	switch message.MsgType {
-	case "handshake":
+	case "handshake", "shake":
 		return t.handleHandshake(ctx, message.Payload)
 	case "bus":
 		t.BusEvents <- Event{

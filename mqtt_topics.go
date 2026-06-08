@@ -48,6 +48,10 @@ func MQTTTopicsForIdentity(identity Identity) (MqttTopicSet, error) {
 			} else {
 				base = raw
 			}
+			hubID := strings.Trim(credentials.HubID, "/")
+			if hubID != "" && !containsMQTTSegment(base, hubID) {
+				base += "/" + hubID
+			}
 		}
 	} else if credentials.HubID != "" {
 		base = "hivemind/" + strings.Trim(credentials.HubID, "/")
@@ -69,4 +73,13 @@ func siblingMQTTTopic(topic string, segment string) string {
 		}
 	}
 	return topic
+}
+
+func containsMQTTSegment(topic string, segment string) bool {
+	for _, part := range strings.Split(topic, "/") {
+		if part == segment {
+			return true
+		}
+	}
+	return false
 }

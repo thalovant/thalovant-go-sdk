@@ -17,6 +17,7 @@ func TestIdentityFromMapNormalizesAliases(t *testing.T) {
 		"host":     "https://hub.example.com/",
 		"port":     "443",
 		"path":     "/hivemind/public",
+		"metadata": map[string]any{"thalovant_owner_id": "owner-1"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -26,6 +27,9 @@ func TestIdentityFromMapNormalizesAliases(t *testing.T) {
 	}
 	if identity.EndpointBase() != "https://hub.example.com:443/hivemind/public" {
 		t.Fatalf("unexpected endpoint %s", identity.EndpointBase())
+	}
+	if identity.Metadata["thalovant_owner_id"] != "owner-1" {
+		t.Fatalf("unexpected metadata: %+v", identity.Metadata)
 	}
 }
 
@@ -186,6 +190,32 @@ func TestNewClientWithOptionsSelectsWSSAndMQTT(t *testing.T) {
 		t.Fatal(err)
 	}
 	if topics.C2S != "hivemind/hub/c2s/access" || topics.S2C != "hivemind/hub/s2c/access" || topics.Status != "hivemind/hub/status/access" {
+		t.Fatalf("unexpected topics: %+v", topics)
+	}
+}
+
+func TestMQTTTopicsAppendHubIDForScopedACLs(t *testing.T) {
+	identity, err := IdentityFromMap(map[string]any{
+		"key":      "access",
+		"password": "secret",
+		"site":     "site",
+		"host":     "https://hub.example.com",
+		"mqtt": map[string]any{
+			"endpoint":     "mqtts://mqtt.example.com:8883",
+			"username":     "access",
+			"password":     "broker-password",
+			"topic_prefix": "hivemind",
+			"hub_id":       "hub-1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	topics, err := MQTTTopicsForIdentity(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if topics.C2S != "hivemind/hub-1/c2s/access" || topics.S2C != "hivemind/hub-1/s2c/access" || topics.Status != "hivemind/hub-1/status/access" {
 		t.Fatalf("unexpected topics: %+v", topics)
 	}
 }
@@ -381,6 +411,46 @@ func TestEncryptAsJSONRoundTrips(t *testing.T) {
 	}
 	if decrypted != "hello" {
 		t.Fatalf("unexpected plaintext %q", decrypted)
+	}
+}
+
+func TestEncryptAsBinaryRoundTrips(t *testing.T) {
+	plaintext := []byte("hello")
+	encrypted, err := EncryptAsBinary("0123456789abcdef-extra", plaintext)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decrypted, err := DecryptBinary("0123456789abcdef-extra", encrypted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(decrypted) != string(plaintext) {
+		t.Fatalf("unexpected plaintext %q", string(decrypted))
+	}
+}
+
+func TestHiveBinaryFrameRoundTrips(t *testing.T) {
+	encoded, err := EncodeHiveBinaryFrame(HiveMessage{
+		MsgType: "bus",
+		Payload: map[string]any{
+			"type":    "test.event",
+			"data":    map[string]any{"ok": true},
+			"context": map[string]any{"metadata": map[string]any{"thalovant_owner_id": "owner-1"}},
+		},
+		Metadata: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeHiveBinaryFrame(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if encoded[0] != 0x82 || decoded.MsgType != "bus" {
+		t.Fatalf("unexpected encoded frame or message: %x %+v", encoded[:2], decoded)
+	}
+	if mapValue(decoded.Payload["context"])["metadata"] == nil {
+		t.Fatalf("unexpected decoded payload: %+v", decoded.Payload)
 	}
 }
 

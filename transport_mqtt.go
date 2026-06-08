@@ -76,7 +76,7 @@ func (t *MQTTTransport) Connect(ctx context.Context) error {
 	t.mu.Lock()
 	t.connected = true
 	t.mu.Unlock()
-	if err := t.sendHiveMessage(ctx, helloHiveMessage(t.Identity, "thalovant-go-mqtt-"), false); err != nil {
+	if err := t.sendHiveMessage(ctx, helloHiveMessage(t.Identity, "thalovant-go-mqtt-"), true); err != nil {
 		return err
 	}
 	deadline := time.Now().Add(6 * time.Second)
@@ -132,23 +132,12 @@ func (t *MQTTTransport) IsHandshakeComplete() bool {
 }
 
 func (t *MQTTTransport) handleRawMessage(ctx context.Context, raw []byte) error {
-	rawBytes := raw
-	var encrypted map[string]any
-	if err := json.Unmarshal(raw, &encrypted); err == nil {
-		if _, ok := encrypted["ciphertext"]; ok && t.Identity.CryptoKey != "" {
-			decrypted, err := DecryptFromJSON(t.Identity.CryptoKey, string(raw))
-			if err != nil {
-				return err
-			}
-			rawBytes = []byte(decrypted)
-		}
-	}
-	var message HiveMessage
-	if err := json.Unmarshal(rawBytes, &message); err != nil {
+	message, err := decodeMQTTHiveMessage(t.Identity, raw)
+	if err != nil {
 		return err
 	}
 	switch message.MsgType {
-	case "handshake":
+	case "handshake", "shake":
 		return t.handleHandshake(ctx, message.Payload)
 	case "bus":
 		t.BusEvents <- Event{
@@ -166,9 +155,6 @@ func (t *MQTTTransport) handleHandshake(ctx context.Context, payload map[string]
 		if RuntimeCryptoKey(t.Identity.CryptoKey) == nil {
 			return fmt.Errorf("%w: HiveMind requested preshared key but identity crypto_key is missing", ErrConnection)
 		}
-		if err := t.sendHiveMessage(ctx, helloHiveMessage(t.Identity, "thalovant-go-mqtt-"), false); err != nil {
-			return err
-		}
 		t.mu.Lock()
 		t.handshake = true
 		t.mu.Unlock()
@@ -177,19 +163,55 @@ func (t *MQTTTransport) handleHandshake(ctx context.Context, payload map[string]
 	return fmt.Errorf("%w: only preshared-key HiveMind MQTT handshakes are supported", ErrConnection)
 }
 
-func (t *MQTTTransport) sendHiveMessage(ctx context.Context, message HiveMessage, encrypt bool) error {
+func (t *MQTTTransport) sendHiveMessage(ctx context.Context, message HiveMessage, _ bool) error {
 	if t.client == nil || !t.client.IsConnected() {
 		return fmt.Errorf("%w: HiveMind MQTT transport is not connected", ErrConnection)
 	}
-	payload, err := serializeHiveMessage(t.Identity, t.IsHandshakeComplete(), message, encrypt)
+	payload, err := EncodeHiveBinaryFrame(message)
 	if err != nil {
 		return err
+	}
+	if strings.TrimSpace(t.Identity.CryptoKey) != "" {
+		payload, err = EncryptAsBinary(t.Identity.CryptoKey, payload)
+		if err != nil {
+			return err
+		}
 	}
 	qos := byte(1)
 	if t.Identity.MQTT != nil {
 		qos = t.Identity.MQTT.QOS
 	}
 	return waitMQTTToken(ctx, t.client.Publish(t.Topics.C2S, qos, false, payload), "MQTT publish")
+}
+
+func decodeMQTTHiveMessage(identity Identity, raw []byte) (HiveMessage, error) {
+	var message HiveMessage
+	var parsed map[string]any
+	if err := json.Unmarshal(raw, &parsed); err == nil {
+		if _, ok := parsed["ciphertext"]; ok && strings.TrimSpace(identity.CryptoKey) != "" {
+			decrypted, err := DecryptFromJSON(identity.CryptoKey, string(raw))
+			if err != nil {
+				return HiveMessage{}, err
+			}
+			if err := json.Unmarshal([]byte(decrypted), &message); err != nil {
+				return HiveMessage{}, err
+			}
+			return message, nil
+		}
+		if _, ok := parsed["msg_type"]; ok {
+			if err := json.Unmarshal(raw, &message); err != nil {
+				return HiveMessage{}, err
+			}
+			return message, nil
+		}
+	}
+	if strings.TrimSpace(identity.CryptoKey) != "" {
+		decrypted, err := DecryptBinary(identity.CryptoKey, raw)
+		if err == nil {
+			return DecodeHiveBinaryFrame(decrypted)
+		}
+	}
+	return DecodeHiveBinaryFrame(raw)
 }
 
 func pahoBrokerURL(endpoint string) (string, error) {

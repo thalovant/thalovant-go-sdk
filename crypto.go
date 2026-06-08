@@ -17,6 +17,8 @@ type encryptedJSON struct {
 	Nonce      string `json:"nonce"`
 }
 
+const binaryNonceSize = 16
+
 func RuntimeCryptoKey(raw string) []byte {
 	normalized := strings.TrimSpace(raw)
 	if normalized == "" {
@@ -84,4 +86,47 @@ func DecryptFromJSON(key string, raw string) (string, error) {
 		return "", fmt.Errorf("decrypt HiveMind JSON payload: %w", err)
 	}
 	return string(plaintext), nil
+}
+
+func EncryptAsBinary(key string, plaintext []byte) ([]byte, error) {
+	runtimeKey := RuntimeCryptoKey(key)
+	block, err := aes.NewCipher(runtimeKey)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCMWithNonceSize(block, binaryNonceSize)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, binaryNonceSize)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, err
+	}
+	sealed := gcm.Seal(nil, nonce, plaintext, nil)
+	out := make([]byte, 0, len(nonce)+len(sealed))
+	out = append(out, nonce...)
+	out = append(out, sealed...)
+	return out, nil
+}
+
+func DecryptBinary(key string, payload []byte) ([]byte, error) {
+	runtimeKey := RuntimeCryptoKey(key)
+	block, err := aes.NewCipher(runtimeKey)
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCMWithNonceSize(block, binaryNonceSize)
+	if err != nil {
+		return nil, err
+	}
+	if len(payload) <= binaryNonceSize+gcm.Overhead() {
+		return nil, fmt.Errorf("decrypt HiveMind binary payload: invalid payload length")
+	}
+	nonce := payload[:binaryNonceSize]
+	ciphertext := payload[binaryNonceSize:]
+	plaintext, err := gcm.Open(nil, nonce, ciphertext, nil)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt HiveMind binary payload: %w", err)
+	}
+	return plaintext, nil
 }

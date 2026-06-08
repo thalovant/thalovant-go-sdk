@@ -73,7 +73,22 @@ func (c *Client) Healthcheck() TransportHealth {
 }
 
 func (c *Client) Emit(ctx context.Context, eventType string, data Data, eventContext Context) error {
-	return c.Transport.EmitBus(ctx, eventType, data, eventContext)
+	return c.Transport.EmitBus(ctx, eventType, data, c.contextWithIdentityMetadata(eventContext))
+}
+
+func (c *Client) contextWithIdentityMetadata(eventContext Context) Context {
+	if len(c.Identity.Metadata) == 0 {
+		return eventContext
+	}
+	context := MergeContext(eventContext, nil)
+	metadata := mapValue(context["metadata"])
+	for key, value := range c.Identity.Metadata {
+		if _, exists := metadata[key]; !exists {
+			metadata[key] = value
+		}
+	}
+	context["metadata"] = metadata
+	return context
 }
 
 func (c *Client) SendUtterance(ctx context.Context, text string, opts RequestOptions) error {

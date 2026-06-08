@@ -17,6 +17,7 @@ type Identity struct {
 	DefaultPort        int                    `json:"default_port"`
 	DefaultPath        string                 `json:"default_path,omitempty"`
 	PublicKey          string                 `json:"public_key,omitempty"`
+	Metadata           map[string]any         `json:"metadata,omitempty"`
 	DataPlaneEndpoints HubDataPlaneEndpoints  `json:"data_plane_endpoints,omitempty"`
 	Protocols          HubProtocolSettings    `json:"protocols,omitempty"`
 	MQTT               *MqttBrokerCredentials `json:"mqtt,omitempty"`
@@ -156,6 +157,7 @@ func IdentityFromMap(values map[string]any) (Identity, error) {
 		DefaultPort:        port,
 		DefaultPath:        normalizePath(optional(value(values, "default_path", "defaultPath", "hub_http_path", "path", "uri_path"))),
 		PublicKey:          optional(value(values, "public_key", "publicKey")),
+		Metadata:           cloneMap(mapFromAny(values["metadata"])),
 		DataPlaneEndpoints: DataPlaneEndpointsFromMap(values),
 		Protocols:          ProtocolSettingsFromMap(values),
 		MQTT:               MqttBrokerCredentialsFromMap(values["mqtt"]),
@@ -194,6 +196,9 @@ func (i Identity) Summary() map[string]any {
 	}
 	if endpoints := i.DataPlaneEndpoints.Map(true); len(endpoints) > 0 {
 		summary["data_plane_endpoints"] = endpoints
+	}
+	if len(i.Metadata) > 0 {
+		summary["metadata"] = cloneMap(i.Metadata)
 	}
 	if i.MQTT != nil {
 		summary["mqtt"] = i.MQTT.Map(false)
