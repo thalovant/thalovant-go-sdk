@@ -41,7 +41,9 @@ the preshared-key HTTPS HTTP-protocol path used by Thalovant public hubs.
 ## Protocols
 
 Identity or hub payloads may include `data_plane_endpoints` for `https`, `wss`,
-and `mqtt`, plus `protocols.wss/http/mqtt.enabled` flags.
+and `mqtt`, plus `protocols.wss/http/mqtt.enabled` flags. When MQTT is enabled
+for the hub, identity payloads may also include a client-scoped `mqtt` block
+with `endpoint`, `username`, `password`, and `topic_prefix`.
 
 ```go
 identity, err := thalovant.IdentityFromFile("_identity.json")
@@ -73,8 +75,8 @@ client := thalovant.NewClient(result.Identity)
 
 The SDK generates `apiKey`, `password`, and `cryptoKey` locally and sends them
 to the API once. The API can store them in Vault and return only secret
-references; `result.Identity` is the usable local client identity. Do not log
-`result.Summary(true)`.
+references. When MQTT is enabled, `result.Identity.MQTT` contains the broker
+credentials returned by the API. Do not log `result.Summary(true)`.
 
 ## Generic Client Context
 

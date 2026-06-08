@@ -69,6 +69,41 @@ func TestIdentityUsesProtocolAwareDataPlaneEndpoints(t *testing.T) {
 	}
 }
 
+func TestIdentityLoadsMQTTCredentialsAndRedactsByDefault(t *testing.T) {
+	identity, err := IdentityFromMap(map[string]any{
+		"key":      "access",
+		"password": "secret",
+		"site":     "site",
+		"host":     "wss://hub.example.com",
+		"mqtt": map[string]any{
+			"endpoint":     "mqtts://mqtt.example.com:8883",
+			"username":     "access",
+			"password":     "broker-password",
+			"topic_prefix": "hivemind/hub/access",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.MQTT == nil {
+		t.Fatal("expected mqtt credentials")
+	}
+	if identity.MQTT.Endpoint != "mqtts://mqtt.example.com:8883" || identity.MQTT.Username != "access" {
+		t.Fatalf("unexpected mqtt credentials: %+v", identity.MQTT)
+	}
+	redacted := identity.Summary()["mqtt"].(map[string]any)
+	if _, ok := redacted["password"]; ok {
+		t.Fatal("mqtt password should be redacted by default")
+	}
+	if redacted["endpoint"] != "mqtts://mqtt.example.com:8883" || redacted["tls"] != true {
+		t.Fatalf("unexpected redacted mqtt summary: %+v", redacted)
+	}
+	full := identity.MQTT.Map(true)
+	if full["password"] != "broker-password" || full["topic_prefix"] != "hivemind/hub/access" {
+		t.Fatalf("unexpected full mqtt map: %+v", full)
+	}
+}
+
 func TestDataPlaneEndpointsFromHubResource(t *testing.T) {
 	endpoints := DataPlaneEndpointsFromHub(map[string]any{
 		"domain": "jokes.thalovant.io",
@@ -171,6 +206,70 @@ func TestControlPlaneBootstrapKeepsGeneratedSecretsLocal(t *testing.T) {
 	}
 	if _, ok := result.Summary(true)["identity"].(map[string]any)["access_key"]; !ok {
 		t.Fatal("summary should include secrets when requested")
+	}
+}
+
+func TestControlPlaneBootstrapPreservesAPIReturnedMQTTCredentials(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/v1/hubs/hub-mqtt":
+			_, _ = w.Write([]byte(`{"id":"hub-mqtt","name":"mqtt-hub","domain":"mqtt.thalovant.io","data_plane_endpoints":{"https":"https://mqtt.thalovant.io","wss":"wss://mqtt.thalovant.io","mqtt":"mqtts://broker.thalovant.io:8883"},"spec":{"protocols":{"wss":{"enabled":true},"http":{"enabled":true},"mqtt":{"enabled":true,"brokerUrl":"mqtts://broker.thalovant.io:8883"}}}}`))
+		case "/v1/clients":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			spec := mapValue(payload["spec"])
+			response := map[string]any{
+				"id":     "client-mqtt",
+				"name":   payload["name"],
+				"hub_id": payload["hub_id"],
+				"spec":   map[string]any{"version": "1", "apiKeyRef": map[string]any{"name": "secret", "key": "apiKey"}},
+				"initial_identify": map[string]any{
+					"access_key":     spec["apiKey"],
+					"password":       spec["password"],
+					"crypto_key":     spec["cryptoKey"],
+					"site_id":        spec["siteId"],
+					"default_master": "wss://mqtt.thalovant.io",
+					"mqtt": map[string]any{
+						"endpoint":     "mqtts://broker.thalovant.io:8883",
+						"username":     spec["apiKey"],
+						"password":     "broker-password",
+						"topic_prefix": "hivemind/hub-mqtt/" + optional(spec["apiKey"]),
+					},
+				},
+			}
+			if err := json.NewEncoder(w).Encode(response); err != nil {
+				t.Fatal(err)
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	control := NewControlPlane(server.URL, "token")
+	result, err := control.CreateClientIdentityForHubID(context.Background(), "hub-mqtt", BootstrapIdentityOptions{Name: "kiosk"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Identity.MQTT == nil {
+		t.Fatal("expected mqtt credentials")
+	}
+	if result.Identity.MQTT.Endpoint != "mqtts://broker.thalovant.io:8883" || result.Identity.MQTT.Password != "broker-password" {
+		t.Fatalf("unexpected mqtt credentials: %+v", result.Identity.MQTT)
+	}
+	if result.Identity.EndpointFor(ProtocolMQTT) != "mqtts://broker.thalovant.io:8883" {
+		t.Fatalf("unexpected mqtt endpoint %s", result.Identity.EndpointFor(ProtocolMQTT))
+	}
+	identity := result.Summary(false)["identity"].(map[string]any)
+	if mqtt := identity["mqtt"].(map[string]any); mqtt["password"] != nil {
+		t.Fatalf("mqtt password should be redacted by default: %+v", mqtt)
+	}
+	identity = result.Summary(true)["identity"].(map[string]any)
+	if mqtt := identity["mqtt"].(map[string]any); mqtt["password"] != "broker-password" {
+		t.Fatalf("mqtt password should be included with secrets: %+v", mqtt)
 	}
 }
 

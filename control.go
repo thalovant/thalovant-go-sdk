@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const DefaultControlUserAgent = "ThalovantGoSDK/0.2.2"
+const DefaultControlUserAgent = "ThalovantGoSDK/0.2.3"
 
 type ControlPlane struct {
 	APIURL      string
@@ -154,15 +154,25 @@ func (c *ControlPlane) CreateClientIdentity(ctx context.Context, hub map[string]
 	if err != nil {
 		return BootstrapIdentityResult{}, err
 	}
-	identity := Identity{
-		AccessKey:          apiKey,
-		Password:           password,
-		CryptoKey:          cryptoKey,
-		SiteID:             siteID,
-		DefaultMaster:      defaultMaster,
-		DefaultPort:        443,
-		DataPlaneEndpoints: endpoints,
-		Protocols:          protocols,
+	var identity Identity
+	if initialIdentify := mapFromAny(client["initial_identify"]); initialIdentify != nil {
+		initialIdentify["data_plane_endpoints"] = endpoints.Map(false)
+		initialIdentify["protocols"] = protocols.SpecMap()
+		identity, err = IdentityFromMap(initialIdentify)
+		if err != nil {
+			return BootstrapIdentityResult{}, err
+		}
+	} else {
+		identity = Identity{
+			AccessKey:          apiKey,
+			Password:           password,
+			CryptoKey:          cryptoKey,
+			SiteID:             siteID,
+			DefaultMaster:      defaultMaster,
+			DefaultPort:        443,
+			DataPlaneEndpoints: endpoints,
+			Protocols:          protocols,
+		}
 	}
 	return BootstrapIdentityResult{Identity: identity, Hub: hub, Client: client, Endpoint: selected}, nil
 }
@@ -180,6 +190,9 @@ func (r BootstrapIdentityResult) Summary(includeSecrets bool) map[string]any {
 		identity["access_key"] = r.Identity.AccessKey
 		identity["password"] = r.Identity.Password
 		identity["crypto_key"] = r.Identity.CryptoKey
+		if r.Identity.MQTT != nil {
+			identity["mqtt"] = r.Identity.MQTT.Map(true)
+		}
 	}
 	summary := map[string]any{
 		"identity":          identity,

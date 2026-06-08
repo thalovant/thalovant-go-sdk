@@ -9,16 +9,60 @@ import (
 )
 
 type Identity struct {
-	AccessKey          string                `json:"access_key"`
-	Password           string                `json:"password"`
-	CryptoKey          string                `json:"crypto_key,omitempty"`
-	SiteID             string                `json:"site_id"`
-	DefaultMaster      string                `json:"default_master"`
-	DefaultPort        int                   `json:"default_port"`
-	DefaultPath        string                `json:"default_path,omitempty"`
-	PublicKey          string                `json:"public_key,omitempty"`
-	DataPlaneEndpoints HubDataPlaneEndpoints `json:"data_plane_endpoints,omitempty"`
-	Protocols          HubProtocolSettings   `json:"protocols,omitempty"`
+	AccessKey          string                 `json:"access_key"`
+	Password           string                 `json:"password"`
+	CryptoKey          string                 `json:"crypto_key,omitempty"`
+	SiteID             string                 `json:"site_id"`
+	DefaultMaster      string                 `json:"default_master"`
+	DefaultPort        int                    `json:"default_port"`
+	DefaultPath        string                 `json:"default_path,omitempty"`
+	PublicKey          string                 `json:"public_key,omitempty"`
+	DataPlaneEndpoints HubDataPlaneEndpoints  `json:"data_plane_endpoints,omitempty"`
+	Protocols          HubProtocolSettings    `json:"protocols,omitempty"`
+	MQTT               *MqttBrokerCredentials `json:"mqtt,omitempty"`
+}
+
+type MqttBrokerCredentials struct {
+	Endpoint    string `json:"endpoint"`
+	Username    string `json:"username"`
+	Password    string `json:"password"`
+	TopicPrefix string `json:"topic_prefix,omitempty"`
+	TLS         bool   `json:"tls"`
+}
+
+func MqttBrokerCredentialsFromMap(raw any) *MqttBrokerCredentials {
+	values := mapFromAny(raw)
+	if values == nil {
+		return nil
+	}
+	endpoint := optional(value(values, "endpoint", "broker_url", "brokerUrl"))
+	username := optional(value(values, "username", "broker_username", "brokerUsername"))
+	password := optional(value(values, "password", "broker_password", "brokerPassword"))
+	if endpoint == "" || username == "" || password == "" {
+		return nil
+	}
+	return &MqttBrokerCredentials{
+		Endpoint:    endpoint,
+		Username:    username,
+		Password:    password,
+		TopicPrefix: optional(value(values, "topic_prefix", "topicPrefix")),
+		TLS:         boolValue(value(values, "tls"), strings.HasPrefix(endpoint, "mqtts://")),
+	}
+}
+
+func (m MqttBrokerCredentials) Map(includeSecrets bool) map[string]any {
+	data := map[string]any{
+		"endpoint": m.Endpoint,
+		"tls":      m.TLS,
+	}
+	if includeSecrets {
+		data["username"] = m.Username
+		data["password"] = m.Password
+		if m.TopicPrefix != "" {
+			data["topic_prefix"] = m.TopicPrefix
+		}
+	}
+	return data
 }
 
 func IdentityFromFile(path string) (Identity, error) {
@@ -50,6 +94,12 @@ func IdentityFromEnv(prefix string) (Identity, error) {
 			"wss":   firstNonEmpty(os.Getenv(prefix+"HUB_WSS_HOST"), os.Getenv(prefix+"HUB_WEBSOCKET_HOST")),
 			"mqtt":  os.Getenv(prefix + "HUB_MQTT_HOST"),
 		},
+		"mqtt": map[string]any{
+			"endpoint":     firstNonEmpty(os.Getenv(prefix+"MQTT_ENDPOINT"), os.Getenv(prefix+"HUB_MQTT_HOST")),
+			"username":     os.Getenv(prefix + "MQTT_USERNAME"),
+			"password":     os.Getenv(prefix + "MQTT_PASSWORD"),
+			"topic_prefix": os.Getenv(prefix + "MQTT_TOPIC_PREFIX"),
+		},
 	})
 }
 
@@ -72,6 +122,7 @@ func IdentityFromMap(values map[string]any) (Identity, error) {
 		PublicKey:          optional(value(values, "public_key", "publicKey")),
 		DataPlaneEndpoints: DataPlaneEndpointsFromMap(values),
 		Protocols:          ProtocolSettingsFromMap(values),
+		MQTT:               MqttBrokerCredentialsFromMap(values["mqtt"]),
 	}
 	if identity.AccessKey == "" || identity.Password == "" || identity.SiteID == "" || identity.DefaultMaster == "" {
 		return Identity{}, ErrIdentity
@@ -107,6 +158,9 @@ func (i Identity) Summary() map[string]any {
 	}
 	if endpoints := i.DataPlaneEndpoints.Map(true); len(endpoints) > 0 {
 		summary["data_plane_endpoints"] = endpoints
+	}
+	if i.MQTT != nil {
+		summary["mqtt"] = i.MQTT.Map(false)
 	}
 	return summary
 }
@@ -170,6 +224,27 @@ func normalizePath(path string) string {
 		return ""
 	}
 	return "/" + path
+}
+
+func boolValue(raw any, fallback bool) bool {
+	switch value := raw.(type) {
+	case bool:
+		return value
+	case int:
+		return value != 0
+	case int64:
+		return value != 0
+	case float64:
+		return value != 0
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "1", "true", "yes", "on":
+			return true
+		case "0", "false", "no", "off":
+			return false
+		}
+	}
+	return fallback
 }
 
 func joinURLPath(parts ...string) string {
