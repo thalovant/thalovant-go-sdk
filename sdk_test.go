@@ -276,6 +276,48 @@ func TestControlPlaneBootstrapKeepsGeneratedSecretsLocal(t *testing.T) {
 	}
 }
 
+func TestControlPlaneListsPublicHubsWithoutAuth(t *testing.T) {
+	var sawPublicList bool
+	var sawPublicDetail bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if r.Header.Get("authorization") != "" {
+			t.Fatalf("public routes should not send authorization header")
+		}
+		switch r.URL.Path {
+		case "/v1/public/hubs":
+			sawPublicList = true
+			if r.URL.Query().Get("limit") != "12" {
+				t.Fatalf("unexpected limit query %q", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"data":[{"id":"hub-public","name":"joke-garden","slug":"joke-garden","title":"Joke Garden"}],"meta":{"count":1,"next":null},"links":{"next":null}}`))
+		case "/v1/public/hubs/joke-garden":
+			sawPublicDetail = true
+			_, _ = w.Write([]byte(`{"id":"hub-public","name":"joke-garden","slug":"joke-garden","title":"Joke Garden"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	control := NewControlPlane(server.URL, "token")
+	page, err := control.ListPublicHubs(context.Background(), 12, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub, err := control.GetPublicHub(context.Background(), "joke-garden")
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := page["data"].([]any)
+	if mapValue(items[0])["slug"] != "joke-garden" || hub["title"] != "Joke Garden" {
+		t.Fatalf("unexpected public hub payloads page=%+v hub=%+v", page, hub)
+	}
+	if !sawPublicList || !sawPublicDetail {
+		t.Fatalf("expected both public routes list=%v detail=%v", sawPublicList, sawPublicDetail)
+	}
+}
+
 func TestControlPlaneBootstrapPreservesAPIReturnedMQTTCredentials(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")

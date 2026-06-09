@@ -63,6 +63,15 @@ You can also create a hub client through the Thalovant API:
 control := thalovant.NewControlPlane("https://dash.thalovant.com/api", "")
 _, _ = control.Login(ctx, "you@example.com", "password", "")
 
+publicHubs, err := control.ListPublicHubs(ctx, 12, "")
+if err != nil {
+	panic(err)
+}
+for _, raw := range publicHubs["data"].([]any) {
+	hub := raw.(map[string]any)
+	fmt.Println(hub["slug"], hub["title"])
+}
+
 result, err := control.CreateClientIdentityForHubID(ctx, "hub-id", thalovant.BootstrapIdentityOptions{
 	Name: "kiosk-1",
 })

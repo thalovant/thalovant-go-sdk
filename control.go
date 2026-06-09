@@ -13,7 +13,7 @@ import (
 	"strings"
 )
 
-const DefaultControlUserAgent = "ThalovantGoSDK/0.2.4"
+const DefaultControlUserAgent = "ThalovantGoSDK/0.2.6"
 
 type ControlPlane struct {
 	APIURL      string
@@ -79,8 +79,23 @@ func (c *ControlPlane) ListHubs(ctx context.Context, limit int, cursor string, o
 	return c.request(ctx, http.MethodGet, "/v1/hubs?"+query.Encode(), nil, nil, true)
 }
 
+func (c *ControlPlane) ListPublicHubs(ctx context.Context, limit int, cursor string) (map[string]any, error) {
+	if limit <= 0 {
+		limit = 24
+	}
+	query := url.Values{"limit": []string{fmt.Sprint(limit)}}
+	if cursor != "" {
+		query.Set("cursor", cursor)
+	}
+	return c.request(ctx, http.MethodGet, "/v1/public/hubs?"+query.Encode(), nil, nil, false)
+}
+
 func (c *ControlPlane) GetHub(ctx context.Context, hubID string) (map[string]any, error) {
 	return c.request(ctx, http.MethodGet, "/v1/hubs/"+url.PathEscape(hubID), nil, nil, true)
+}
+
+func (c *ControlPlane) GetPublicHub(ctx context.Context, hubRef string) (map[string]any, error) {
+	return c.request(ctx, http.MethodGet, "/v1/public/hubs/"+url.PathEscape(hubRef), nil, nil, false)
 }
 
 func (c *ControlPlane) CreateClient(ctx context.Context, payload map[string]any, idempotencyKey string) (map[string]any, error) {
