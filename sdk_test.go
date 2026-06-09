@@ -276,6 +276,21 @@ func TestControlPlaneBootstrapKeepsGeneratedSecretsLocal(t *testing.T) {
 	}
 }
 
+func TestControlPlaneDefaultAPIURLAndV1Normalization(t *testing.T) {
+	if got := NewDefaultControlPlane("").APIURL; got != "https://api.thalovant.com/" {
+		t.Fatalf("unexpected default API URL %q", got)
+	}
+	if got := NewControlPlane("", "").APIURL; got != "https://api.thalovant.com/" {
+		t.Fatalf("unexpected empty API URL %q", got)
+	}
+	if got := NewControlPlane("https://api.thalovant.com/v1", "").APIURL; got != "https://api.thalovant.com/" {
+		t.Fatalf("unexpected normalized API URL %q", got)
+	}
+	if got := NewControlPlane("https://dash.example.com/api/v1", "").APIURL; got != "https://dash.example.com/api/" {
+		t.Fatalf("unexpected dashboard-compatible API URL %q", got)
+	}
+}
+
 func TestControlPlaneListsPublicHubsWithoutAuth(t *testing.T) {
 	var sawPublicList bool
 	var sawPublicDetail bool

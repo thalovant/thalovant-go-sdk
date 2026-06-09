@@ -34,7 +34,7 @@ import (
 
 func main() {
 	ctx := context.Background()
-	control := thalovant.NewControlPlane("https://dash.thalovant.com/api", "")
+	control := thalovant.NewDefaultControlPlane("")
 
 	// Public hub discovery does not require auth.
 	publicHubs, err := control.ListPublicHubs(ctx, 12, "")
@@ -71,9 +71,12 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Println(reply.Text)
+fmt.Println(reply.Text)
 }
 ```
+
+`NewDefaultControlPlane` uses `https://api.thalovant.com`. Use
+`NewControlPlane` only for local development or a self-hosted control plane.
 
 Keep `result.Identity` secret. It contains the client credentials used by the
 hub. Do not log `result.Summary(true)`.
@@ -83,7 +86,7 @@ hub. Do not log `result.Summary(true)`.
 Authenticated accounts can list owned or visible hubs:
 
 ```go
-control := thalovant.NewControlPlane("https://dash.thalovant.com/api", "")
+control := thalovant.NewDefaultControlPlane("")
 _, _ = control.Login(ctx, "you@example.com", "password", "")
 
 page, err := control.ListHubs(ctx, 50, "", "")
@@ -253,7 +256,8 @@ for _, item := range items {
 
 ## API Shape
 
-- `NewControlPlane(apiURL, accessToken)`
+- `NewDefaultControlPlane(accessToken)`
+- `NewControlPlane(apiURL, accessToken)` for local or self-hosted control planes
 - `control.Login(ctx, email, password, scope)`
 - `control.ListPublicHubs(ctx, limit, cursor)`
 - `control.GetPublicHub(ctx, hubRef)`

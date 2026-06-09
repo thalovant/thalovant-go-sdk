@@ -13,7 +13,10 @@ import (
 	"strings"
 )
 
-const DefaultControlUserAgent = "ThalovantGoSDK/0.2.6"
+const (
+	DefaultControlAPIURL    = "https://api.thalovant.com"
+	DefaultControlUserAgent = "ThalovantGoSDK/0.2.7"
+)
 
 type ControlPlane struct {
 	APIURL      string
@@ -41,11 +44,15 @@ type BootstrapIdentityResult struct {
 
 func NewControlPlane(apiURL string, accessToken string) *ControlPlane {
 	return &ControlPlane{
-		APIURL:      strings.TrimRight(apiURL, "/") + "/",
+		APIURL:      normalizeControlAPIURL(apiURL),
 		AccessToken: accessToken,
 		UserAgent:   DefaultControlUserAgent,
 		HTTPClient:  http.DefaultClient,
 	}
+}
+
+func NewDefaultControlPlane(accessToken string) *ControlPlane {
+	return NewControlPlane(DefaultControlAPIURL, accessToken)
 }
 
 func (c *ControlPlane) Login(ctx context.Context, email string, password string, scope string) (map[string]any, error) {
@@ -284,6 +291,15 @@ func newControlSecret() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+func normalizeControlAPIURL(apiURL string) string {
+	normalized := strings.TrimRight(strings.TrimSpace(apiURL), "/")
+	if normalized == "" {
+		normalized = DefaultControlAPIURL
+	}
+	normalized = strings.TrimSuffix(normalized, "/v1")
+	return strings.TrimRight(normalized, "/") + "/"
 }
 
 func cleanSiteID(value string) string {
