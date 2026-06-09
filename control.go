@@ -15,7 +15,7 @@ import (
 
 const (
 	DefaultControlAPIURL    = "https://api.thalovant.com"
-	DefaultControlUserAgent = "ThalovantGoSDK/0.2.7"
+	DefaultControlUserAgent = "ThalovantGoSDK/0.2.9"
 )
 
 type ControlPlane struct {
