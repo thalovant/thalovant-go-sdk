@@ -2,6 +2,7 @@ package thalovant
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -41,7 +42,7 @@ func (t *MQTTTransport) Connect(ctx context.Context) error {
 	if t.Identity.MQTT == nil {
 		return fmt.Errorf("%w: identity does not include MQTT broker credentials", ErrProtocol)
 	}
-	brokerURL, err := pahoBrokerURL(t.Identity.MQTT.Endpoint)
+	brokerURL, err := pahoBrokerURL(t.Identity.MQTT.Endpoint, t.Identity.MQTT.TLS)
 	if err != nil {
 		return err
 	}
@@ -53,6 +54,9 @@ func (t *MQTTTransport) Connect(ctx context.Context) error {
 	opts.SetCleanSession(true)
 	opts.SetKeepAlive(60 * time.Second)
 	opts.SetAutoReconnect(true)
+	if t.Identity.MQTT.TLS {
+		opts.SetTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12})
+	}
 	opts.SetWill(t.Topics.Status, "offline", 1, true)
 	opts.SetDefaultPublishHandler(func(_ mqtt.Client, message mqtt.Message) {
 		if err := t.handleRawMessage(context.Background(), message.Payload()); err != nil {
@@ -214,17 +218,29 @@ func decodeMQTTHiveMessage(identity Identity, raw []byte) (HiveMessage, error) {
 	return DecodeHiveBinaryFrame(raw)
 }
 
-func pahoBrokerURL(endpoint string) (string, error) {
+func pahoBrokerURL(endpoint string, tlsEnabled bool) (string, error) {
 	parsed, err := url.Parse(endpoint)
 	if err != nil {
 		return "", err
 	}
 	switch parsed.Scheme {
 	case "mqtt":
-		parsed.Scheme = "tcp"
-	case "mqtts":
+		if tlsEnabled {
+			parsed.Scheme = "ssl"
+		} else {
+			parsed.Scheme = "tcp"
+		}
+	case "mqtts", "ssl":
 		parsed.Scheme = "ssl"
-	case "tcp", "ssl", "ws", "wss":
+	case "tcp":
+		if tlsEnabled {
+			parsed.Scheme = "ssl"
+		}
+	case "ws":
+		if tlsEnabled {
+			parsed.Scheme = "wss"
+		}
+	case "wss":
 	default:
 		return "", fmt.Errorf("%w: MQTT endpoint must start with mqtt://, mqtts://, tcp://, ssl://, ws://, or wss://", ErrConnection)
 	}

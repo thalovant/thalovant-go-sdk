@@ -220,6 +220,23 @@ func TestMQTTTopicsAppendHubIDForScopedACLs(t *testing.T) {
 	}
 }
 
+func TestPahoBrokerURLHonorsTLSFlag(t *testing.T) {
+	secure, err := pahoBrokerURL("mqtt://mqtt.example.com", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if secure != "ssl://mqtt.example.com" {
+		t.Fatalf("unexpected secure broker URL %s", secure)
+	}
+	plain, err := pahoBrokerURL("mqtt://mqtt.example.com", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plain != "tcp://mqtt.example.com" {
+		t.Fatalf("unexpected plain broker URL %s", plain)
+	}
+}
+
 func TestControlPlaneBootstrapKeepsGeneratedSecretsLocal(t *testing.T) {
 	var sawAuthorization bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
