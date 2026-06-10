@@ -23,7 +23,11 @@ func NewClient(identity Identity) *Client {
 func NewClientWithOptions(identity Identity, opts ClientOptions) (*Client, error) {
 	protocol := opts.Protocol
 	if protocol == "" {
-		protocol = ProtocolHTTPS
+		selected, err := defaultRuntimeProtocol(identity)
+		if err != nil {
+			return nil, err
+		}
+		protocol = selected
 	}
 	switch protocol {
 	case ProtocolHTTPS:
@@ -49,7 +53,7 @@ func NewClientFromFile(path string) (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewClient(identity), nil
+	return NewClientWithOptions(identity, ClientOptions{})
 }
 
 func NewClientFromEnv() (*Client, error) {
@@ -57,7 +61,35 @@ func NewClientFromEnv() (*Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	return NewClient(identity), nil
+	return NewClientWithOptions(identity, ClientOptions{})
+}
+
+func NewClientFromConfig(path string, profile string) (*Client, error) {
+	identity, err := IdentityFromConfig(path, profile)
+	if err != nil {
+		return nil, err
+	}
+	return NewClientWithOptions(identity, ClientOptions{})
+}
+
+func defaultRuntimeProtocol(identity Identity) (HubProtocol, error) {
+	for _, protocol := range DefaultProtocolPreference {
+		switch protocol {
+		case ProtocolWSS:
+			if identity.SupportsProtocol(ProtocolWSS) && identity.EndpointFor(ProtocolWSS) != "" {
+				return ProtocolWSS, nil
+			}
+		case ProtocolHTTPS:
+			if identity.SupportsProtocol(ProtocolHTTPS) || identity.EndpointFor(ProtocolHTTPS) != "" {
+				return ProtocolHTTPS, nil
+			}
+		case ProtocolMQTT:
+			if identity.SupportsProtocol(ProtocolMQTT) && identity.MQTT != nil {
+				return ProtocolMQTT, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("%w: identity does not include a usable WSS, HTTPS, or MQTT endpoint", ErrProtocol)
 }
 
 func (c *Client) Connect(ctx context.Context) error {

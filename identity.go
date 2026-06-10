@@ -4,9 +4,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
+
+const DefaultConfigFilename = "config.yaml"
 
 type Identity struct {
 	AccessKey          string                 `json:"access_key"`
@@ -108,6 +114,48 @@ func IdentityFromFile(path string) (Identity, error) {
 	return IdentityFromMap(values)
 }
 
+func DefaultConfigPath() (string, error) {
+	if configHome := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); configHome != "" {
+		return filepath.Join(configHome, "thalovant", DefaultConfigFilename), nil
+	}
+	if runtime.GOOS == "windows" {
+		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+			return filepath.Join(appData, "Thalovant", DefaultConfigFilename), nil
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("%w: unable to resolve home directory", ErrIdentity)
+	}
+	return filepath.Join(home, ".config", "thalovant", DefaultConfigFilename), nil
+}
+
+func IdentityFromConfig(path string, profile string) (Identity, error) {
+	if strings.TrimSpace(path) == "" {
+		defaultPath, err := DefaultConfigPath()
+		if err != nil {
+			return Identity{}, err
+		}
+		path = defaultPath
+	}
+	if err := assertSecureConfigFile(path); err != nil {
+		return Identity{}, err
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return Identity{}, fmt.Errorf("%w: unable to read Thalovant config file %s", ErrIdentity, path)
+	}
+	var values map[string]any
+	if err := yaml.Unmarshal(raw, &values); err != nil {
+		return Identity{}, fmt.Errorf("%w: Thalovant config file is not valid YAML", ErrIdentity)
+	}
+	selected, err := identityConfigMap(values, profile)
+	if err != nil {
+		return Identity{}, err
+	}
+	return IdentityFromMap(selected)
+}
+
 func IdentityFromEnv(prefix string) (Identity, error) {
 	if prefix == "" {
 		prefix = "THALOVANT_"
@@ -166,6 +214,39 @@ func IdentityFromMap(values map[string]any) (Identity, error) {
 		return Identity{}, ErrIdentity
 	}
 	return identity, nil
+}
+
+func identityConfigMap(values map[string]any, profile string) (map[string]any, error) {
+	if values == nil {
+		return nil, fmt.Errorf("%w: Thalovant config file must contain a YAML object", ErrIdentity)
+	}
+	if profiles := mapFromAny(values["profiles"]); profiles != nil {
+		profileName := firstNonEmpty(profile, optional(value(values, "profile", "default_profile", "defaultProfile")), "default")
+		selected := mapFromAny(profiles[profileName])
+		if selected == nil {
+			return nil, fmt.Errorf("%w: missing Thalovant config profile %s", ErrIdentity, profileName)
+		}
+		return profileIdentityMap(selected), nil
+	}
+	return profileIdentityMap(values), nil
+}
+
+func profileIdentityMap(values map[string]any) map[string]any {
+	if identity := mapFromAny(values["identity"]); identity != nil {
+		return identity
+	}
+	return values
+}
+
+func assertSecureConfigFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("%w: unable to read Thalovant config file %s", ErrIdentity, path)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("%w: Thalovant config file is too permissive: %s. Run `chmod 600 %s`", ErrIdentity, path, path)
+	}
+	return nil
 }
 
 func (i Identity) EndpointBase() string {

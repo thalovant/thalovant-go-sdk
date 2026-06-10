@@ -71,7 +71,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
-fmt.Println(reply.Text)
+	fmt.Println(reply.Text)
 }
 ```
 
@@ -101,11 +101,38 @@ for _, raw := range page["data"].([]any) {
 
 ## Use An Existing Identity
 
-If you already downloaded an identity from the dashboard or stored one from a
-previous provisioning step:
+For local development, store one or more identities in the protected SDK config:
+
+```bash
+mkdir -p ~/.config/thalovant
+chmod 700 ~/.config/thalovant
+$EDITOR ~/.config/thalovant/config.yaml
+chmod 600 ~/.config/thalovant/config.yaml
+```
+
+```yaml
+profile: prod
+profiles:
+  prod:
+    identity:
+      access_key: ...
+      password: ...
+      site_id: demo-agent
+      default_master: https://jokes.thalovant.io
+      data_plane_endpoints:
+        wss: wss://jokes.thalovant.io/public
+        https: https://jokes.thalovant.io/public
+        mqtt: mqtts://mqtt.thalovant.com:8883
+      mqtt:
+        endpoint: mqtts://mqtt.thalovant.com:8883
+        username: ...
+        password: ...
+        topic_prefix: hubs/hub-id/clients/client-id
+        tls: true
+```
 
 ```go
-client, err := thalovant.NewClientFromFile("_identity.json")
+client, err := thalovant.NewClientFromConfig("", "prod")
 if err != nil {
 	panic(err)
 }
@@ -118,6 +145,15 @@ if err != nil {
 fmt.Println(reply.Text)
 ```
 
+SDKs reject config files that are readable or writable by other users on Linux
+and macOS. Keep this file out of git.
+
+Raw identity files are supported too:
+
+```go
+client, err := thalovant.NewClientFromFile("_identity.json")
+```
+
 Environment variables are supported too:
 
 ```go
@@ -128,7 +164,7 @@ client, err := thalovant.NewClientFromEnv()
 
 Hubs may expose one or more public data-plane protocols:
 
-- `wss`: secure realtime WebSocket, the default public path.
+- `wss`: secure realtime WebSocket, the default public path and SDK preference.
 - `https`: request/response HTTP protocol exposed as HTTPS.
 - `mqtt`: broker-mediated MQTT over TLS. Requires per-client broker credentials.
 
@@ -265,7 +301,9 @@ for _, item := range items {
 - `control.ListHubs(ctx, limit, cursor, ownerID)`
 - `control.GetHub(ctx, hubID)`
 - `control.CreateClientIdentityForHubID(ctx, hubID, options)`
+- `IdentityFromConfig(path, profile)`
 - `IdentityFromFile(path)`
+- `NewClientFromConfig(path, profile)`
 - `NewClientFromFile(path)`
 - `NewClientFromEnv()`
 - `NewClientWithOptions(identity, ClientOptions{Protocol: ...})`

@@ -14,7 +14,7 @@ const (
 	ProtocolMQTT  HubProtocol = "mqtt"
 )
 
-var DefaultProtocolPreference = []HubProtocol{ProtocolHTTPS, ProtocolWSS, ProtocolMQTT}
+var DefaultProtocolPreference = []HubProtocol{ProtocolWSS, ProtocolHTTPS, ProtocolMQTT}
 
 type SelectedHubEndpoint struct {
 	Protocol HubProtocol `json:"protocol"`

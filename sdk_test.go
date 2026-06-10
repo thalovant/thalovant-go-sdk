@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -108,6 +111,55 @@ func TestIdentityLoadsMQTTCredentialsAndRedactsByDefault(t *testing.T) {
 	}
 }
 
+func TestIdentityFromConfigLoadsYAMLProfile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	raw := []byte(`
+version: 1
+profile: prod
+profiles:
+  prod:
+    identity:
+      access_key: access
+      password: secret
+      site_id: site
+      default_master: https://hub.example.com
+      default_port: 443
+      mqtt:
+        endpoint: mqtts://mqtt.example.com:8883
+        username: access
+        password: broker-password
+        topic_prefix: hivemind/hub/access
+`)
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	identity, err := IdentityFromConfig(path, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.AccessKey != "access" || identity.MQTT == nil || identity.MQTT.Password != "broker-password" {
+		t.Fatalf("unexpected identity from config: %+v", identity)
+	}
+}
+
+func TestIdentityFromConfigRejectsPermissiveFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows ACLs are not represented by POSIX mode bits")
+	}
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(path, []byte("identity: {}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := IdentityFromConfig(path, ""); err == nil || !strings.Contains(err.Error(), "too permissive") {
+		t.Fatalf("expected permissive file error, got %v", err)
+	}
+}
+
 func TestDataPlaneEndpointsFromHubResource(t *testing.T) {
 	endpoints := DataPlaneEndpointsFromHub(map[string]any{
 		"domain": "jokes.thalovant.io",
@@ -179,6 +231,13 @@ func TestNewClientWithOptionsSelectsWSSAndMQTT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	autoClient, err := NewClientWithOptions(identity, ClientOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := autoClient.Transport.(*WSSTransport); !ok {
+		t.Fatalf("expected default WSS transport, got %T", autoClient.Transport)
+	}
 	if client, err := NewClientWithOptions(identity, ClientOptions{Protocol: ProtocolWSS}); err != nil || client.Transport == nil {
 		t.Fatalf("expected WSS client, got client=%v err=%v", client, err)
 	}
@@ -191,6 +250,25 @@ func TestNewClientWithOptionsSelectsWSSAndMQTT(t *testing.T) {
 	}
 	if topics.C2S != "hivemind/hub/c2s/access" || topics.S2C != "hivemind/hub/s2c/access" || topics.Status != "hivemind/hub/status/access" {
 		t.Fatalf("unexpected topics: %+v", topics)
+	}
+}
+
+func TestNewClientWithOptionsFallsBackToHTTPSWhenWSSIsMissing(t *testing.T) {
+	identity, err := IdentityFromMap(map[string]any{
+		"key":      "access",
+		"password": "secret",
+		"site":     "site",
+		"host":     "https://hub.example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewClientWithOptions(identity, ClientOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := client.Transport.(*HTTPTransport); !ok {
+		t.Fatalf("expected fallback HTTP transport, got %T", client.Transport)
 	}
 }
 
@@ -282,8 +360,15 @@ func TestControlPlaneBootstrapKeepsGeneratedSecretsLocal(t *testing.T) {
 	if result.Identity.EndpointFor(ProtocolHTTPS) != "https://jokes.thalovant.io:443" {
 		t.Fatalf("unexpected endpoint %s", result.Identity.EndpointFor(ProtocolHTTPS))
 	}
-	if result.SelectedProtocol() != ProtocolHTTPS {
+	if result.SelectedProtocol() != ProtocolWSS {
 		t.Fatalf("unexpected selected protocol %s", result.SelectedProtocol())
+	}
+	runtime, err := control.RequireRuntimeProtocol(result, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if runtime.Protocol != ProtocolWSS || runtime.Endpoint != "wss://jokes.thalovant.io" {
+		t.Fatalf("unexpected default runtime endpoint: %+v", runtime)
 	}
 	if _, ok := result.Summary(false)["identity"].(map[string]any)["access_key"]; ok {
 		t.Fatal("summary should redact identity secrets by default")

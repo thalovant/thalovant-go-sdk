@@ -15,7 +15,7 @@ import (
 
 const (
 	DefaultControlAPIURL    = "https://api.thalovant.com"
-	DefaultControlUserAgent = "ThalovantGoSDK/0.2.10"
+	DefaultControlUserAgent = "ThalovantGoSDK/0.2.11"
 )
 
 type ControlPlane struct {
@@ -230,7 +230,11 @@ func (r BootstrapIdentityResult) Summary(includeSecrets bool) map[string]any {
 
 func (c *ControlPlane) RequireRuntimeProtocol(result BootstrapIdentityResult, protocol HubProtocol) (*SelectedHubEndpoint, error) {
 	if protocol == "" {
-		protocol = ProtocolHTTPS
+		selected, err := defaultRuntimeProtocol(result.Identity)
+		if err != nil {
+			return nil, err
+		}
+		protocol = selected
 	}
 	if protocol == ProtocolMQTT && result.Identity.MQTT == nil {
 		return nil, fmt.Errorf("%w: MQTT is enabled, but the API did not return client-scoped MQTT broker credentials", ErrProtocol)
