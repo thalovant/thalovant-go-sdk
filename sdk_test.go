@@ -143,6 +143,53 @@ profiles:
 	}
 }
 
+func TestIdentityFromFileLoadsPrivateJSON(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "_identity.json")
+	raw, err := json.Marshal(map[string]any{
+		"access_key":     "access",
+		"password":       "secret",
+		"site_id":        "site",
+		"default_master": "https://hub.example.com",
+		"default_port":   443,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	identity, err := IdentityFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.AccessKey != "access" || identity.DefaultMaster != "https://hub.example.com" {
+		t.Fatalf("unexpected identity from file: %+v", identity)
+	}
+}
+
+func TestIdentityFromFileRejectsPermissiveFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows ACLs are not represented by POSIX mode bits")
+	}
+	path := filepath.Join(t.TempDir(), "_identity.json")
+	if err := os.WriteFile(path, []byte(`{"access_key":"access","password":"secret","site_id":"site","default_master":"https://hub.example.com"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := IdentityFromFile(path); err == nil || !strings.Contains(err.Error(), "too permissive") {
+		t.Fatalf("expected permissive file error, got %v", err)
+	}
+}
+
 func TestIdentityFromConfigRejectsPermissiveFile(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Windows ACLs are not represented by POSIX mode bits")

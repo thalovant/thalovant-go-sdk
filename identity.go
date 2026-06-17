@@ -103,6 +103,9 @@ func (m MqttBrokerCredentials) Map(includeSecrets bool) map[string]any {
 }
 
 func IdentityFromFile(path string) (Identity, error) {
+	if err := assertSecureIdentityFile(path); err != nil {
+		return Identity{}, err
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return Identity{}, fmt.Errorf("%w: unable to read identity file %s", ErrIdentity, path)
@@ -239,12 +242,20 @@ func profileIdentityMap(values map[string]any) map[string]any {
 }
 
 func assertSecureConfigFile(path string) error {
+	return assertSecureSecretFile(path, "Thalovant config file")
+}
+
+func assertSecureIdentityFile(path string) error {
+	return assertSecureSecretFile(path, "identity file")
+}
+
+func assertSecureSecretFile(path string, description string) error {
 	info, err := os.Stat(path)
 	if err != nil {
-		return fmt.Errorf("%w: unable to read Thalovant config file %s", ErrIdentity, path)
+		return fmt.Errorf("%w: unable to read %s %s", ErrIdentity, description, path)
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return fmt.Errorf("%w: Thalovant config file is too permissive: %s. Run `chmod 600 %s`", ErrIdentity, path, path)
+		return fmt.Errorf("%w: %s is too permissive: %s. Run `chmod 600 %s`", ErrIdentity, strings.ToUpper(description[:1])+description[1:], path, path)
 	}
 	return nil
 }
