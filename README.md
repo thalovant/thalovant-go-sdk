@@ -99,6 +99,47 @@ for _, raw := range page["data"].([]any) {
 }
 ```
 
+## Workspace Analytics
+
+Authenticated accounts can read the same overview used by the dashboard:
+
+```go
+overview, err := control.GetAnalyticsOverview(ctx, thalovant.AnalyticsOverviewOptions{
+	Range: "7d",
+	HubID: "hub-id",
+})
+if err != nil {
+	panic(err)
+}
+fmt.Println(overview["totals"])
+```
+
+## Durable Memory
+
+Private Daily Desk and workspace assistants can manage explicit opt-in memory:
+
+```go
+memory, err := control.CreateMemoryItem(ctx, map[string]any{
+	"scope":   "workspace",
+	"kind":    "preference",
+	"content": "Prefer America/Toronto for scheduling.",
+	"tags":    []string{"timezone"},
+})
+if err != nil {
+	panic(err)
+}
+fmt.Println(memory["id"])
+
+items, err := control.ListMemoryItems(ctx, thalovant.MemoryListOptions{
+	Scope: "workspace",
+	Query: "timezone",
+})
+if err != nil {
+	panic(err)
+}
+fmt.Println(items["data"])
+```
+
 ## Use An Existing Identity
 
 For local development, store one or more identities in the protected SDK config:
@@ -300,6 +341,13 @@ for _, item := range items {
 - `control.GetPublicHub(ctx, hubRef)`
 - `control.ListHubs(ctx, limit, cursor, ownerID)`
 - `control.GetHub(ctx, hubID)`
+- `control.GetAnalyticsOverview(ctx, options)`
+- `control.ListMemoryItems(ctx, options)`
+- `control.GetMemorySummary(ctx, ownerID)`
+- `control.CreateMemoryItem(ctx, payload)`
+- `control.GetMemoryItem(ctx, memoryID)`
+- `control.UpdateMemoryItem(ctx, memoryID, payload)`
+- `control.DeleteMemoryItem(ctx, memoryID)`
 - `control.CreateClientIdentityForHubID(ctx, hubID, options)`
 - `IdentityFromConfig(path, profile)`
 - `IdentityFromFile(path)`

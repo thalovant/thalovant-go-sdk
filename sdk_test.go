@@ -482,6 +482,188 @@ func TestControlPlaneListsPublicHubsWithoutAuth(t *testing.T) {
 	}
 }
 
+func TestControlPlaneManagesMemoryItems(t *testing.T) {
+	var sawDelete bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if r.Header.Get("authorization") != "Bearer token" {
+			t.Fatalf("unexpected authorization header %q", r.Header.Get("authorization"))
+		}
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/memory":
+			query := r.URL.Query()
+			expected := map[string]string{
+				"scope":           "workspace",
+				"kind":            "preference",
+				"owner_id":        "owner-1",
+				"hub_id":          "hub-1",
+				"q":               "timezone",
+				"include_deleted": "true",
+				"include_expired": "true",
+				"limit":           "25",
+				"offset":          "50",
+			}
+			for key, val := range expected {
+				if got := query.Get(key); got != val {
+					t.Fatalf("unexpected %s query %q in %q", key, got, r.URL.RawQuery)
+				}
+			}
+			_, _ = w.Write([]byte(`{"data":[{"id":"memory-1","content":"UTC"}],"meta":{"count":1,"next":null},"links":{"next":null}}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/memory/summary":
+			if r.URL.Query().Get("owner_id") != "owner-1" {
+				t.Fatalf("unexpected summary query %q", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"total":1,"by_scope":{"workspace":1},"by_kind":{"preference":1},"expired":0,"deleted":0}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/memory":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["scope"] != "workspace" || payload["content"] != "Use UTC." {
+				t.Fatalf("unexpected create payload %+v", payload)
+			}
+			_, _ = w.Write([]byte(`{"id":"memory-1","scope":"workspace","kind":"preference","content":"Use UTC."}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/memory/memory-1":
+			_, _ = w.Write([]byte(`{"id":"memory-1","scope":"workspace","kind":"preference","content":"Use UTC."}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/memory/memory-1":
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["content"] != "Use America/Toronto." {
+				t.Fatalf("unexpected update payload %+v", payload)
+			}
+			_, _ = w.Write([]byte(`{"id":"memory-1","scope":"workspace","kind":"preference","content":"Use America/Toronto."}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/memory/memory-1":
+			sawDelete = true
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	control := NewControlPlane(server.URL, "token")
+	page, err := control.ListMemoryItems(context.Background(), MemoryListOptions{
+		Scope:          "workspace",
+		Kind:           "preference",
+		OwnerID:        "owner-1",
+		HubID:          "hub-1",
+		Query:          "timezone",
+		IncludeDeleted: true,
+		IncludeExpired: true,
+		Limit:          25,
+		Offset:         50,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page["data"].([]any)) != 1 {
+		t.Fatalf("unexpected memory page %+v", page)
+	}
+	summary, err := control.GetMemorySummary(context.Background(), "owner-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary["total"] != float64(1) {
+		t.Fatalf("unexpected memory summary %+v", summary)
+	}
+	created, err := control.CreateMemoryItem(context.Background(), map[string]any{
+		"scope":   "workspace",
+		"kind":    "preference",
+		"content": "Use UTC.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created["id"] != "memory-1" {
+		t.Fatalf("unexpected created memory %+v", created)
+	}
+	got, err := control.GetMemoryItem(context.Background(), "memory-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["content"] != "Use UTC." {
+		t.Fatalf("unexpected memory item %+v", got)
+	}
+	updated, err := control.UpdateMemoryItem(context.Background(), "memory-1", map[string]any{
+		"content": "Use America/Toronto.",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated["content"] != "Use America/Toronto." {
+		t.Fatalf("unexpected updated memory %+v", updated)
+	}
+	if err := control.DeleteMemoryItem(context.Background(), "memory-1"); err != nil {
+		t.Fatal(err)
+	}
+	if !sawDelete {
+		t.Fatal("expected delete request")
+	}
+}
+
+func TestControlPlaneGetsAnalyticsOverview(t *testing.T) {
+	hour := 0
+	weekday := 6
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		if r.URL.Path != "/v1/admin/analytics/overview" {
+			t.Fatalf("unexpected path %s", r.URL.Path)
+		}
+		if r.Header.Get("authorization") != "Bearer token" {
+			t.Fatalf("unexpected authorization header %q", r.Header.Get("authorization"))
+		}
+		query := r.URL.Query()
+		expected := map[string]string{
+			"range":      "30d",
+			"bucket":     "1d",
+			"owner_id":   "owner-1",
+			"hub_id":     "hub-1",
+			"client_id":  "client-1",
+			"country":    "CA",
+			"message":    "speak",
+			"utterance":  "hello",
+			"intent":     "DailyDeskIntent",
+			"time_start": "2026-05-03T20:00:00Z",
+			"time_end":   "2026-05-03T21:00:00Z",
+			"weekday":    "6",
+			"hour":       "0",
+		}
+		for key, val := range expected {
+			if got := query.Get(key); got != val {
+				t.Fatalf("unexpected %s query %q in %q", key, got, r.URL.RawQuery)
+			}
+		}
+		_, _ = w.Write([]byte(`{"meta":{"scope":"admin"},"totals":{"utterances":7}}`))
+	}))
+	defer server.Close()
+
+	control := NewControlPlane(server.URL, "token")
+	overview, err := control.GetAnalyticsOverview(context.Background(), AnalyticsOverviewOptions{
+		Admin:     true,
+		Range:     "30d",
+		Bucket:    "1d",
+		OwnerID:   "owner-1",
+		HubID:     "hub-1",
+		ClientID:  "client-1",
+		Country:   "CA",
+		Message:   "speak",
+		Utterance: "hello",
+		Intent:    "DailyDeskIntent",
+		TimeStart: "2026-05-03T20:00:00Z",
+		TimeEnd:   "2026-05-03T21:00:00Z",
+		Weekday:   &weekday,
+		Hour:      &hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapValue(overview["meta"])["scope"] != "admin" || mapValue(overview["totals"])["utterances"] != float64(7) {
+		t.Fatalf("unexpected analytics overview: %+v", overview)
+	}
+}
+
 func TestControlPlaneBootstrapPreservesAPIReturnedMQTTCredentials(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")

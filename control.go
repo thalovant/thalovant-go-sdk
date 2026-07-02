@@ -15,7 +15,7 @@ import (
 
 const (
 	DefaultControlAPIURL    = "https://api.thalovant.com"
-	DefaultControlUserAgent = "ThalovantGoSDK/0.2.11"
+	DefaultControlUserAgent = "ThalovantGoSDK/0.2.12"
 )
 
 type ControlPlane struct {
@@ -40,6 +40,35 @@ type BootstrapIdentityResult struct {
 	Hub      map[string]any
 	Client   map[string]any
 	Endpoint *SelectedHubEndpoint
+}
+
+type AnalyticsOverviewOptions struct {
+	Admin     bool
+	Range     string
+	Bucket    string
+	OwnerID   string
+	HubID     string
+	ClientID  string
+	Country   string
+	Message   string
+	Utterance string
+	Intent    string
+	TimeStart string
+	TimeEnd   string
+	Weekday   *int
+	Hour      *int
+}
+
+type MemoryListOptions struct {
+	Scope          string
+	Kind           string
+	OwnerID        string
+	HubID          string
+	Query          string
+	IncludeDeleted bool
+	IncludeExpired bool
+	Limit          int
+	Offset         int
 }
 
 func NewControlPlane(apiURL string, accessToken string) *ControlPlane {
@@ -95,6 +124,90 @@ func (c *ControlPlane) ListPublicHubs(ctx context.Context, limit int, cursor str
 		query.Set("cursor", cursor)
 	}
 	return c.request(ctx, http.MethodGet, "/v1/public/hubs?"+query.Encode(), nil, nil, false)
+}
+
+func (c *ControlPlane) ListMemoryItems(ctx context.Context, opts MemoryListOptions) (map[string]any, error) {
+	query := url.Values{}
+	setStringQuery(query, "scope", opts.Scope)
+	setStringQuery(query, "kind", opts.Kind)
+	setStringQuery(query, "owner_id", opts.OwnerID)
+	setStringQuery(query, "hub_id", opts.HubID)
+	setStringQuery(query, "q", opts.Query)
+	if opts.IncludeDeleted {
+		query.Set("include_deleted", "true")
+	}
+	if opts.IncludeExpired {
+		query.Set("include_expired", "true")
+	}
+	if opts.Limit > 0 {
+		query.Set("limit", fmt.Sprint(opts.Limit))
+	}
+	if opts.Offset > 0 {
+		query.Set("offset", fmt.Sprint(opts.Offset))
+	}
+	path := "/v1/memory"
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	return c.request(ctx, http.MethodGet, path, nil, nil, true)
+}
+
+func (c *ControlPlane) GetMemorySummary(ctx context.Context, ownerID string) (map[string]any, error) {
+	path := "/v1/memory/summary"
+	query := url.Values{}
+	setStringQuery(query, "owner_id", ownerID)
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	return c.request(ctx, http.MethodGet, path, nil, nil, true)
+}
+
+func (c *ControlPlane) CreateMemoryItem(ctx context.Context, payload map[string]any) (map[string]any, error) {
+	return c.request(ctx, http.MethodPost, "/v1/memory", payload, nil, true)
+}
+
+func (c *ControlPlane) GetMemoryItem(ctx context.Context, memoryID string) (map[string]any, error) {
+	return c.request(ctx, http.MethodGet, "/v1/memory/"+url.PathEscape(memoryID), nil, nil, true)
+}
+
+func (c *ControlPlane) UpdateMemoryItem(ctx context.Context, memoryID string, payload map[string]any) (map[string]any, error) {
+	return c.request(ctx, http.MethodPatch, "/v1/memory/"+url.PathEscape(memoryID), payload, nil, true)
+}
+
+func (c *ControlPlane) DeleteMemoryItem(ctx context.Context, memoryID string) error {
+	_, err := c.request(ctx, http.MethodDelete, "/v1/memory/"+url.PathEscape(memoryID), nil, nil, true)
+	return err
+}
+
+func (c *ControlPlane) GetAnalyticsOverview(ctx context.Context, opts AnalyticsOverviewOptions) (map[string]any, error) {
+	endpoint := "/v1/analytics/overview"
+	if opts.Admin {
+		endpoint = "/v1/admin/analytics/overview"
+	}
+	query := url.Values{}
+	setStringQuery(query, "range", opts.Range)
+	setStringQuery(query, "bucket", opts.Bucket)
+	if opts.Admin {
+		setStringQuery(query, "owner_id", opts.OwnerID)
+	}
+	setStringQuery(query, "hub_id", opts.HubID)
+	setStringQuery(query, "client_id", opts.ClientID)
+	setStringQuery(query, "country", opts.Country)
+	setStringQuery(query, "message", opts.Message)
+	setStringQuery(query, "utterance", opts.Utterance)
+	setStringQuery(query, "intent", opts.Intent)
+	setStringQuery(query, "time_start", opts.TimeStart)
+	setStringQuery(query, "time_end", opts.TimeEnd)
+	if opts.Weekday != nil {
+		query.Set("weekday", fmt.Sprint(*opts.Weekday))
+	}
+	if opts.Hour != nil {
+		query.Set("hour", fmt.Sprint(*opts.Hour))
+	}
+	if encoded := query.Encode(); encoded != "" {
+		endpoint += "?" + encoded
+	}
+	return c.request(ctx, http.MethodGet, endpoint, nil, nil, true)
 }
 
 func (c *ControlPlane) GetHub(ctx context.Context, hubID string) (map[string]any, error) {
@@ -282,6 +395,9 @@ func (c *ControlPlane) request(ctx context.Context, method string, path string, 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return nil, fmt.Errorf("%w: HTTP %d: %s", ErrAPI, resp.StatusCode, string(raw))
 	}
+	if strings.TrimSpace(string(raw)) == "" {
+		return map[string]any{}, nil
+	}
 	var data map[string]any
 	if err := json.Unmarshal(raw, &data); err != nil {
 		return nil, fmt.Errorf("%w: invalid JSON response", ErrAPI)
@@ -304,6 +420,12 @@ func normalizeControlAPIURL(apiURL string) string {
 	}
 	normalized = strings.TrimSuffix(normalized, "/v1")
 	return strings.TrimRight(normalized, "/") + "/"
+}
+
+func setStringQuery(query url.Values, key string, val string) {
+	if strings.TrimSpace(val) != "" {
+		query.Set(key, val)
+	}
 }
 
 func cleanSiteID(value string) string {
