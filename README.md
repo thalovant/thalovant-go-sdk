@@ -67,6 +67,12 @@ func main() {
 	}
 	defer client.Close(ctx)
 
+	info, err := client.ConnectWithInfo(ctx)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println("connected in", info.ConnectMS, "ms")
+
 	reply, err := client.Ask(ctx, "Tell me a short clean joke.", thalovant.RequestOptions{})
 	if err != nil {
 		panic(err)
@@ -251,6 +257,10 @@ for _, protocol := range []thalovant.HubProtocol{
 }
 ```
 
+Use `client.ConnectWithInfo(ctx)` when you need connection telemetry for
+benchmarks or health dashboards. The returned snapshot includes phase,
+socket/open time, handshake time, total connect time, and last error.
+
 MQTT identities include a broker endpoint, username, password, TLS flag, and
 topic prefix. The broker credentials are scoped to that client and should be
 treated like a password. Public identities should use `mqtts://`; the SDK also
@@ -355,6 +365,8 @@ for _, item := range items {
 - `NewClientFromFile(path)`
 - `NewClientFromEnv()`
 - `NewClientWithOptions(identity, ClientOptions{Protocol: ...})`
+- `client.ConnectWithInfo(ctx)`
+- `client.ConnectionInfo()`
 - `client.Ask(ctx, text, options)`
 - `client.SendUtterance(ctx, text, options)`
 - `client.SendAction(ctx, payload, options)`

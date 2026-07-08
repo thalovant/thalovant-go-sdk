@@ -17,6 +17,29 @@ type TransportHealth struct {
 	HandshakeComplete bool
 	TransportAlive    bool
 	LastError         string
+	Connection        TransportConnectionInfo
+}
+
+type TransportConnectionPhase string
+
+const (
+	ConnectionIdle       TransportConnectionPhase = "idle"
+	ConnectionConnecting TransportConnectionPhase = "connecting"
+	ConnectionHandshake  TransportConnectionPhase = "handshake"
+	ConnectionReady      TransportConnectionPhase = "ready"
+	ConnectionClosed     TransportConnectionPhase = "closed"
+	ConnectionError      TransportConnectionPhase = "error"
+)
+
+type TransportConnectionInfo struct {
+	Phase           TransportConnectionPhase `json:"phase"`
+	StartedAt       time.Time                `json:"started_at,omitempty"`
+	ConnectedAt     time.Time                `json:"connected_at,omitempty"`
+	TransportOpenMS float64                  `json:"transport_open_ms,omitempty"`
+	SocketOpenMS    float64                  `json:"socket_open_ms,omitempty"`
+	HandshakeMS     float64                  `json:"handshake_ms,omitempty"`
+	ConnectMS       float64                  `json:"connect_ms,omitempty"`
+	LastError       string                   `json:"last_error,omitempty"`
 }
 
 type HiveMessage struct {
@@ -34,6 +57,7 @@ type RuntimeTransport interface {
 	Connect(ctx context.Context) error
 	Disconnect(ctx context.Context) error
 	Healthcheck() TransportHealth
+	ConnectionInfo() TransportConnectionInfo
 	EmitBus(ctx context.Context, eventType string, data Data, eventContext Context) error
 	Events() <-chan Event
 }
@@ -47,6 +71,7 @@ type HTTPTransport struct {
 	connected     bool
 	handshake     bool
 	lastError     error
+	connection    connectionTelemetry
 	cancelPolling context.CancelFunc
 	mu            sync.RWMutex
 }
@@ -70,33 +95,44 @@ func (t *HTTPTransport) Authorization() string {
 }
 
 func (t *HTTPTransport) Connect(ctx context.Context) error {
+	t.beginConnection()
 	endpoint := t.BaseURL() + "/connect?authorization=" + url.QueryEscape(t.Authorization())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
+		t.failConnection(err)
 		return err
 	}
 	resp, err := t.HTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrConnection, err)
+		wrapped := fmt.Errorf("%w: %v", ErrConnection, err)
+		t.failConnection(wrapped)
+		return wrapped
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("%w: connect status %d", ErrConnection, resp.StatusCode)
+		err := fmt.Errorf("%w: connect status %d", ErrConnection, resp.StatusCode)
+		t.failConnection(err)
+		return err
 	}
 	t.mu.Lock()
 	t.connected = true
+	t.connection.markOpen(time.Now(), false)
 	t.mu.Unlock()
 
 	deadline := time.Now().Add(6 * time.Second)
 	for !t.IsHandshakeComplete() && time.Now().Before(deadline) {
 		if err := t.PollOnce(ctx); err != nil {
+			t.failConnection(err)
 			return err
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 	if !t.IsHandshakeComplete() {
-		return fmt.Errorf("%w: HiveMind HTTP handshake timed out", ErrTimeout)
+		err := fmt.Errorf("%w: HiveMind HTTP handshake timed out", ErrTimeout)
+		t.failConnection(err)
+		return err
 	}
+	t.completeConnection()
 	pollCtx, cancel := context.WithCancel(context.Background())
 	t.cancelPolling = cancel
 	go t.pollLoop(pollCtx)
@@ -117,6 +153,7 @@ func (t *HTTPTransport) Disconnect(ctx context.Context) error {
 	t.mu.Lock()
 	t.connected = false
 	t.handshake = false
+	t.connection.close()
 	t.mu.Unlock()
 	return nil
 }
@@ -124,11 +161,17 @@ func (t *HTTPTransport) Disconnect(ctx context.Context) error {
 func (t *HTTPTransport) Healthcheck() TransportHealth {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	health := TransportHealth{Connected: t.connected, HandshakeComplete: t.handshake, TransportAlive: t.connected}
+	health := TransportHealth{Connected: t.connected, HandshakeComplete: t.handshake, TransportAlive: t.connected, Connection: t.connection.snapshot()}
 	if t.lastError != nil {
 		health.LastError = t.lastError.Error()
 	}
 	return health
+}
+
+func (t *HTTPTransport) ConnectionInfo() TransportConnectionInfo {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.connection.snapshot()
 }
 
 func (t *HTTPTransport) EmitBus(ctx context.Context, eventType string, data Data, eventContext Context) error {
@@ -162,6 +205,7 @@ func (t *HTTPTransport) pollLoop(ctx context.Context) {
 				t.mu.Lock()
 				t.lastError = err
 				t.connected = false
+				t.connection.fail(time.Now(), err)
 				t.mu.Unlock()
 				return
 			}
@@ -258,6 +302,110 @@ func (t *HTTPTransport) handleHandshake(ctx context.Context, payload map[string]
 		return nil
 	}
 	return fmt.Errorf("%w: only preshared-key HiveMind HTTP handshakes are supported in this alpha", ErrConnection)
+}
+
+func (t *HTTPTransport) beginConnection() {
+	t.mu.Lock()
+	t.lastError = nil
+	t.connection.begin(time.Now())
+	t.mu.Unlock()
+}
+
+func (t *HTTPTransport) completeConnection() {
+	t.mu.Lock()
+	t.connection.complete(time.Now())
+	t.mu.Unlock()
+}
+
+func (t *HTTPTransport) failConnection(err error) {
+	t.mu.Lock()
+	t.lastError = err
+	t.connection.fail(time.Now(), err)
+	t.mu.Unlock()
+}
+
+type connectionTelemetry struct {
+	started time.Time
+	opened  time.Time
+	info    TransportConnectionInfo
+}
+
+func (c connectionTelemetry) snapshot() TransportConnectionInfo {
+	if c.info.Phase == "" {
+		return TransportConnectionInfo{Phase: ConnectionIdle}
+	}
+	return c.info
+}
+
+func (c *connectionTelemetry) begin(now time.Time) {
+	c.started = now
+	c.opened = time.Time{}
+	c.info = TransportConnectionInfo{
+		Phase:     ConnectionConnecting,
+		StartedAt: now,
+	}
+}
+
+func (c *connectionTelemetry) markOpen(now time.Time, socket bool) {
+	if c.started.IsZero() {
+		c.begin(now)
+	}
+	if !c.opened.IsZero() {
+		return
+	}
+	c.opened = now
+	openMS := elapsedMS(c.started, now)
+	c.info.Phase = ConnectionHandshake
+	c.info.TransportOpenMS = openMS
+	if socket {
+		c.info.SocketOpenMS = openMS
+	}
+}
+
+func (c *connectionTelemetry) complete(now time.Time) {
+	opened := c.opened
+	if opened.IsZero() {
+		opened = c.started
+	}
+	if opened.IsZero() {
+		opened = now
+	}
+	started := c.started
+	if started.IsZero() {
+		started = opened
+	}
+	c.info.Phase = ConnectionReady
+	c.info.ConnectedAt = now
+	c.info.HandshakeMS = elapsedMS(opened, now)
+	c.info.ConnectMS = elapsedMS(started, now)
+	c.info.LastError = ""
+}
+
+func (c *connectionTelemetry) fail(now time.Time, err error) {
+	started := c.started
+	if started.IsZero() {
+		started = now
+	}
+	c.info.Phase = ConnectionError
+	c.info.ConnectMS = elapsedMS(started, now)
+	if err != nil {
+		c.info.LastError = err.Error()
+	}
+}
+
+func (c *connectionTelemetry) close() {
+	if c.info.Phase == "" {
+		c.info.Phase = ConnectionClosed
+		return
+	}
+	c.info.Phase = ConnectionClosed
+}
+
+func elapsedMS(start time.Time, end time.Time) float64 {
+	if start.IsZero() || end.Before(start) {
+		return 0
+	}
+	return float64(end.Sub(start).Microseconds()) / 1000
 }
 
 func (t *HTTPTransport) sendHiveMessage(ctx context.Context, message HiveMessage, encrypt bool) error {

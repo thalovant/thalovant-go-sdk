@@ -14,15 +14,17 @@ import (
 )
 
 type MQTTTransport struct {
-	Identity  Identity
-	UserAgent string
-	Topics    MqttTopicSet
-	BusEvents chan Event
-	client    mqtt.Client
-	connected bool
-	handshake bool
-	lastError error
-	mu        sync.RWMutex
+	Identity       Identity
+	UserAgent      string
+	Topics         MqttTopicSet
+	BusEvents      chan Event
+	client         mqtt.Client
+	connected      bool
+	handshake      bool
+	lastError      error
+	connection     connectionTelemetry
+	handshakeReady chan struct{}
+	mu             sync.RWMutex
 }
 
 func NewMQTTTransport(identity Identity) (*MQTTTransport, error) {
@@ -31,19 +33,24 @@ func NewMQTTTransport(identity Identity) (*MQTTTransport, error) {
 		return nil, err
 	}
 	return &MQTTTransport{
-		Identity:  identity,
-		UserAgent: DefaultUserAgent,
-		Topics:    topics,
-		BusEvents: make(chan Event, 32),
+		Identity:       identity,
+		UserAgent:      DefaultUserAgent,
+		Topics:         topics,
+		BusEvents:      make(chan Event, 32),
+		handshakeReady: make(chan struct{}),
 	}, nil
 }
 
 func (t *MQTTTransport) Connect(ctx context.Context) error {
+	t.beginConnection()
 	if t.Identity.MQTT == nil {
-		return fmt.Errorf("%w: identity does not include MQTT broker credentials", ErrProtocol)
+		err := fmt.Errorf("%w: identity does not include MQTT broker credentials", ErrProtocol)
+		t.failConnection(err)
+		return err
 	}
 	brokerURL, err := pahoBrokerURL(t.Identity.MQTT.Endpoint, t.Identity.MQTT.TLS)
 	if err != nil {
+		t.failConnection(err)
 		return err
 	}
 	opts := mqtt.NewClientOptions()
@@ -63,35 +70,50 @@ func (t *MQTTTransport) Connect(ctx context.Context) error {
 			t.mu.Lock()
 			t.lastError = err
 			t.connected = false
+			t.connection.fail(time.Now(), err)
 			t.mu.Unlock()
 		}
 	})
 	client := mqtt.NewClient(opts)
 	t.client = client
 	if err := waitMQTTToken(ctx, client.Connect(), "MQTT connect"); err != nil {
-		return err
-	}
-	if err := waitMQTTToken(ctx, client.Subscribe(t.Topics.S2C, t.Identity.MQTT.QOS, nil), "MQTT subscribe"); err != nil {
-		return err
-	}
-	if err := waitMQTTToken(ctx, client.Publish(t.Topics.Status, 1, true, "online"), "MQTT status publish"); err != nil {
+		t.failConnection(err)
 		return err
 	}
 	t.mu.Lock()
 	t.connected = true
+	t.connection.markOpen(time.Now(), false)
+	ready := t.handshakeReady
 	t.mu.Unlock()
-	if err := t.sendHiveMessage(ctx, helloHiveMessage(t.Identity, "thalovant-go-mqtt-"), true); err != nil {
+	if err := waitMQTTToken(ctx, client.Subscribe(t.Topics.S2C, t.Identity.MQTT.QOS, nil), "MQTT subscribe"); err != nil {
+		t.failConnection(err)
 		return err
 	}
-	deadline := time.Now().Add(6 * time.Second)
-	for !t.IsHandshakeComplete() && time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
+	if err := waitMQTTToken(ctx, client.Publish(t.Topics.Status, 1, true, "online"), "MQTT status publish"); err != nil {
+		t.failConnection(err)
+		return err
 	}
-	if !t.IsHandshakeComplete() {
+	if err := t.sendHiveMessage(ctx, helloHiveMessage(t.Identity, "thalovant-go-mqtt-"), true); err != nil {
+		t.failConnection(err)
+		return err
+	}
+	timer := time.NewTimer(6 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ready:
+		t.completeConnection()
+		return nil
+	case <-ctx.Done():
 		_ = t.Disconnect(ctx)
-		return fmt.Errorf("%w: HiveMind MQTT handshake timed out", ErrTimeout)
+		err := fmt.Errorf("%w: %v", ErrTimeout, ctx.Err())
+		t.failConnection(err)
+		return err
+	case <-timer.C:
+		_ = t.Disconnect(ctx)
+		err := fmt.Errorf("%w: HiveMind MQTT handshake timed out", ErrTimeout)
+		t.failConnection(err)
+		return err
 	}
-	return nil
 }
 
 func (t *MQTTTransport) Disconnect(ctx context.Context) error {
@@ -102,6 +124,8 @@ func (t *MQTTTransport) Disconnect(ctx context.Context) error {
 	t.mu.Lock()
 	t.connected = false
 	t.handshake = false
+	t.client = nil
+	t.connection.close()
 	t.mu.Unlock()
 	return nil
 }
@@ -109,11 +133,17 @@ func (t *MQTTTransport) Disconnect(ctx context.Context) error {
 func (t *MQTTTransport) Healthcheck() TransportHealth {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	health := TransportHealth{Connected: t.connected, HandshakeComplete: t.handshake, TransportAlive: t.connected && t.client != nil && t.client.IsConnected()}
+	health := TransportHealth{Connected: t.connected, HandshakeComplete: t.handshake, TransportAlive: t.connected && t.client != nil && t.client.IsConnected(), Connection: t.connection.snapshot()}
 	if t.lastError != nil {
 		health.LastError = t.lastError.Error()
 	}
 	return health
+}
+
+func (t *MQTTTransport) ConnectionInfo() TransportConnectionInfo {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.connection.snapshot()
 }
 
 func (t *MQTTTransport) EmitBus(ctx context.Context, eventType string, data Data, eventContext Context) error {
@@ -160,7 +190,10 @@ func (t *MQTTTransport) handleHandshake(ctx context.Context, payload map[string]
 			return fmt.Errorf("%w: HiveMind requested preshared key but identity crypto_key is missing", ErrConnection)
 		}
 		t.mu.Lock()
-		t.handshake = true
+		if !t.handshake {
+			t.handshake = true
+			close(t.handshakeReady)
+		}
 		t.mu.Unlock()
 		return nil
 	}
@@ -262,6 +295,29 @@ func waitMQTTToken(ctx context.Context, token mqtt.Token, operation string) erro
 		}
 		return nil
 	}
+}
+
+func (t *MQTTTransport) beginConnection() {
+	t.mu.Lock()
+	t.lastError = nil
+	t.connected = false
+	t.handshake = false
+	t.handshakeReady = make(chan struct{})
+	t.connection.begin(time.Now())
+	t.mu.Unlock()
+}
+
+func (t *MQTTTransport) completeConnection() {
+	t.mu.Lock()
+	t.connection.complete(time.Now())
+	t.mu.Unlock()
+}
+
+func (t *MQTTTransport) failConnection(err error) {
+	t.mu.Lock()
+	t.lastError = err
+	t.connection.fail(time.Now(), err)
+	t.mu.Unlock()
 }
 
 func safeMQTTClientID(value string) string {

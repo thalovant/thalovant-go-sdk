@@ -14,53 +14,72 @@ import (
 )
 
 type WSSTransport struct {
-	Identity  Identity
-	UserAgent string
-	BusEvents chan Event
-	conn      *websocket.Conn
-	connected bool
-	handshake bool
-	lastError error
-	writeMu   sync.Mutex
-	mu        sync.RWMutex
+	Identity       Identity
+	UserAgent      string
+	BusEvents      chan Event
+	conn           *websocket.Conn
+	connected      bool
+	handshake      bool
+	lastError      error
+	connection     connectionTelemetry
+	handshakeReady chan struct{}
+	writeMu        sync.Mutex
+	mu             sync.RWMutex
 }
 
 func NewWSSTransport(identity Identity) *WSSTransport {
 	return &WSSTransport{
-		Identity:  identity,
-		UserAgent: DefaultUserAgent,
-		BusEvents: make(chan Event, 32),
+		Identity:       identity,
+		UserAgent:      DefaultUserAgent,
+		BusEvents:      make(chan Event, 32),
+		handshakeReady: make(chan struct{}),
 	}
 }
 
 func (t *WSSTransport) Connect(ctx context.Context) error {
+	t.beginConnection()
 	endpoint := t.Identity.EndpointFor(ProtocolWSS)
 	if endpoint == "" {
-		return fmt.Errorf("%w: identity does not include a WSS endpoint", ErrProtocol)
+		err := fmt.Errorf("%w: identity does not include a WSS endpoint", ErrProtocol)
+		t.failConnection(err)
+		return err
 	}
 	url, err := authorizedWSSURL(endpoint, t.Authorization())
 	if err != nil {
+		t.failConnection(err)
 		return err
 	}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, nil)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrConnection, err)
+		wrapped := fmt.Errorf("%w: %v", ErrConnection, err)
+		t.failConnection(wrapped)
+		return wrapped
 	}
 	t.conn = conn
 	t.mu.Lock()
 	t.connected = true
+	t.connection.markOpen(time.Now(), true)
+	ready := t.handshakeReady
 	t.mu.Unlock()
-	go t.readLoop(context.Background())
+	go t.readLoop(context.Background(), conn)
 
-	deadline := time.Now().Add(6 * time.Second)
-	for !t.IsHandshakeComplete() && time.Now().Before(deadline) {
-		time.Sleep(100 * time.Millisecond)
-	}
-	if !t.IsHandshakeComplete() {
+	timer := time.NewTimer(6 * time.Second)
+	defer timer.Stop()
+	select {
+	case <-ready:
+		t.completeConnection()
+		return nil
+	case <-ctx.Done():
 		_ = t.Disconnect(ctx)
-		return fmt.Errorf("%w: HiveMind WSS handshake timed out", ErrTimeout)
+		err := fmt.Errorf("%w: %v", ErrTimeout, ctx.Err())
+		t.failConnection(err)
+		return err
+	case <-timer.C:
+		_ = t.Disconnect(ctx)
+		err := fmt.Errorf("%w: HiveMind WSS handshake timed out", ErrTimeout)
+		t.failConnection(err)
+		return err
 	}
-	return nil
 }
 
 func (t *WSSTransport) Disconnect(_ context.Context) error {
@@ -70,6 +89,8 @@ func (t *WSSTransport) Disconnect(_ context.Context) error {
 	t.mu.Lock()
 	t.connected = false
 	t.handshake = false
+	t.conn = nil
+	t.connection.close()
 	t.mu.Unlock()
 	return nil
 }
@@ -77,11 +98,17 @@ func (t *WSSTransport) Disconnect(_ context.Context) error {
 func (t *WSSTransport) Healthcheck() TransportHealth {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	health := TransportHealth{Connected: t.connected, HandshakeComplete: t.handshake, TransportAlive: t.connected && t.conn != nil}
+	health := TransportHealth{Connected: t.connected, HandshakeComplete: t.handshake, TransportAlive: t.connected && t.conn != nil, Connection: t.connection.snapshot()}
 	if t.lastError != nil {
 		health.LastError = t.lastError.Error()
 	}
 	return health
+}
+
+func (t *WSSTransport) ConnectionInfo() TransportConnectionInfo {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.connection.snapshot()
 }
 
 func (t *WSSTransport) EmitBus(ctx context.Context, eventType string, data Data, eventContext Context) error {
@@ -107,25 +134,31 @@ func (t *WSSTransport) IsHandshakeComplete() bool {
 	return t.handshake
 }
 
-func (t *WSSTransport) readLoop(ctx context.Context) {
+func (t *WSSTransport) readLoop(ctx context.Context, conn *websocket.Conn) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		_, payload, err := t.conn.ReadMessage()
+		_, payload, err := conn.ReadMessage()
 		if err != nil {
 			t.mu.Lock()
-			t.lastError = err
-			t.connected = false
+			if t.connected {
+				t.lastError = err
+				t.connected = false
+				t.connection.fail(time.Now(), err)
+			}
 			t.mu.Unlock()
 			return
 		}
 		if err := t.handleRawMessage(ctx, payload); err != nil {
 			t.mu.Lock()
-			t.lastError = err
-			t.connected = false
+			if t.connected {
+				t.lastError = err
+				t.connected = false
+				t.connection.fail(time.Now(), err)
+			}
 			t.mu.Unlock()
 			return
 		}
@@ -171,7 +204,10 @@ func (t *WSSTransport) handleHandshake(ctx context.Context, payload map[string]a
 			return err
 		}
 		t.mu.Lock()
-		t.handshake = true
+		if !t.handshake {
+			t.handshake = true
+			close(t.handshakeReady)
+		}
 		t.mu.Unlock()
 		return nil
 	}
@@ -231,4 +267,27 @@ func helloHiveMessage(identity Identity, prefix string) HiveMessage {
 		Metadata: map[string]any{},
 		Route:    []any{},
 	}
+}
+
+func (t *WSSTransport) beginConnection() {
+	t.mu.Lock()
+	t.lastError = nil
+	t.connected = false
+	t.handshake = false
+	t.handshakeReady = make(chan struct{})
+	t.connection.begin(time.Now())
+	t.mu.Unlock()
+}
+
+func (t *WSSTransport) completeConnection() {
+	t.mu.Lock()
+	t.connection.complete(time.Now())
+	t.mu.Unlock()
+}
+
+func (t *WSSTransport) failConnection(err error) {
+	t.mu.Lock()
+	t.lastError = err
+	t.connection.fail(time.Now(), err)
+	t.mu.Unlock()
 }

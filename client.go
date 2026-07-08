@@ -96,6 +96,15 @@ func (c *Client) Connect(ctx context.Context) error {
 	return c.Transport.Connect(ctx)
 }
 
+func (c *Client) ConnectWithInfo(ctx context.Context) (TransportConnectionInfo, error) {
+	err := c.Connect(ctx)
+	return c.ConnectionInfo(), err
+}
+
+func (c *Client) ConnectionInfo() TransportConnectionInfo {
+	return c.Transport.ConnectionInfo()
+}
+
 func (c *Client) Close(ctx context.Context) error {
 	return c.Transport.Disconnect(ctx)
 }

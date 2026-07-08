@@ -6,7 +6,7 @@ const (
 	EventUtteranceHandled        = "ovos.utterance.handled"
 	EventIntentFailure           = "complete_intent_failure"
 	EventPolicyDenied            = "hive.policy.denied"
-	DefaultUserAgent             = "ThalovantGoSDK/0.2.13"
+	DefaultUserAgent             = "ThalovantGoSDK/0.2.14"
 )
 
 var failureEvents = map[string]struct{}{
