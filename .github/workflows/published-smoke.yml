@@ -1,0 +1,30 @@
+name: Published module smoke
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published Go module version to verify
+        required: true
+        default: v0.2.15
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24"
+          cache: false
+      - name: Resolve the immutable module tag and compile a clean consumer
+        working-directory: smoke/published
+        env:
+          PACKAGE_VERSION: ${{ inputs.version }}
+        run: |
+          go mod edit -require="github.com/thalovant/thalovant-go-sdk@$PACKAGE_VERSION"
+          go mod tidy
+          go run .
