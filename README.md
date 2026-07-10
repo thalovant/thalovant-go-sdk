@@ -261,6 +261,14 @@ Use `client.ConnectWithInfo(ctx)` when you need connection telemetry for
 benchmarks or health dashboards. The returned snapshot includes phase,
 socket/open time, handshake time, total connect time, and last error.
 
+Use `client.Query(ctx, ...)` for the direct HiveMind query frame path when the
+hub supports it. It avoids broad bus fanout and is the preferred request/reply
+API for low-latency app integrations.
+
+```go
+reply, err := client.Query(ctx, "What time is it in Toronto?", thalovant.QueryOptions{})
+```
+
 MQTT identities include a broker endpoint, username, password, TLS flag, and
 topic prefix. The broker credentials are scoped to that client and should be
 treated like a password. Public identities should use `mqtts://`; the SDK also
@@ -367,6 +375,7 @@ for _, item := range items {
 - `NewClientWithOptions(identity, ClientOptions{Protocol: ...})`
 - `client.ConnectWithInfo(ctx)`
 - `client.ConnectionInfo()`
+- `client.Query(ctx, text, options)`
 - `client.Ask(ctx, text, options)`
 - `client.SendUtterance(ctx, text, options)`
 - `client.SendAction(ctx, payload, options)`

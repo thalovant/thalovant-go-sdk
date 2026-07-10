@@ -18,6 +18,7 @@ type MQTTTransport struct {
 	UserAgent      string
 	Topics         MqttTopicSet
 	BusEvents      chan Event
+	HiveEvents     chan HiveMessage
 	client         mqtt.Client
 	connected      bool
 	handshake      bool
@@ -37,6 +38,7 @@ func NewMQTTTransport(identity Identity) (*MQTTTransport, error) {
 		UserAgent:      DefaultUserAgent,
 		Topics:         topics,
 		BusEvents:      make(chan Event, 32),
+		HiveEvents:     make(chan HiveMessage, 32),
 		handshakeReady: make(chan struct{}),
 	}, nil
 }
@@ -159,6 +161,14 @@ func (t *MQTTTransport) Events() <-chan Event {
 	return t.BusEvents
 }
 
+func (t *MQTTTransport) HiveMessages() <-chan HiveMessage {
+	return t.HiveEvents
+}
+
+func (t *MQTTTransport) SendHiveMessage(ctx context.Context, message HiveMessage, encrypt bool) error {
+	return t.sendHiveMessage(ctx, message, encrypt)
+}
+
 func (t *MQTTTransport) IsHandshakeComplete() bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -179,6 +189,11 @@ func (t *MQTTTransport) handleRawMessage(ctx context.Context, raw []byte) error 
 			Data:    mapValue(message.Payload["data"]),
 			Context: mapValue(message.Payload["context"]),
 			Raw:     message,
+		}
+	case "query", "cascade":
+		select {
+		case t.HiveEvents <- message:
+		default:
 		}
 	}
 	return nil

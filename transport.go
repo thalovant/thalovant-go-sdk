@@ -68,6 +68,7 @@ type HTTPTransport struct {
 	PollInterval  time.Duration
 	HTTPClient    *http.Client
 	BusEvents     chan Event
+	HiveEvents    chan HiveMessage
 	connected     bool
 	handshake     bool
 	lastError     error
@@ -83,6 +84,7 @@ func NewHTTPTransport(identity Identity) *HTTPTransport {
 		PollInterval: time.Second,
 		HTTPClient:   http.DefaultClient,
 		BusEvents:    make(chan Event, 32),
+		HiveEvents:   make(chan HiveMessage, 32),
 	}
 }
 
@@ -187,6 +189,14 @@ func (t *HTTPTransport) Events() <-chan Event {
 	return t.BusEvents
 }
 
+func (t *HTTPTransport) HiveMessages() <-chan HiveMessage {
+	return t.HiveEvents
+}
+
+func (t *HTTPTransport) SendHiveMessage(ctx context.Context, message HiveMessage, encrypt bool) error {
+	return t.sendHiveMessage(ctx, message, encrypt)
+}
+
 func (t *HTTPTransport) IsHandshakeComplete() bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -274,6 +284,11 @@ func (t *HTTPTransport) handleRawMessage(ctx context.Context, raw any) error {
 			Data:    mapValue(message.Payload["data"]),
 			Context: mapValue(message.Payload["context"]),
 			Raw:     message,
+		}
+	case "query", "cascade":
+		select {
+		case t.HiveEvents <- message:
+		default:
 		}
 	}
 	return nil

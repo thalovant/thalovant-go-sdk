@@ -17,6 +17,7 @@ type WSSTransport struct {
 	Identity       Identity
 	UserAgent      string
 	BusEvents      chan Event
+	HiveEvents     chan HiveMessage
 	conn           *websocket.Conn
 	connected      bool
 	handshake      bool
@@ -32,6 +33,7 @@ func NewWSSTransport(identity Identity) *WSSTransport {
 		Identity:       identity,
 		UserAgent:      DefaultUserAgent,
 		BusEvents:      make(chan Event, 32),
+		HiveEvents:     make(chan HiveMessage, 32),
 		handshakeReady: make(chan struct{}),
 	}
 }
@@ -124,6 +126,14 @@ func (t *WSSTransport) Events() <-chan Event {
 	return t.BusEvents
 }
 
+func (t *WSSTransport) HiveMessages() <-chan HiveMessage {
+	return t.HiveEvents
+}
+
+func (t *WSSTransport) SendHiveMessage(ctx context.Context, message HiveMessage, encrypt bool) error {
+	return t.sendHiveMessage(ctx, message, encrypt)
+}
+
 func (t *WSSTransport) Authorization() string {
 	return base64.StdEncoding.EncodeToString([]byte(t.UserAgent + ":" + t.Identity.AccessKey))
 }
@@ -190,6 +200,11 @@ func (t *WSSTransport) handleRawMessage(ctx context.Context, raw []byte) error {
 			Data:    mapValue(message.Payload["data"]),
 			Context: mapValue(message.Payload["context"]),
 			Raw:     message,
+		}
+	case "query", "cascade":
+		select {
+		case t.HiveEvents <- message:
+		default:
 		}
 	}
 	return nil

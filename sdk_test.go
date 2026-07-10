@@ -3,6 +3,7 @@ package thalovant
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -10,7 +11,107 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
+
+type hangingTransport struct {
+	events       chan Event
+	disconnected int
+}
+
+func (t *hangingTransport) Connect(ctx context.Context) error {
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (t *hangingTransport) Disconnect(context.Context) error {
+	t.disconnected++
+	return nil
+}
+
+func (t *hangingTransport) Healthcheck() TransportHealth {
+	return TransportHealth{}
+}
+
+func (t *hangingTransport) ConnectionInfo() TransportConnectionInfo {
+	return TransportConnectionInfo{}
+}
+
+func (t *hangingTransport) EmitBus(context.Context, string, Data, Context) error {
+	return nil
+}
+
+func (t *hangingTransport) Events() <-chan Event {
+	return t.events
+}
+
+type queryTransport struct {
+	events    chan Event
+	hive      chan HiveMessage
+	sent      []HiveMessage
+	connected bool
+}
+
+func newQueryTransport() *queryTransport {
+	return &queryTransport{
+		events: make(chan Event, 4),
+		hive:   make(chan HiveMessage, 4),
+	}
+}
+
+func (t *queryTransport) Connect(context.Context) error {
+	t.connected = true
+	return nil
+}
+
+func (t *queryTransport) Disconnect(context.Context) error {
+	t.connected = false
+	return nil
+}
+
+func (t *queryTransport) Healthcheck() TransportHealth {
+	return TransportHealth{Connected: t.connected, HandshakeComplete: t.connected, TransportAlive: t.connected}
+}
+
+func (t *queryTransport) ConnectionInfo() TransportConnectionInfo {
+	return TransportConnectionInfo{Phase: ConnectionReady}
+}
+
+func (t *queryTransport) EmitBus(context.Context, string, Data, Context) error {
+	return nil
+}
+
+func (t *queryTransport) Events() <-chan Event {
+	return t.events
+}
+
+func (t *queryTransport) SendHiveMessage(_ context.Context, message HiveMessage, _ bool) error {
+	t.sent = append(t.sent, message)
+	queryID, _ := message.Metadata["query_id"].(string)
+	context := mapValue(mapValue(message.Payload["payload"])["context"])
+	t.hive <- HiveMessage{
+		MsgType:  "query",
+		Metadata: map[string]any{"query_id": queryID},
+		Payload: map[string]any{
+			"msg_type": "bus",
+			"payload": map[string]any{
+				"type":    EventSpeak,
+				"data":    map[string]any{"utterance": "direct answer"},
+				"context": context,
+			},
+		},
+	}
+	t.hive <- HiveMessage{
+		MsgType:  "query",
+		Metadata: map[string]any{"query_id": queryID},
+		Payload:  map[string]any{"type": "hive.query.complete", "data": map[string]any{}, "context": context},
+	}
+	return nil
+}
+
+func (t *queryTransport) HiveMessages() <-chan HiveMessage {
+	return t.hive
+}
 
 func TestIdentityFromMapNormalizesAliases(t *testing.T) {
 	identity, err := IdentityFromMap(map[string]any{
@@ -373,6 +474,53 @@ func TestClientConnectWithInfoReturnsConnectionSnapshot(t *testing.T) {
 	}
 	if health := client.Healthcheck(); health.Connection.Phase != ConnectionReady {
 		t.Fatalf("unexpected health connection: %+v", health.Connection)
+	}
+}
+
+func TestClientConnectEnforcesDefaultTimeout(t *testing.T) {
+	transport := &hangingTransport{events: make(chan Event)}
+	client := &Client{Identity: Identity{SiteID: "site"}, Transport: transport, ConnectTimeout: 10 * time.Millisecond}
+
+	err := client.Connect(context.Background())
+
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("expected timeout error, got %v", err)
+	}
+	if transport.disconnected != 1 {
+		t.Fatalf("expected disconnect after timeout, got %d", transport.disconnected)
+	}
+}
+
+func TestClientQueryUsesDirectHiveMindQueryFrame(t *testing.T) {
+	transport := newQueryTransport()
+	client := &Client{Identity: Identity{SiteID: "site"}, Transport: transport}
+
+	reply, err := client.Query(context.Background(), "what is up?", QueryOptions{SessionID: "query-session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if reply.Text != "direct answer" || reply.SessionID != "query-session" || reply.RequestID == "" {
+		t.Fatalf("unexpected reply: %+v", reply)
+	}
+	if len(transport.sent) != 1 {
+		t.Fatalf("expected one query frame, got %d", len(transport.sent))
+	}
+	frame := transport.sent[0]
+	if frame.MsgType != "query" || frame.Metadata["query_id"] != reply.RequestID {
+		t.Fatalf("unexpected query frame metadata: %+v", frame)
+	}
+	inner := frame.Payload
+	if inner["msg_type"] != "bus" {
+		t.Fatalf("unexpected inner frame: %+v", inner)
+	}
+	payload := mapValue(inner["payload"])
+	if payload["type"] != EventRecognizerLoopUtterance {
+		t.Fatalf("unexpected inner payload: %+v", payload)
+	}
+	context := mapValue(payload["context"])
+	if SessionIDFromContext(context) != "query-session" || RequestIDFromContext(context) != reply.RequestID {
+		t.Fatalf("missing correlation context: %+v", context)
 	}
 }
 
