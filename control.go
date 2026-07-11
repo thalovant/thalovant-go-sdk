@@ -15,8 +15,38 @@ import (
 
 const (
 	DefaultControlAPIURL    = "https://api.thalovant.com"
-	DefaultControlUserAgent = "ThalovantGoSDK/0.2.12"
+	DefaultControlUserAgent = "ThalovantGoSDK/0.2.16"
 )
+
+type OperationStatus string
+
+const (
+	OperationRequested OperationStatus = "requested"
+	OperationCommitted OperationStatus = "committed"
+	OperationApplied   OperationStatus = "applied"
+	OperationReady     OperationStatus = "ready"
+	OperationFailed    OperationStatus = "failed"
+	OperationTimedOut  OperationStatus = "timed_out"
+)
+
+type OperationResource struct {
+	ID            string             `json:"id"`
+	Kind          string             `json:"kind"`
+	AggregateType string             `json:"aggregate_type"`
+	AggregateID   *string            `json:"aggregate_id"`
+	Status        OperationStatus    `json:"status"`
+	Details       map[string]any     `json:"details"`
+	GitCommitSHA  *string            `json:"git_commit_sha"`
+	ErrorCode     *string            `json:"error_code"`
+	ErrorMessage  *string            `json:"error_message"`
+	CreatedAt     string             `json:"created_at"`
+	UpdatedAt     string             `json:"updated_at"`
+	CommittedAt   *string            `json:"committed_at"`
+	AppliedAt     *string            `json:"applied_at"`
+	ReadyAt       *string            `json:"ready_at"`
+	TerminalAt    *string            `json:"terminal_at"`
+	Links         map[string]*string `json:"links"`
+}
 
 type ControlPlane struct {
 	APIURL      string
@@ -124,6 +154,22 @@ func (c *ControlPlane) ListPublicHubs(ctx context.Context, limit int, cursor str
 		query.Set("cursor", cursor)
 	}
 	return c.request(ctx, http.MethodGet, "/v1/public/hubs?"+query.Encode(), nil, nil, false)
+}
+
+func (c *ControlPlane) GetOperation(ctx context.Context, operationID string) (OperationResource, error) {
+	payload, err := c.request(ctx, http.MethodGet, "/v1/operations/"+url.PathEscape(operationID), nil, nil, true)
+	if err != nil {
+		return OperationResource{}, err
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return OperationResource{}, fmt.Errorf("%w: encode operation response: %v", ErrAPI, err)
+	}
+	var operation OperationResource
+	if err := json.Unmarshal(encoded, &operation); err != nil {
+		return OperationResource{}, fmt.Errorf("%w: decode operation response: %v", ErrAPI, err)
+	}
+	return operation, nil
 }
 
 func (c *ControlPlane) ListMemoryItems(ctx context.Context, opts MemoryListOptions) (map[string]any, error) {

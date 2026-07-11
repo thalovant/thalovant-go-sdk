@@ -359,6 +359,7 @@ for _, item := range items {
 - `control.GetPublicHub(ctx, hubRef)`
 - `control.ListHubs(ctx, limit, cursor, ownerID)`
 - `control.GetHub(ctx, hubID)`
+- `control.GetOperation(ctx, operationID)`
 - `control.GetAnalyticsOverview(ctx, options)`
 - `control.ListMemoryItems(ctx, options)`
 - `control.GetMemorySummary(ctx, ownerID)`

@@ -687,6 +687,32 @@ func TestControlPlaneListsPublicHubsWithoutAuth(t *testing.T) {
 	}
 }
 
+func TestControlPlaneGetsTypedOperation(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/operations/operation-1" {
+			http.NotFound(w, r)
+			return
+		}
+		if r.Header.Get("authorization") != "Bearer token" {
+			t.Fatalf("unexpected authorization header %q", r.Header.Get("authorization"))
+		}
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"operation-1","kind":"gitops.commit","aggregate_type":"gitops","aggregate_id":null,"status":"committed","details":{"git_commit_created":true},"git_commit_sha":"abc123","error_code":null,"error_message":null,"created_at":"2026-07-11T00:00:00Z","updated_at":"2026-07-11T00:00:01Z","committed_at":"2026-07-11T00:00:01Z","applied_at":null,"ready_at":null,"terminal_at":null,"links":{"self":"/api/v1/operations/operation-1"}}`))
+	}))
+	defer server.Close()
+
+	operation, err := NewControlPlane(server.URL, "token").GetOperation(context.Background(), "operation-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if operation.Status != OperationCommitted || operation.GitCommitSHA == nil || *operation.GitCommitSHA != "abc123" {
+		t.Fatalf("unexpected operation: %+v", operation)
+	}
+	if operation.Details["git_commit_created"] != true {
+		t.Fatalf("unexpected operation details: %+v", operation.Details)
+	}
+}
+
 func TestControlPlaneManagesMemoryItems(t *testing.T) {
 	var sawDelete bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
