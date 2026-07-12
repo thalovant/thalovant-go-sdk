@@ -14,6 +14,8 @@ permissions:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    env:
+      GOPRIVATE: github.com/thalovant/*
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v6
