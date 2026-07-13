@@ -9,6 +9,9 @@ env:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 concurrency:
   group: auto-release-go-${{ github.ref }}
@@ -160,10 +163,42 @@ jobs:
         if: steps.plan.outputs.release_needed == 'true'
         run: go test ./...
 
+      - name: Build source artifact and CycloneDX SBOM
+        if: steps.plan.outputs.release_needed == 'true'
+        id: artifacts
+        env:
+          PACKAGE_VERSION: ${{ steps.plan.outputs.version }}
+          RELEASE_TAG: ${{ steps.plan.outputs.tag }}
+        run: |
+          mkdir -p release-artifacts
+          git tag "$RELEASE_TAG" HEAD
+          git archive --format=tar --prefix="thalovant-go-sdk-$PACKAGE_VERSION/" HEAD \
+            | gzip -n > "release-artifacts/thalovant-go-sdk-$PACKAGE_VERSION.tar.gz"
+          go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.10.0 \
+            mod -json -noserial -notimestamp -type library -output-version 1.6 \
+            -output "release-artifacts/thalovant-go-sdk-$PACKAGE_VERSION.cdx.json" .
+          echo "source=$GITHUB_WORKSPACE/release-artifacts/thalovant-go-sdk-$PACKAGE_VERSION.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "sbom=$GITHUB_WORKSPACE/release-artifacts/thalovant-go-sdk-$PACKAGE_VERSION.cdx.json" >> "$GITHUB_OUTPUT"
+
+      - name: Attest module source provenance
+        if: steps.plan.outputs.release_needed == 'true'
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: ${{ steps.artifacts.outputs.source }}
+
+      - name: Attest module source SBOM
+        if: steps.plan.outputs.release_needed == 'true'
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: ${{ steps.artifacts.outputs.source }}
+          sbom-path: ${{ steps.artifacts.outputs.sbom }}
+
       - name: Create GitHub release
         if: steps.plan.outputs.release_needed == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.plan.outputs.tag }}
           RELEASE_SHA: ${{ steps.plan.outputs.release_sha }}
-        run: gh release create "$TAG" --target "$RELEASE_SHA" --title "$TAG" --notes "Release $TAG"
+          SOURCE_ARCHIVE: ${{ steps.artifacts.outputs.source }}
+          SBOM: ${{ steps.artifacts.outputs.sbom }}
+        run: gh release create "$TAG" "$SOURCE_ARCHIVE" "$SBOM" --target "$RELEASE_SHA" --title "$TAG" --notes "Release $TAG"
