@@ -1073,6 +1073,25 @@ func TestHiveBinaryFrameRoundTrips(t *testing.T) {
 	}
 }
 
+func TestHiveBinaryFrameRoundTripsLargePayload(t *testing.T) {
+	data := strings.Repeat("x", 1<<20)
+	encoded, err := EncodeHiveBinaryFrame(HiveMessage{
+		MsgType:  "bus",
+		Payload:  map[string]any{"data": data},
+		Metadata: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	decoded, err := DecodeHiveBinaryFrame(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Payload["data"] != data {
+		t.Fatal("large HiveMind binary payload did not round-trip")
+	}
+}
+
 func TestEventContextMatching(t *testing.T) {
 	context := ContextWithCorrelation(nil, "session-1", "site", "en-us", "request-1")
 	event := Event{Name: EventSpeak, Data: Data{"utterance": "hi"}, Context: context}
