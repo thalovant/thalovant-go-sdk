@@ -57,7 +57,9 @@ func EncodeHiveBinaryFrame(message HiveMessage) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]byte, 0, 2+len(metadata)+len(payload))
+	// Keep capacity arithmetic bounded by the protocol-limited metadata size.
+	// append grows safely for the caller-controlled payload length.
+	out := make([]byte, 0, 2+len(metadata))
 	out = append(out, 0x80|((typeID&0x1f)<<1), byte(len(metadata)))
 	out = append(out, metadata...)
 	out = append(out, payload...)
