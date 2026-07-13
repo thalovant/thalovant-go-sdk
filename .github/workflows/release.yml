@@ -45,17 +45,35 @@ jobs:
         id: artifacts
         env:
           VERSION: ${{ inputs.version }}
+          SOURCE_REVISION: ${{ github.sha }}
         run: |
           package_version="${VERSION#v}"
           mkdir -p release-artifacts
           git tag "$VERSION" HEAD
           git archive --format=tar --prefix="thalovant-go-sdk-$package_version/" HEAD \
             | gzip -n > "release-artifacts/thalovant-go-sdk-$package_version.tar.gz"
+          sbom="release-artifacts/thalovant-go-sdk-$package_version.cdx.json"
           go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.10.0 \
             mod -json -noserial -notimestamp -type library -output-version 1.6 \
-            -output "release-artifacts/thalovant-go-sdk-$package_version.cdx.json" .
+            -output "$sbom" .
+          python3 - "$sbom" <<'PY'
+          import json
+          import os
+          import pathlib
+          import sys
+          import uuid
+
+          path = pathlib.Path(sys.argv[1])
+          bom = json.loads(path.read_text())
+          revision = os.environ["SOURCE_REVISION"]
+          identity = f"https://github.com/thalovant/thalovant-go-sdk@{revision}"
+          bom["serialNumber"] = f"urn:uuid:{uuid.uuid5(uuid.NAMESPACE_URL, identity)}"
+          if not all(bom.get(field) for field in ("bomFormat", "specVersion", "serialNumber")):
+              raise SystemExit("generated CycloneDX SBOM lacks an attestation identity field")
+          path.write_text(json.dumps(bom, sort_keys=True, separators=(",", ":")) + "\n")
+          PY
           echo "source=$GITHUB_WORKSPACE/release-artifacts/thalovant-go-sdk-$package_version.tar.gz" >> "$GITHUB_OUTPUT"
-          echo "sbom=$GITHUB_WORKSPACE/release-artifacts/thalovant-go-sdk-$package_version.cdx.json" >> "$GITHUB_OUTPUT"
+          echo "sbom=$GITHUB_WORKSPACE/$sbom" >> "$GITHUB_OUTPUT"
       - name: Attest module source provenance
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
