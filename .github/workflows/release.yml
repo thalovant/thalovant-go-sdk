@@ -13,6 +13,9 @@ env:
 
 permissions:
   contents: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
 
 jobs:
   release:
@@ -34,11 +37,38 @@ jobs:
             echo "Tag $VERSION already exists"
             exit 1
           fi
+          test "$VERSION" = "v$(tr -d '[:space:]' < VERSION)"
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test ./...
+      - name: Build source artifact and CycloneDX SBOM
+        id: artifacts
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          package_version="${VERSION#v}"
+          mkdir -p release-artifacts
+          git tag "$VERSION" HEAD
+          git archive --format=tar --prefix="thalovant-go-sdk-$package_version/" HEAD \
+            | gzip -n > "release-artifacts/thalovant-go-sdk-$package_version.tar.gz"
+          go run github.com/CycloneDX/cyclonedx-gomod/cmd/cyclonedx-gomod@v1.10.0 \
+            mod -json -noserial -notimestamp -type library -output-version 1.6 \
+            -output "release-artifacts/thalovant-go-sdk-$package_version.cdx.json" .
+          echo "source=$GITHUB_WORKSPACE/release-artifacts/thalovant-go-sdk-$package_version.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "sbom=$GITHUB_WORKSPACE/release-artifacts/thalovant-go-sdk-$package_version.cdx.json" >> "$GITHUB_OUTPUT"
+      - name: Attest module source provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: ${{ steps.artifacts.outputs.source }}
+      - name: Attest module source SBOM
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: ${{ steps.artifacts.outputs.source }}
+          sbom-path: ${{ steps.artifacts.outputs.sbom }}
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
-        run: gh release create "$VERSION" --target "$GITHUB_SHA" --title "$VERSION" --notes "Release $VERSION"
+          SOURCE_ARCHIVE: ${{ steps.artifacts.outputs.source }}
+          SBOM: ${{ steps.artifacts.outputs.sbom }}
+        run: gh release create "$VERSION" "$SOURCE_ARCHIVE" "$SBOM" --target "$GITHUB_SHA" --title "$VERSION" --notes "Release $VERSION"
