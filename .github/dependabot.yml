@@ -8,6 +8,11 @@ updates:
       time: "06:00"
       timezone: America/Toronto
     open-pull-requests-limit: 5
+    allow:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-patch
     groups:
       go-routine-updates:
         applies-to: version-updates
@@ -25,6 +30,11 @@ updates:
       time: "06:15"
       timezone: America/Toronto
     open-pull-requests-limit: 5
+    allow:
+      - dependency-name: "*"
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-patch
     groups:
       action-routine-updates:
         applies-to: version-updates
