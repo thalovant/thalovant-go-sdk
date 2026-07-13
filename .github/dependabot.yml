@@ -9,7 +9,12 @@ updates:
       timezone: America/Toronto
     open-pull-requests-limit: 5
     groups:
-      go-dependencies:
+      go-routine-updates:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+      go-security-updates:
+        applies-to: security-updates
         patterns: ["*"]
 
   - package-ecosystem: github-actions
@@ -21,5 +26,10 @@ updates:
       timezone: America/Toronto
     open-pull-requests-limit: 5
     groups:
-      workflow-actions:
+      action-routine-updates:
+        applies-to: version-updates
+        patterns: ["*"]
+        update-types: [minor, patch]
+      action-security-updates:
+        applies-to: security-updates
         patterns: ["*"]
