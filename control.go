@@ -15,7 +15,7 @@ import (
 
 const (
 	DefaultControlAPIURL    = "https://api.thalovant.com"
-	DefaultControlUserAgent = "ThalovantGoSDK/0.2.17"
+	DefaultControlUserAgent = "ThalovantGoSDK/0.3.0"
 )
 
 type OperationStatus string
