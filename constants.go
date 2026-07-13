@@ -8,7 +8,7 @@ const (
 	EventIntentFailure           = "complete_intent_failure"
 	EventPolicyDenied            = "hive.policy.denied"
 	EventQueryTimeout            = "hive.query.timeout"
-	DefaultUserAgent             = "ThalovantGoSDK/0.2.17"
+	DefaultUserAgent             = "ThalovantGoSDK/0.3.0"
 )
 
 var failureEvents = map[string]struct{}{

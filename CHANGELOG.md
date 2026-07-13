@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.0
+
+- Raise the supported toolchain floor to Go 1.25, the oldest upstream-supported Go release.
+- Upgrade `golang.org/x/net` to 0.55.0 to remediate four high-severity dependency findings.
+
 ## 0.2.17
 
 - Avoid overflow-prone capacity arithmetic when encoding caller-controlled binary payloads.

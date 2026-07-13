@@ -16,6 +16,8 @@ Full docs: <https://docs.thalovant.com/developers/sdks/go/>
 
 ## Install
 
+Use Go 1.25 or newer so the SDK receives supported upstream networking security fixes.
+
 ```bash
 go get github.com/thalovant/thalovant-go-sdk
 ```
