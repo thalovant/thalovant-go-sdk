@@ -75,11 +75,11 @@ jobs:
           echo "source=$GITHUB_WORKSPACE/release-artifacts/thalovant-go-sdk-$package_version.tar.gz" >> "$GITHUB_OUTPUT"
           echo "sbom=$GITHUB_WORKSPACE/$sbom" >> "$GITHUB_OUTPUT"
       - name: Attest module source provenance
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: ${{ steps.artifacts.outputs.source }}
       - name: Attest module source SBOM
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
         with:
           subject-path: ${{ steps.artifacts.outputs.source }}
           sbom-path: ${{ steps.artifacts.outputs.sbom }}
