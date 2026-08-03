@@ -21,7 +21,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
@@ -75,11 +75,11 @@ jobs:
           echo "source=$GITHUB_WORKSPACE/release-artifacts/thalovant-go-sdk-$package_version.tar.gz" >> "$GITHUB_OUTPUT"
           echo "sbom=$GITHUB_WORKSPACE/$sbom" >> "$GITHUB_OUTPUT"
       - name: Attest module source provenance
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: ${{ steps.artifacts.outputs.source }}
       - name: Attest module source SBOM
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4.2.1
         with:
           subject-path: ${{ steps.artifacts.outputs.source }}
           sbom-path: ${{ steps.artifacts.outputs.sbom }}
