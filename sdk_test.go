@@ -630,6 +630,88 @@ func TestControlPlaneBootstrapKeepsGeneratedSecretsLocal(t *testing.T) {
 	}
 }
 
+func TestControlPlaneUserAgentMatchesModuleRelease(t *testing.T) {
+	if DefaultControlUserAgent != "ThalovantGoSDK/0.3.2" {
+		t.Fatalf("unexpected control-plane user agent %q", DefaultControlUserAgent)
+	}
+	if DefaultUserAgent != DefaultControlUserAgent {
+		t.Fatalf("data-plane user agent %q does not match control-plane user agent %q", DefaultUserAgent, DefaultControlUserAgent)
+	}
+	var sawUserAgent string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawUserAgent = r.Header.Get("user-agent")
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[],"meta":{"count":0,"next":null},"links":{"next":null}}`))
+	}))
+	defer server.Close()
+
+	if _, err := NewControlPlane(server.URL, "").ListPublicHubs(context.Background(), 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	if sawUserAgent != "ThalovantGoSDK/0.3.2" {
+		t.Fatalf("unexpected user-agent header %q", sawUserAgent)
+	}
+}
+
+func TestControlPlaneLoginSendsMFAFieldsOnlyWhenGiven(t *testing.T) {
+	var payloads []map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/auth/token" {
+			http.NotFound(w, r)
+			return
+		}
+		var payload map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		payloads = append(payloads, payload)
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"token","token_type":"bearer","expires_in":3600}`))
+	}))
+	defer server.Close()
+
+	control := NewControlPlane(server.URL, "")
+	if _, err := control.Login(context.Background(), "ada@example.com", "secret", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.LoginWithOptions(context.Background(), "ada@example.com", "secret", LoginOptions{OTPCode: "123456"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.LoginWithOptions(context.Background(), "ada@example.com", "secret", LoginOptions{Scope: "admin", RecoveryCode: "rescue-code"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.LoginWithOptions(context.Background(), "ada@example.com", "secret", LoginOptions{OTPCode: "  ", RecoveryCode: ""}); err != nil {
+		t.Fatal(err)
+	}
+	if len(payloads) != 4 {
+		t.Fatalf("expected 4 login requests, saw %d", len(payloads))
+	}
+	for _, index := range []int{0, 3} {
+		payload := payloads[index]
+		if _, ok := payload["otp_code"]; ok {
+			t.Fatalf("payload %d should omit otp_code: %+v", index, payload)
+		}
+		if _, ok := payload["recovery_code"]; ok {
+			t.Fatalf("payload %d should omit recovery_code: %+v", index, payload)
+		}
+	}
+	if payloads[1]["otp_code"] != "123456" {
+		t.Fatalf("expected otp_code in payload: %+v", payloads[1])
+	}
+	if _, ok := payloads[1]["recovery_code"]; ok {
+		t.Fatalf("payload should omit recovery_code: %+v", payloads[1])
+	}
+	if payloads[2]["recovery_code"] != "rescue-code" || payloads[2]["scope"] != "admin" {
+		t.Fatalf("expected recovery_code and scope in payload: %+v", payloads[2])
+	}
+	if _, ok := payloads[2]["otp_code"]; ok {
+		t.Fatalf("payload should omit otp_code: %+v", payloads[2])
+	}
+	if control.AccessToken != "token" {
+		t.Fatalf("expected stored access token, got %q", control.AccessToken)
+	}
+}
+
 func TestControlPlaneDefaultAPIURLAndV1Normalization(t *testing.T) {
 	if got := NewDefaultControlPlane("").APIURL; got != "https://api.thalovant.com/" {
 		t.Fatalf("unexpected default API URL %q", got)
@@ -697,7 +779,7 @@ func TestControlPlaneGetsTypedOperation(t *testing.T) {
 			t.Fatalf("unexpected authorization header %q", r.Header.Get("authorization"))
 		}
 		w.Header().Set("content-type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"operation-1","kind":"gitops.commit","aggregate_type":"gitops","aggregate_id":null,"status":"committed","details":{"git_commit_created":true},"git_commit_sha":"abc123","error_code":null,"error_message":null,"created_at":"2026-07-11T00:00:00Z","updated_at":"2026-07-11T00:00:01Z","committed_at":"2026-07-11T00:00:01Z","applied_at":null,"ready_at":null,"terminal_at":null,"links":{"self":"/api/v1/operations/operation-1"}}`))
+		_, _ = w.Write([]byte(`{"id":"operation-1","kind":"gitops.commit","aggregate_type":"gitops","aggregate_id":null,"status":"committed","details":{"git_commit_created":true},"git_commit_sha":"abc123","error_code":null,"error_message":null,"created_at":"2026-07-11T00:00:00Z","updated_at":"2026-07-11T00:00:01Z","committed_at":"2026-07-11T00:00:01Z","applied_at":null,"ready_at":null,"terminal_at":null,"links":{"self":"/v1/operations/operation-1"}}`))
 	}))
 	defer server.Close()
 

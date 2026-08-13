@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.2
+
+- Add MFA login support: `LoginOptions` and `ControlPlane.LoginWithOptions` send
+  optional `otp_code`/`recovery_code` fields, omitting them when empty. The
+  existing `Login` signature is unchanged.
+- Realign the control-plane user agent with the module release; it had been
+  left at `ThalovantGoSDK/0.3.0` since 0.3.1.
+
+## 0.3.1
+
+- Bump the `go-routine-updates` dependency group: `golang.org/x/net` 0.55.0 to
+  0.57.0 and `golang.org/x/sync` 0.17.0 to 0.22.0 (both indirect).
+
 ## 0.3.0
 
 - Raise the supported toolchain floor to Go 1.25, the oldest upstream-supported Go release.

@@ -86,6 +86,30 @@ func main() {
 `NewDefaultControlPlane` uses `https://api.thalovant.com`. Use
 `NewControlPlane` only for local development or a self-hosted control plane.
 
+### Login With MFA
+
+Accounts with multi-factor authentication enabled are rejected with HTTP 401
+`{"code": "mfa_required"}` by a plain `Login` call. Use `LoginWithOptions` to
+pass a TOTP code, or a recovery code when the authenticator is unavailable:
+
+```go
+control := thalovant.NewDefaultControlPlane("")
+
+// With a TOTP code from an authenticator app.
+_, err := control.LoginWithOptions(ctx, "you@example.com", "password", thalovant.LoginOptions{
+	OTPCode: "123456",
+})
+
+// Or with a one-time recovery code.
+_, err = control.LoginWithOptions(ctx, "you@example.com", "password", thalovant.LoginOptions{
+	RecoveryCode: "your-recovery-code",
+})
+```
+
+`LoginOptions.Scope` matches the `scope` argument of `Login`. Empty fields are
+omitted from the request body, so `LoginWithOptions` with a zero-value
+`LoginOptions` behaves exactly like `Login` without a scope.
+
 Keep `result.Identity` secret. It contains the client credentials used by the
 hub. Do not log `result.Summary(true)`.
 
@@ -344,6 +368,8 @@ for _, item := range items {
 
 - `missing access token`: call `control.Login(...)` before private
   control-plane actions, or pass an access token to `NewControlPlane`.
+- `HTTP 401` with `"code": "mfa_required"`: the account has MFA enabled; use
+  `control.LoginWithOptions(...)` with an `OTPCode` or `RecoveryCode`.
 - `API access requires a paid plan`: upgrade the workspace before using the SDK
   control-plane API to provision private resources.
 - `unsupported protocol`: the hub does not expose that protocol, or the
@@ -357,6 +383,7 @@ for _, item := range items {
 - `NewDefaultControlPlane(accessToken)`
 - `NewControlPlane(apiURL, accessToken)` for local or self-hosted control planes
 - `control.Login(ctx, email, password, scope)`
+- `control.LoginWithOptions(ctx, email, password, LoginOptions{Scope: ..., OTPCode: ..., RecoveryCode: ...})`
 - `control.ListPublicHubs(ctx, limit, cursor)`
 - `control.GetPublicHub(ctx, hubRef)`
 - `control.ListHubs(ctx, limit, cursor, ownerID)`

@@ -15,7 +15,7 @@ import (
 
 const (
 	DefaultControlAPIURL    = "https://api.thalovant.com"
-	DefaultControlUserAgent = "ThalovantGoSDK/0.3.0"
+	DefaultControlUserAgent = "ThalovantGoSDK/0.3.2"
 )
 
 type OperationStatus string
@@ -114,10 +114,30 @@ func NewDefaultControlPlane(accessToken string) *ControlPlane {
 	return NewControlPlane(DefaultControlAPIURL, accessToken)
 }
 
+// LoginOptions carries optional login inputs. Scope overrides the default
+// token scopes. OTPCode and RecoveryCode satisfy an MFA challenge; the API
+// rejects MFA-enabled accounts with HTTP 401 {"code": "mfa_required"} when
+// neither is provided.
+type LoginOptions struct {
+	Scope        string
+	OTPCode      string
+	RecoveryCode string
+}
+
 func (c *ControlPlane) Login(ctx context.Context, email string, password string, scope string) (map[string]any, error) {
+	return c.LoginWithOptions(ctx, email, password, LoginOptions{Scope: scope})
+}
+
+func (c *ControlPlane) LoginWithOptions(ctx context.Context, email string, password string, opts LoginOptions) (map[string]any, error) {
 	payload := map[string]any{"email": email, "password": password}
-	if strings.TrimSpace(scope) != "" {
-		payload["scope"] = scope
+	if strings.TrimSpace(opts.Scope) != "" {
+		payload["scope"] = opts.Scope
+	}
+	if strings.TrimSpace(opts.OTPCode) != "" {
+		payload["otp_code"] = opts.OTPCode
+	}
+	if strings.TrimSpace(opts.RecoveryCode) != "" {
+		payload["recovery_code"] = opts.RecoveryCode
 	}
 	token, err := c.request(ctx, http.MethodPost, "/v1/auth/token", payload, nil, false)
 	if err != nil {
