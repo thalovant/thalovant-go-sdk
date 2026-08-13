@@ -10,12 +10,22 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os/exec"
+	"runtime"
 	"strings"
+	"time"
 )
 
 const (
 	DefaultControlAPIURL    = "https://api.thalovant.com"
-	DefaultControlUserAgent = "ThalovantGoSDK/0.3.2"
+	DefaultControlUserAgent = "ThalovantGoSDK/0.3.3"
+
+	// DefaultDeviceLoginTimeout bounds how long LoginWithBrowser waits for the
+	// user to approve the sign-in request in the browser.
+	DefaultDeviceLoginTimeout = 15 * time.Minute
+
+	defaultDevicePollInterval = 5 * time.Second
+	deviceSlowDownIncrement   = 5 * time.Second
 )
 
 type OperationStatus string
@@ -149,6 +159,167 @@ func (c *ControlPlane) LoginWithOptions(ctx context.Context, email string, passw
 	}
 	c.AccessToken = accessToken
 	return token, nil
+}
+
+// DeviceLoginOptions carries optional device-flow sign-in inputs for
+// LoginWithBrowser. Scopes and ClientName are forwarded to the device
+// authorization request when set; the server may expand the echoed scopes
+// during normalization. OpenBrowser defaults to true when nil. Prompt, when
+// set, receives the device authorization payload instead of the default
+// message printed to stdout. Timeout bounds the whole approval wait and
+// defaults to DefaultDeviceLoginTimeout when zero.
+type DeviceLoginOptions struct {
+	Scopes      []string
+	ClientName  string
+	OpenBrowser *bool
+	Prompt      func(grant map[string]any)
+	Timeout     time.Duration
+}
+
+// LoginWithBrowser signs in through the browser device flow and stores the
+// returned API token. This is the sign-in path for accounts without a
+// password (for example Google sign-in). It requests a device authorization,
+// tells the user to visit verification_uri and enter the short user_code
+// (set DeviceLoginOptions.Prompt to present it yourself), opens the browser
+// at verification_uri_complete on a best-effort basis unless
+// DeviceLoginOptions.OpenBrowser is false, and polls until the request is
+// approved, denied, expired, the timeout elapses, or ctx is cancelled.
+//
+// On approval the returned access_token is a durable scoped API token and is
+// stored on ControlPlane.AccessToken exactly like Login. Denial, expiry, and
+// timeout are reported as ErrDeviceAccessDenied, ErrDeviceCodeExpired, and
+// ErrTimeout respectively.
+func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOptions) (map[string]any, error) {
+	payload := map[string]any{}
+	if opts.Scopes != nil {
+		payload["scopes"] = opts.Scopes
+	}
+	if strings.TrimSpace(opts.ClientName) != "" {
+		payload["client_name"] = opts.ClientName
+	}
+	grant, err := c.request(ctx, http.MethodPost, "/v1/auth/device/authorize", payload, nil, false)
+	if err != nil {
+		return nil, err
+	}
+	deviceCode := optional(grant["device_code"])
+	userCode := optional(grant["user_code"])
+	verificationURI := optional(grant["verification_uri"])
+	if deviceCode == "" || userCode == "" || verificationURI == "" {
+		return nil, fmt.Errorf("%w: device authorization response was incomplete", ErrAPI)
+	}
+	interval := defaultDevicePollInterval
+	if raw, ok := grant["interval"].(float64); ok && raw >= 0 {
+		interval = time.Duration(raw * float64(time.Second))
+	}
+
+	if opts.Prompt != nil {
+		opts.Prompt(grant)
+	} else {
+		fmt.Printf("To sign in, visit %s and enter the code %s\n", verificationURI, userCode)
+	}
+	if opts.OpenBrowser == nil || *opts.OpenBrowser {
+		if completeURI := optional(grant["verification_uri_complete"]); completeURI != "" {
+			// Browser availability is best-effort; a headless host is fine.
+			_ = openBrowser(completeURI)
+		}
+	}
+
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = DefaultDeviceLoginTimeout
+	}
+	token, err := c.pollDeviceToken(ctx, deviceCode, interval, timeout, sleepContext, time.Now)
+	if err != nil {
+		return nil, err
+	}
+	accessToken, _ := token["access_token"].(string)
+	if accessToken == "" {
+		return nil, fmt.Errorf("%w: token response did not include access_token", ErrAPI)
+	}
+	c.AccessToken = accessToken
+	return token, nil
+}
+
+// pollDeviceToken polls the device token endpoint until approval or a
+// terminal state. sleep and now are injectable so tests can drive the loop
+// without real waiting.
+func (c *ControlPlane) pollDeviceToken(
+	ctx context.Context,
+	deviceCode string,
+	interval time.Duration,
+	timeout time.Duration,
+	sleep func(context.Context, time.Duration) error,
+	now func() time.Time,
+) (map[string]any, error) {
+	deadline := now().Add(timeout)
+	wait := interval
+	for {
+		status, raw, err := c.send(ctx, http.MethodPost, "/v1/auth/device/token", map[string]any{"device_code": deviceCode}, nil, false)
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			return nil, err
+		}
+		if status >= 200 && status <= 299 {
+			return decodeControlJSON(raw)
+		}
+		errorCode := ""
+		if status == http.StatusBadRequest {
+			if body, decodeErr := decodeControlJSON(raw); decodeErr == nil {
+				errorCode, _ = body["error"].(string)
+			}
+		}
+		switch errorCode {
+		case "authorization_pending":
+			// Keep polling.
+		case "slow_down":
+			wait += deviceSlowDownIncrement
+		case "access_denied":
+			return nil, fmt.Errorf("%w: the device sign-in request was denied in the browser", ErrDeviceAccessDenied)
+		case "expired_token":
+			return nil, fmt.Errorf("%w: the device sign-in code expired before it was approved; call LoginWithBrowser again to request a new code", ErrDeviceCodeExpired)
+		default:
+			return nil, fmt.Errorf("%w: HTTP %d: %s", ErrAPI, status, string(raw))
+		}
+		remaining := deadline.Sub(now())
+		if remaining <= 0 {
+			return nil, fmt.Errorf("%w: timed out waiting for the device sign-in to be approved", ErrTimeout)
+		}
+		if wait < remaining {
+			remaining = wait
+		}
+		if err := sleep(ctx, remaining); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// openBrowser launches the platform browser opener. It is a package variable
+// so tests can capture the opened URL without spawning a process.
+var openBrowser = func(target string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", target)
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
+	default:
+		cmd = exec.Command("xdg-open", target)
+	}
+	return cmd.Start()
+}
+
+// sleepContext waits for the duration or until ctx is cancelled.
+func sleepContext(ctx context.Context, wait time.Duration) error {
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (c *ControlPlane) ListHubs(ctx context.Context, limit int, cursor string, ownerID string) (map[string]any, error) {
@@ -426,17 +597,28 @@ func (c *ControlPlane) RequireRuntimeProtocol(result BootstrapIdentityResult, pr
 }
 
 func (c *ControlPlane) request(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool) (map[string]any, error) {
+	status, raw, err := c.send(ctx, method, path, payload, headers, auth)
+	if err != nil {
+		return nil, err
+	}
+	if status < 200 || status > 299 {
+		return nil, fmt.Errorf("%w: HTTP %d: %s", ErrAPI, status, string(raw))
+	}
+	return decodeControlJSON(raw)
+}
+
+func (c *ControlPlane) send(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool) (int, []byte, error) {
 	var body io.Reader
 	if payload != nil {
 		raw, err := json.Marshal(payload)
 		if err != nil {
-			return nil, err
+			return 0, nil, err
 		}
 		body = bytes.NewReader(raw)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.APIURL+strings.TrimLeft(path, "/"), body)
 	if err != nil {
-		return nil, err
+		return 0, nil, err
 	}
 	req.Header.Set("accept", "application/json")
 	req.Header.Set("user-agent", c.UserAgent)
@@ -448,19 +630,20 @@ func (c *ControlPlane) request(ctx context.Context, method string, path string, 
 	}
 	if auth {
 		if c.AccessToken == "" {
-			return nil, fmt.Errorf("%w: missing access token", ErrAPI)
+			return 0, nil, fmt.Errorf("%w: missing access token", ErrAPI)
 		}
 		req.Header.Set("authorization", "Bearer "+c.AccessToken)
 	}
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrAPI, err)
+		return 0, nil, fmt.Errorf("%w: %v", ErrAPI, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return nil, fmt.Errorf("%w: HTTP %d: %s", ErrAPI, resp.StatusCode, string(raw))
-	}
+	return resp.StatusCode, raw, nil
+}
+
+func decodeControlJSON(raw []byte) (map[string]any, error) {
 	if strings.TrimSpace(string(raw)) == "" {
 		return map[string]any{}, nil
 	}

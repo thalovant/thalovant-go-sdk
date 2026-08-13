@@ -110,6 +110,60 @@ _, err = control.LoginWithOptions(ctx, "you@example.com", "password", thalovant.
 omitted from the request body, so `LoginWithOptions` with a zero-value
 `LoginOptions` behaves exactly like `Login` without a scope.
 
+### Sign In With the Browser (Device Flow)
+
+Accounts without a password (for example Google sign-in) use the device flow.
+`LoginWithBrowser` prints a verification URL and a short user code, opens the
+browser on a best-effort basis, and polls until you approve the request:
+
+```go
+control := thalovant.NewDefaultControlPlane("")
+
+token, err := control.LoginWithBrowser(ctx, thalovant.DeviceLoginOptions{
+	Scopes:     []string{"hubs:read", "clients:write"}, // optional
+	ClientName: "my-cli",                               // optional label in the dashboard
+})
+if err != nil {
+	panic(err)
+}
+fmt.Println("signed in, token id:", token["token_id"])
+```
+
+On approval the returned `access_token` is a durable scoped API token; it is
+stored on `control.AccessToken` exactly like `Login`, so subsequent
+control-plane calls are authenticated. The server may expand the echoed
+`scopes` during normalization.
+
+Options:
+
+- `OpenBrowser`: `*bool`, defaults to true when nil. Set it to a false pointer
+  on headless hosts; the plain verification URL and code are always shown.
+- `Prompt`: `func(grant map[string]any)` replaces the default stdout message.
+  The grant carries `verification_uri`, `user_code`, and
+  `verification_uri_complete`.
+- `Timeout`: total approval wait, 15 minutes when zero.
+
+Failures are distinct sentinel errors: `errors.Is(err,
+thalovant.ErrDeviceAccessDenied)` when the request is denied in the browser,
+`thalovant.ErrDeviceCodeExpired` when the code expires unapproved (call
+`LoginWithBrowser` again for a new code), and `thalovant.ErrTimeout` when the
+wait elapses. Context cancellation is honored between polls.
+
+### CI: Direct API Token Auth
+
+Non-interactive environments should skip login entirely and construct the
+control plane with a pre-provisioned API token, such as one issued by
+`LoginWithBrowser` on a workstation:
+
+```go
+control := thalovant.NewDefaultControlPlane(os.Getenv("THALOVANT_API_TOKEN"))
+
+page, err := control.ListHubs(ctx, 50, "", "")
+```
+
+`ControlPlane.AccessToken` is an exported field, so an existing instance can
+also be pointed at a token directly: `control.AccessToken = token`.
+
 Keep `result.Identity` secret. It contains the client credentials used by the
 hub. Do not log `result.Summary(true)`.
 
@@ -366,10 +420,14 @@ for _, item := range items {
 
 ## Common Issues
 
-- `missing access token`: call `control.Login(...)` before private
-  control-plane actions, or pass an access token to `NewControlPlane`.
+- `missing access token`: call `control.Login(...)` or
+  `control.LoginWithBrowser(...)` before private control-plane actions, or
+  pass an access token to `NewControlPlane`.
 - `HTTP 401` with `"code": "mfa_required"`: the account has MFA enabled; use
   `control.LoginWithOptions(...)` with an `OTPCode` or `RecoveryCode`.
+- The account has no password (Google sign-in): use
+  `control.LoginWithBrowser(...)`, or mint a durable token once and pass it to
+  `NewDefaultControlPlane` in CI.
 - `API access requires a paid plan`: upgrade the workspace before using the SDK
   control-plane API to provision private resources.
 - `unsupported protocol`: the hub does not expose that protocol, or the
@@ -384,6 +442,7 @@ for _, item := range items {
 - `NewControlPlane(apiURL, accessToken)` for local or self-hosted control planes
 - `control.Login(ctx, email, password, scope)`
 - `control.LoginWithOptions(ctx, email, password, LoginOptions{Scope: ..., OTPCode: ..., RecoveryCode: ...})`
+- `control.LoginWithBrowser(ctx, DeviceLoginOptions{Scopes: ..., ClientName: ..., OpenBrowser: ..., Prompt: ..., Timeout: ...})`
 - `control.ListPublicHubs(ctx, limit, cursor)`
 - `control.GetPublicHub(ctx, hubRef)`
 - `control.ListHubs(ctx, limit, cursor, ownerID)`

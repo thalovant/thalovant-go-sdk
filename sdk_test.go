@@ -631,7 +631,7 @@ func TestControlPlaneBootstrapKeepsGeneratedSecretsLocal(t *testing.T) {
 }
 
 func TestControlPlaneUserAgentMatchesModuleRelease(t *testing.T) {
-	if DefaultControlUserAgent != "ThalovantGoSDK/0.3.2" {
+	if DefaultControlUserAgent != "ThalovantGoSDK/0.3.3" {
 		t.Fatalf("unexpected control-plane user agent %q", DefaultControlUserAgent)
 	}
 	if DefaultUserAgent != DefaultControlUserAgent {
@@ -648,7 +648,7 @@ func TestControlPlaneUserAgentMatchesModuleRelease(t *testing.T) {
 	if _, err := NewControlPlane(server.URL, "").ListPublicHubs(context.Background(), 1, ""); err != nil {
 		t.Fatal(err)
 	}
-	if sawUserAgent != "ThalovantGoSDK/0.3.2" {
+	if sawUserAgent != "ThalovantGoSDK/0.3.3" {
 		t.Fatalf("unexpected user-agent header %q", sawUserAgent)
 	}
 }
@@ -709,6 +709,278 @@ func TestControlPlaneLoginSendsMFAFieldsOnlyWhenGiven(t *testing.T) {
 	}
 	if control.AccessToken != "token" {
 		t.Fatalf("expected stored access token, got %q", control.AccessToken)
+	}
+}
+
+const testDeviceGrant = `{"device_code":"device-code-1","user_code":"WDJB-MJHT","verification_uri":"https://dash.thalovant.com/activate","verification_uri_complete":"https://dash.thalovant.com/activate?user_code=WDJB-MJHT","expires_in":900,"interval":0}`
+
+const testDeviceToken = `{"access_token":"device-token","token_type":"bearer","scopes":["hubs:read","clients:write"],"expires_at":"2027-08-13T00:00:00Z","token_id":"token-1"}`
+
+type scriptedReply struct {
+	status int
+	body   string
+}
+
+type deviceFlowCalls struct {
+	authorize []map[string]any
+	token     []map[string]any
+}
+
+// newDeviceFlowServer scripts the two device-flow endpoints. Token replies
+// are consumed in order and the last one repeats for further polls. Both
+// endpoints reject authenticated requests, matching the public API contract.
+func newDeviceFlowServer(t *testing.T, grantJSON string, replies []scriptedReply, calls *deviceFlowCalls) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected method %s %s", r.Method, r.URL.Path)
+		}
+		if authorization := r.Header.Get("authorization"); authorization != "" {
+			t.Errorf("device endpoints must not receive authorization, got %q", authorization)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Errorf("decode %s body: %v", r.URL.Path, err)
+		}
+		w.Header().Set("content-type", "application/json")
+		switch r.URL.Path {
+		case "/v1/auth/device/authorize":
+			calls.authorize = append(calls.authorize, body)
+			_, _ = w.Write([]byte(grantJSON))
+		case "/v1/auth/device/token":
+			calls.token = append(calls.token, body)
+			reply := replies[0]
+			if len(replies) > 1 {
+				replies = replies[1:]
+			}
+			w.WriteHeader(reply.status)
+			_, _ = w.Write([]byte(reply.body))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+}
+
+func TestControlPlaneLoginWithBrowserPollsUntilToken(t *testing.T) {
+	calls := &deviceFlowCalls{}
+	server := newDeviceFlowServer(t, testDeviceGrant, []scriptedReply{
+		{http.StatusBadRequest, `{"error":"authorization_pending"}`},
+		{http.StatusBadRequest, `{"error":"authorization_pending"}`},
+		{http.StatusOK, testDeviceToken},
+	}, calls)
+	defer server.Close()
+
+	var opened []string
+	restoreBrowser := openBrowser
+	openBrowser = func(target string) error {
+		opened = append(opened, target)
+		return nil
+	}
+	defer func() { openBrowser = restoreBrowser }()
+
+	var prompts []map[string]any
+	control := NewControlPlane(server.URL, "")
+	token, err := control.LoginWithBrowser(context.Background(), DeviceLoginOptions{
+		Scopes:     []string{"hubs:read"},
+		ClientName: "gotest",
+		Prompt:     func(grant map[string]any) { prompts = append(prompts, grant) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token["access_token"] != "device-token" || token["token_id"] != "token-1" {
+		t.Fatalf("unexpected token payload: %+v", token)
+	}
+	if control.AccessToken != "device-token" {
+		t.Fatalf("expected the device token to be stored, got %q", control.AccessToken)
+	}
+	if len(prompts) != 1 || prompts[0]["verification_uri"] != "https://dash.thalovant.com/activate" || prompts[0]["user_code"] != "WDJB-MJHT" {
+		t.Fatalf("unexpected prompt payloads: %+v", prompts)
+	}
+	if len(opened) != 1 || opened[0] != "https://dash.thalovant.com/activate?user_code=WDJB-MJHT" {
+		t.Fatalf("unexpected browser opens: %v", opened)
+	}
+	if len(calls.authorize) != 1 {
+		t.Fatalf("expected one authorize request, saw %d", len(calls.authorize))
+	}
+	scopes, _ := calls.authorize[0]["scopes"].([]any)
+	if len(scopes) != 1 || scopes[0] != "hubs:read" || calls.authorize[0]["client_name"] != "gotest" {
+		t.Fatalf("unexpected authorize payload: %+v", calls.authorize[0])
+	}
+	if len(calls.token) != 3 {
+		t.Fatalf("expected three token polls, saw %d", len(calls.token))
+	}
+	for _, payload := range calls.token {
+		if payload["device_code"] != "device-code-1" || len(payload) != 1 {
+			t.Fatalf("unexpected token poll payload: %+v", payload)
+		}
+	}
+}
+
+func TestControlPlaneLoginWithBrowserSkipsBrowserWhenDisabled(t *testing.T) {
+	calls := &deviceFlowCalls{}
+	server := newDeviceFlowServer(t, testDeviceGrant, []scriptedReply{
+		{http.StatusOK, testDeviceToken},
+	}, calls)
+	defer server.Close()
+
+	restoreBrowser := openBrowser
+	openBrowser = func(target string) error {
+		t.Errorf("the browser must not open, got %q", target)
+		return nil
+	}
+	defer func() { openBrowser = restoreBrowser }()
+
+	openBrowserFlag := false
+	control := NewControlPlane(server.URL, "")
+	if _, err := control.LoginWithBrowser(context.Background(), DeviceLoginOptions{
+		OpenBrowser: &openBrowserFlag,
+		Prompt:      func(map[string]any) {},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(calls.authorize) != 1 || len(calls.authorize[0]) != 0 {
+		t.Fatalf("expected an empty authorize payload, got %+v", calls.authorize)
+	}
+}
+
+func TestControlPlaneDevicePollSlowDownGrowsInterval(t *testing.T) {
+	calls := &deviceFlowCalls{}
+	server := newDeviceFlowServer(t, testDeviceGrant, []scriptedReply{
+		{http.StatusBadRequest, `{"error":"authorization_pending"}`},
+		{http.StatusBadRequest, `{"error":"slow_down"}`},
+		{http.StatusBadRequest, `{"error":"authorization_pending"}`},
+		{http.StatusOK, testDeviceToken},
+	}, calls)
+	defer server.Close()
+
+	var sleeps []time.Duration
+	control := NewControlPlane(server.URL, "")
+	token, err := control.pollDeviceToken(
+		context.Background(),
+		"device-code-1",
+		5*time.Second,
+		900*time.Second,
+		func(_ context.Context, wait time.Duration) error {
+			sleeps = append(sleeps, wait)
+			return nil
+		},
+		func() time.Time { return time.Unix(0, 0) },
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token["access_token"] != "device-token" {
+		t.Fatalf("unexpected token payload: %+v", token)
+	}
+	expected := []time.Duration{5 * time.Second, 10 * time.Second, 10 * time.Second}
+	if len(sleeps) != len(expected) {
+		t.Fatalf("unexpected sleeps: %v", sleeps)
+	}
+	for index, wait := range expected {
+		if sleeps[index] != wait {
+			t.Fatalf("unexpected sleeps: %v", sleeps)
+		}
+	}
+}
+
+func TestControlPlaneLoginWithBrowserReportsAccessDenied(t *testing.T) {
+	calls := &deviceFlowCalls{}
+	server := newDeviceFlowServer(t, testDeviceGrant, []scriptedReply{
+		{http.StatusBadRequest, `{"error":"access_denied"}`},
+	}, calls)
+	defer server.Close()
+
+	openBrowserFlag := false
+	control := NewControlPlane(server.URL, "")
+	_, err := control.LoginWithBrowser(context.Background(), DeviceLoginOptions{
+		OpenBrowser: &openBrowserFlag,
+		Prompt:      func(map[string]any) {},
+	})
+	if !errors.Is(err, ErrDeviceAccessDenied) {
+		t.Fatalf("expected ErrDeviceAccessDenied, got %v", err)
+	}
+	if control.AccessToken != "" {
+		t.Fatalf("no token should be stored after denial, got %q", control.AccessToken)
+	}
+}
+
+func TestControlPlaneLoginWithBrowserReportsExpiredCode(t *testing.T) {
+	calls := &deviceFlowCalls{}
+	server := newDeviceFlowServer(t, testDeviceGrant, []scriptedReply{
+		{http.StatusBadRequest, `{"error":"expired_token"}`},
+	}, calls)
+	defer server.Close()
+
+	openBrowserFlag := false
+	control := NewControlPlane(server.URL, "")
+	_, err := control.LoginWithBrowser(context.Background(), DeviceLoginOptions{
+		OpenBrowser: &openBrowserFlag,
+		Prompt:      func(map[string]any) {},
+	})
+	if !errors.Is(err, ErrDeviceCodeExpired) {
+		t.Fatalf("expected ErrDeviceCodeExpired, got %v", err)
+	}
+	if control.AccessToken != "" {
+		t.Fatalf("no token should be stored after expiry, got %q", control.AccessToken)
+	}
+}
+
+func TestControlPlaneDevicePollTimesOut(t *testing.T) {
+	calls := &deviceFlowCalls{}
+	server := newDeviceFlowServer(t, testDeviceGrant, []scriptedReply{
+		{http.StatusBadRequest, `{"error":"authorization_pending"}`},
+	}, calls)
+	defer server.Close()
+
+	now := time.Unix(0, 0)
+	control := NewControlPlane(server.URL, "")
+	_, err := control.pollDeviceToken(
+		context.Background(),
+		"device-code-1",
+		5*time.Second,
+		10*time.Second,
+		func(_ context.Context, wait time.Duration) error {
+			now = now.Add(wait)
+			return nil
+		},
+		func() time.Time { return now },
+	)
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("expected ErrTimeout, got %v", err)
+	}
+	if len(calls.token) != 3 {
+		t.Fatalf("expected three token polls before timing out, saw %d", len(calls.token))
+	}
+	if !now.Equal(time.Unix(10, 0)) {
+		t.Fatalf("expected the fake clock to stop at the deadline, got %v", now)
+	}
+}
+
+func TestControlPlaneLoginWithBrowserHonorsContextCancel(t *testing.T) {
+	calls := &deviceFlowCalls{}
+	slowGrant := strings.Replace(testDeviceGrant, `"interval":0`, `"interval":600`, 1)
+	server := newDeviceFlowServer(t, slowGrant, []scriptedReply{
+		{http.StatusBadRequest, `{"error":"authorization_pending"}`},
+	}, calls)
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	timer := time.AfterFunc(50*time.Millisecond, cancel)
+	defer timer.Stop()
+	defer cancel()
+
+	openBrowserFlag := false
+	control := NewControlPlane(server.URL, "")
+	_, err := control.LoginWithBrowser(ctx, DeviceLoginOptions{
+		OpenBrowser: &openBrowserFlag,
+		Prompt:      func(map[string]any) {},
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if control.AccessToken != "" {
+		t.Fatalf("no token should be stored after cancellation, got %q", control.AccessToken)
 	}
 }
 

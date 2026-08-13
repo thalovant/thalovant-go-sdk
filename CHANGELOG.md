@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.3
+
+- Add browser device-flow sign-in: `ControlPlane.LoginWithBrowser` and
+  `DeviceLoginOptions` request a device authorization, present the
+  verification URI and user code (custom `Prompt` supported), open the
+  browser on a best-effort basis, and poll `/v1/auth/device/token` honoring
+  the server `interval` and `slow_down` backoff until the request is
+  approved, denied (`ErrDeviceAccessDenied`), expired
+  (`ErrDeviceCodeExpired`), timed out (`ErrTimeout`, 15 minutes by default),
+  or the context is cancelled. The approved durable API token is stored on
+  the `ControlPlane` exactly like `Login`.
+- Document direct API-token auth for CI and other non-interactive use: pass a
+  pre-provisioned token to `NewDefaultControlPlane`/`NewControlPlane` (for
+  example from a `THALOVANT_API_TOKEN` environment variable) instead of
+  calling a login method.
+
 ## 0.3.2
 
 - Add MFA login support: `LoginOptions` and `ControlPlane.LoginWithOptions` send
