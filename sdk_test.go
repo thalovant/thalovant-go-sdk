@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -631,11 +632,15 @@ func TestControlPlaneBootstrapKeepsGeneratedSecretsLocal(t *testing.T) {
 }
 
 func TestControlPlaneUserAgentMatchesModuleRelease(t *testing.T) {
-	if DefaultControlUserAgent != "ThalovantGoSDK/0.3.4" {
-		t.Fatalf("unexpected control-plane user agent %q", DefaultControlUserAgent)
+	// Assert against the derived value, never a version literal: a literal here
+	// would just be one more copy to hand-maintain, and it would keep passing
+	// while every copy drifted together.
+	expected := "ThalovantGoSDK/" + Version
+	if DefaultControlUserAgent != expected {
+		t.Fatalf("control-plane user agent %q does not derive from Version %q (want %q)", DefaultControlUserAgent, Version, expected)
 	}
-	if DefaultUserAgent != DefaultControlUserAgent {
-		t.Fatalf("data-plane user agent %q does not match control-plane user agent %q", DefaultUserAgent, DefaultControlUserAgent)
+	if DefaultUserAgent != expected {
+		t.Fatalf("data-plane user agent %q does not derive from Version %q (want %q)", DefaultUserAgent, Version, expected)
 	}
 	var sawUserAgent string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -648,8 +653,50 @@ func TestControlPlaneUserAgentMatchesModuleRelease(t *testing.T) {
 	if _, err := NewControlPlane(server.URL, "").ListPublicHubs(context.Background(), 1, ""); err != nil {
 		t.Fatal(err)
 	}
-	if sawUserAgent != "ThalovantGoSDK/0.3.4" {
-		t.Fatalf("unexpected user-agent header %q", sawUserAgent)
+	if sawUserAgent != expected {
+		t.Fatalf("unexpected user-agent header %q, want %q", sawUserAgent, expected)
+	}
+}
+
+func TestVersionMatchesVersionFile(t *testing.T) {
+	raw, err := os.ReadFile("VERSION")
+	if err != nil {
+		t.Fatal(err)
+	}
+	declared := strings.TrimSpace(string(raw))
+	if declared != Version {
+		t.Fatalf("VERSION file declares %q but thalovant.Version is %q; the release bump must move both", declared, Version)
+	}
+}
+
+func TestNoSourceFileHardCodesAUserAgentVersion(t *testing.T) {
+	// The pattern is built from userAgentProduct rather than spelled out, so
+	// this file does not contain the literal it forbids and therefore needs no
+	// exemption from its own scan -- every .go file in the package, tests
+	// included, is checked.
+	hardCoded := regexp.MustCompile(regexp.QuoteMeta(userAgentProduct) + `/\d`)
+
+	sources, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sources) == 0 {
+		t.Fatal("found no .go sources to scan for pinned user-agent literals")
+	}
+
+	var offenders []string
+	for _, source := range sources {
+		content, err := os.ReadFile(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hardCoded.Match(content) {
+			offenders = append(offenders, source)
+		}
+	}
+
+	if len(offenders) > 0 {
+		t.Fatalf("user agents must derive from thalovant.Version, but a pinned %s/<version> literal was found in: %s", userAgentProduct, strings.Join(offenders, ", "))
 	}
 }
 

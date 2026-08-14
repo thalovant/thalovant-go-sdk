@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.3.5
+
+- Derive both user agents from a single exported `Version` constant in
+  `version.go` instead of hand-maintained literals. `DefaultUserAgent` and
+  `DefaultControlUserAgent` keep their names, exportedness, constant-ness, and
+  values; they are now `"ThalovantGoSDK/" + Version`, resolved at compile time,
+  so the data-plane and control-plane copies can no longer disagree.
+- Pin the user agents in tests against the derived value rather than a version
+  literal, require `Version` to equal the `VERSION` file, and fail the suite if
+  any `.go` source hard-codes a `ThalovantGoSDK/<version>` literal again.
+- Stop rewriting `constants.go` during the automatic release bump, which no
+  longer contains a version, and make the remaining `VERSION` and `version.go`
+  replacements fail loudly when their target literal is absent. A silent no-op
+  in that step is what left the control-plane user agent at
+  `ThalovantGoSDK/0.3.0` after 0.3.1.
+
 ## 0.3.4
 
 - Document the two HTTP 429 responses the control plane returns for
