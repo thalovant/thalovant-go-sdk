@@ -30,6 +30,7 @@ jobs:
             VERSION
             go.mod
             go.sum
+            version.go
             constants.go
             rich.go
             context.go

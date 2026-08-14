@@ -44,6 +44,7 @@ jobs:
               "VERSION",
               "go.mod",
               "go.sum",
+              "version.go",
               "constants.go",
               "control.go",
               "rich.go",
@@ -110,6 +111,16 @@ jobs:
               major, minor, patch = (int(part) for part in match.groups())
               return f"{major}.{minor}.{patch + 1}"
 
+          def replace(path: str, old: str, new: str) -> None:
+              # Fail loudly: a literal that no longer matches used to no-op in
+              # silence, which is how the control-plane user agent sat at
+              # ThalovantGoSDK/0.3.0 from 0.3.1 until 0.3.2 caught it by hand.
+              file_path = pathlib.Path(path)
+              original = file_path.read_text()
+              if old not in original:
+                  raise SystemExit(f"Cannot bump {path}: expected to find {old!r}")
+              file_path.write_text(original.replace(old, new))
+
           latest_tag, changed = changed_since_latest_tag()
           relevant = [
               path
@@ -138,12 +149,15 @@ jobs:
 
           if tag_exists(current_tag):
               next_version = bump_patch(current)
-              pathlib.Path("VERSION").write_text(f"{next_version}\n")
-              constants = pathlib.Path("constants.go")
-              constants.write_text(constants.read_text().replace(f"ThalovantGoSDK/{current}", f"ThalovantGoSDK/{next_version}"))
+              # DefaultUserAgent and DefaultControlUserAgent are derived from
+              # thalovant.Version at compile time, so bumping VERSION and that
+              # one constant is the whole release bump; constants.go and
+              # control.go carry no version literal to rewrite.
+              replace("VERSION", current, next_version)
+              replace("version.go", f'const Version = "{current}"', f'const Version = "{next_version}"')
               git("config", "user.name", "github-actions[bot]")
               git("config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
-              git("add", "VERSION", "constants.go")
+              git("add", "VERSION", "version.go")
               git("commit", "-m", f"release: bump Go SDK to {next_version}")
               git("push", "origin", "HEAD:main")
               current = next_version
