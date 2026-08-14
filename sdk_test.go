@@ -631,7 +631,7 @@ func TestControlPlaneBootstrapKeepsGeneratedSecretsLocal(t *testing.T) {
 }
 
 func TestControlPlaneUserAgentMatchesModuleRelease(t *testing.T) {
-	if DefaultControlUserAgent != "ThalovantGoSDK/0.3.3" {
+	if DefaultControlUserAgent != "ThalovantGoSDK/0.3.4" {
 		t.Fatalf("unexpected control-plane user agent %q", DefaultControlUserAgent)
 	}
 	if DefaultUserAgent != DefaultControlUserAgent {
@@ -648,7 +648,7 @@ func TestControlPlaneUserAgentMatchesModuleRelease(t *testing.T) {
 	if _, err := NewControlPlane(server.URL, "").ListPublicHubs(context.Background(), 1, ""); err != nil {
 		t.Fatal(err)
 	}
-	if sawUserAgent != "ThalovantGoSDK/0.3.3" {
+	if sawUserAgent != "ThalovantGoSDK/0.3.4" {
 		t.Fatalf("unexpected user-agent header %q", sawUserAgent)
 	}
 }

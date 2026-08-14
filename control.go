@@ -18,7 +18,7 @@ import (
 
 const (
 	DefaultControlAPIURL    = "https://api.thalovant.com"
-	DefaultControlUserAgent = "ThalovantGoSDK/0.3.3"
+	DefaultControlUserAgent = "ThalovantGoSDK/0.3.4"
 
 	// DefaultDeviceLoginTimeout bounds how long LoginWithBrowser waits for the
 	// user to approve the sign-in request in the browser.

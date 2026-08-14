@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.3.4
+
+- Document the two HTTP 429 responses the control plane returns for
+  token-authenticated calls: `token_rate_limited` (the plan's per-minute
+  request rate, 60 requests per minute on the free plan) and
+  `token_quota_exceeded` (the plan's daily or monthly call quota, reported in
+  `quota`, `limit`, and `used`). Both carry a `Retry-After` header and a
+  matching `retry_after_seconds`, both are returned as errors wrapping
+  `ErrAPI`, `Retry-After` is authoritative, and the SDK does not retry
+  automatically.
+
 ## 0.3.3
 
 - Add browser device-flow sign-in: `ControlPlane.LoginWithBrowser` and
