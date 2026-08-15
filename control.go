@@ -65,6 +65,17 @@ type ControlPlane struct {
 	HTTPClient  *http.Client
 }
 
+// String implements fmt.Stringer so the %v, %s, and %+v verbs render a
+// ControlPlane with its AccessToken (a bearer API token) redacted. The receiver
+// is a value so a dereferenced *ControlPlane printed with %v is redacted too.
+// This is a human-facing formatting guard only; it does not affect json.Marshal.
+func (c ControlPlane) String() string {
+	return fmt.Sprintf(
+		"ControlPlane{APIURL:%q AccessToken:%s UserAgent:%q}",
+		c.APIURL, redactSecret(c.AccessToken), c.UserAgent,
+	)
+}
+
 type BootstrapIdentityOptions struct {
 	Name               string
 	SiteID             string
@@ -83,10 +94,8 @@ type BootstrapIdentityResult struct {
 }
 
 type AnalyticsOverviewOptions struct {
-	Admin     bool
 	Range     string
 	Bucket    string
-	OwnerID   string
 	HubID     string
 	ClientID  string
 	Country   string
@@ -345,7 +354,7 @@ func (c *ControlPlane) pollDeviceToken(
 		case "expired_token":
 			return nil, fmt.Errorf("%w: the device sign-in code expired before it was approved; call LoginWithBrowser again to request a new code", ErrDeviceCodeExpired)
 		default:
-			return nil, fmt.Errorf("%w: HTTP %d: %s", ErrAPI, status, string(raw))
+			return nil, fmt.Errorf("%w: HTTP %d: %s", ErrAPI, status, serverErrorDetail(raw))
 		}
 		remaining := deadline.Sub(now())
 		if remaining <= 0 {
@@ -483,15 +492,9 @@ func (c *ControlPlane) DeleteMemoryItem(ctx context.Context, memoryID string) er
 
 func (c *ControlPlane) GetAnalyticsOverview(ctx context.Context, opts AnalyticsOverviewOptions) (map[string]any, error) {
 	endpoint := "/v1/analytics/overview"
-	if opts.Admin {
-		endpoint = "/v1/admin/analytics/overview"
-	}
 	query := url.Values{}
 	setStringQuery(query, "range", opts.Range)
 	setStringQuery(query, "bucket", opts.Bucket)
-	if opts.Admin {
-		setStringQuery(query, "owner_id", opts.OwnerID)
-	}
 	setStringQuery(query, "hub_id", opts.HubID)
 	setStringQuery(query, "client_id", opts.ClientID)
 	setStringQuery(query, "country", opts.Country)
@@ -922,6 +925,8 @@ func (r BootstrapIdentityResult) SelectedProtocol() HubProtocol {
 
 func (r BootstrapIdentityResult) Summary(includeSecrets bool) map[string]any {
 	identity := r.Identity.Summary()
+	hub := r.Hub
+	client := r.Client
 	if includeSecrets {
 		identity["access_key"] = r.Identity.AccessKey
 		identity["password"] = r.Identity.Password
@@ -929,17 +934,79 @@ func (r BootstrapIdentityResult) Summary(includeSecrets bool) map[string]any {
 		if r.Identity.MQTT != nil {
 			identity["mqtt"] = r.Identity.MQTT.Map(true)
 		}
+	} else {
+		// The raw hub/client maps echo the freshly minted data-plane secrets:
+		// initial_identify's access_key/password/crypto_key/mqtt.password, the
+		// initial_identify_token, and the spec's apiKey/password/cryptoKey. Gate
+		// them behind includeSecrets exactly like the identity fields above so
+		// the default summary is safe to log.
+		hub = redactBootstrapSecrets(r.Hub)
+		client = redactBootstrapSecrets(r.Client)
 	}
 	summary := map[string]any{
 		"identity":          identity,
-		"hub":               r.Hub,
-		"client":            r.Client,
+		"hub":               hub,
+		"client":            client,
 		"selected_protocol": r.SelectedProtocol(),
 	}
 	if r.Endpoint != nil {
 		summary["selected_endpoint"] = r.Endpoint.Endpoint
 	}
 	return summary
+}
+
+// bootstrapSecretKeys names the map keys whose values the bootstrap hub/client
+// maps may carry as freshly minted data-plane secrets. Comparison is
+// case-insensitive so both snake_case and camelCase spellings (crypto_key vs
+// cryptoKey, api_key vs apiKey) match. "username" is included because the MQTT
+// broker username is the data-plane access key, which the SDK treats as secret
+// everywhere else (MqttBrokerCredentials.Map(false) omits it); redacting only
+// access_key while leaving the same value under mqtt.username would be an
+// incomplete gate.
+var bootstrapSecretKeys = map[string]struct{}{
+	"access_key":             {},
+	"password":               {},
+	"crypto_key":             {},
+	"cryptokey":              {},
+	"api_key":                {},
+	"apikey":                 {},
+	"username":               {},
+	"initial_identify_token": {},
+}
+
+// redactBootstrapSecrets returns a deep copy of value with the values of any
+// secret-bearing keys (see bootstrapSecretKeys) replaced by secretPlaceholder,
+// at every depth. It never mutates value, so the includeSecrets=true path can
+// still hand back the raw maps untouched. A nil input stays nil.
+func redactBootstrapSecrets(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	redacted, _ := redactSensitiveTree(value).(map[string]any)
+	return redacted
+}
+
+func redactSensitiveTree(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		cloned := make(map[string]any, len(typed))
+		for key, val := range typed {
+			if _, secret := bootstrapSecretKeys[strings.ToLower(key)]; secret {
+				cloned[key] = secretPlaceholder
+				continue
+			}
+			cloned[key] = redactSensitiveTree(val)
+		}
+		return cloned
+	case []any:
+		cloned := make([]any, len(typed))
+		for i, val := range typed {
+			cloned[i] = redactSensitiveTree(val)
+		}
+		return cloned
+	default:
+		return value
+	}
 }
 
 func (c *ControlPlane) RequireRuntimeProtocol(result BootstrapIdentityResult, protocol HubProtocol) (*SelectedHubEndpoint, error) {
@@ -966,7 +1033,7 @@ func (c *ControlPlane) request(ctx context.Context, method string, path string, 
 		return nil, err
 	}
 	if status < 200 || status > 299 {
-		return nil, fmt.Errorf("%w: HTTP %d: %s", ErrAPI, status, string(raw))
+		return nil, fmt.Errorf("%w: HTTP %d: %s", ErrAPI, status, serverErrorDetail(raw))
 	}
 	return decodeControlJSON(raw)
 }
@@ -1005,6 +1072,27 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, raw, nil
+}
+
+// maxServerErrorDetail bounds how much of a non-2xx response body is echoed
+// into an error message.
+const maxServerErrorDetail = 256
+
+// serverErrorDetail turns a raw response body into a short, single-line detail
+// for an error message. It collapses all whitespace (so an embedded newline
+// cannot break log parsing) and truncates to maxServerErrorDetail runes. This
+// keeps the error bounded instead of interpolating an unbounded body that, for
+// routes such as POST /v1/clients, may echo the request's freshly minted
+// apiKey/password/cryptoKey back to the caller.
+func serverErrorDetail(raw []byte) string {
+	detail := strings.Join(strings.Fields(string(raw)), " ")
+	if detail == "" {
+		return "(no response body)"
+	}
+	if runes := []rune(detail); len(runes) > maxServerErrorDetail {
+		detail = string(runes[:maxServerErrorDetail]) + "…"
+	}
+	return detail
 }
 
 func decodeControlJSON(raw []byte) (map[string]any, error) {

@@ -1,5 +1,42 @@
 # Changelog
 
+## Unreleased
+
+### Breaking
+
+- Remove the admin analytics path from `GetAnalyticsOverview`. The
+  `AnalyticsOverviewOptions.Admin` and `AnalyticsOverviewOptions.OwnerID` fields
+  are gone, and the call always targets `GET /v1/analytics/overview`; the
+  `GET /v1/admin/analytics/overview` branch and its `owner_id` query are
+  removed. This SDK serves non-admin customers, so callers that set `Admin` or
+  `OwnerID` must drop them.
+
+### Security
+
+- Redact secrets from human-facing formatting. `Identity`,
+  `MqttBrokerCredentials`, and `ControlPlane` now implement `String()`, so the
+  `%v`, `%s`, and `%+v` verbs print `[REDACTED]` in place of the access key,
+  password, crypto key, MQTT username/password, and control-plane access token.
+  This changes formatted output only: `json.Marshal` — the wire protocol and the
+  persisted identity file — still serializes the real secret values.
+- `BootstrapIdentityResult.Summary(false)` — the default — now redacts the
+  secrets echoed in the raw `hub` and `client` maps (the `initial_identify`
+  access key/password/crypto key/MQTT credentials, the `initial_identify_token`,
+  and the spec's `apiKey`/`password`/`cryptoKey`), matching how it already
+  redacts the identity. `Summary(true)` is unchanged and still returns every
+  secret in the clear; never log it.
+- Strip the `?authorization=` query from data-plane transport errors before they
+  are stored in `LastError`, so `ConnectionInfo()`/`Healthcheck()` and their
+  JSON no longer leak the data-plane access key when a connection fails.
+- Bound the server detail interpolated into control-plane HTTP errors to a
+  short, single-line snippet instead of the raw response body, which for
+  `POST /v1/clients` could echo the just-sent `apiKey`/`password`/`cryptoKey`.
+- Document the inverted boolean polarity of the two `Map` methods
+  (`HubDataPlaneEndpoints.Map(redactCredentials)` redacts when true;
+  `MqttBrokerCredentials.Map(includeSecrets)` reveals when true) and the
+  protocol-mandated appearance of the access key in the MQTT client ID and topic
+  segments.
+
 ## 0.3.6
 
 - Add hub provisioning to the control plane: `CreateHub`, `UpdateHub`,

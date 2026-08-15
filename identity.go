@@ -43,6 +43,53 @@ type MqttBrokerCredentials struct {
 	TLS         bool   `json:"tls"`
 }
 
+// secretPlaceholder is the fixed marker shown in place of a secret value by the
+// human-facing String() methods below. It is a formatting-only concern: it
+// never reaches json.Marshal (the wire/API and identity-file persistence path),
+// which continues to serialize the real secret values.
+const secretPlaceholder = "[REDACTED]"
+
+// redactSecret returns secretPlaceholder for a non-empty secret and "" for an
+// empty one, so String() output never carries a live secret value while still
+// distinguishing a set secret from an unset one.
+func redactSecret(value string) string {
+	if value == "" {
+		return ""
+	}
+	return secretPlaceholder
+}
+
+// String implements fmt.Stringer so the %v, %s, and %+v verbs render an Identity
+// with its AccessKey, Password, and CryptoKey (and the nested MQTT credentials)
+// redacted. Without it, %+v would print the client's data-plane secrets into any
+// log line or error string. This affects human-facing formatting ONLY:
+// json.Marshal does not consult String(), so the wire protocol and the identity
+// file on disk still round-trip the real secret values.
+func (i Identity) String() string {
+	mqtt := "<nil>"
+	if i.MQTT != nil {
+		mqtt = i.MQTT.String()
+	}
+	return fmt.Sprintf(
+		"Identity{AccessKey:%s Password:%s CryptoKey:%s SiteID:%q DefaultMaster:%q DefaultPort:%d DefaultPath:%q PublicKey:%q DataPlaneEndpoints:%+v Protocols:%+v MQTT:%s}",
+		redactSecret(i.AccessKey), redactSecret(i.Password), redactSecret(i.CryptoKey),
+		i.SiteID, i.DefaultMaster, i.DefaultPort, i.DefaultPath, i.PublicKey,
+		i.DataPlaneEndpoints, i.Protocols, mqtt,
+	)
+}
+
+// String implements fmt.Stringer so the %v, %s, and %+v verbs render the broker
+// credentials with the Username and Password redacted, mirroring how Map(false)
+// omits them. Like Identity.String this is a formatting-only guard and does not
+// affect json.Marshal, which still serializes the real values.
+func (m MqttBrokerCredentials) String() string {
+	return fmt.Sprintf(
+		"MqttBrokerCredentials{Endpoint:%q Username:%s Password:%s TopicPrefix:%q HubID:%q C2STopic:%q S2CTopic:%q StatusTopic:%q HashTopics:%t QOS:%d TLS:%t}",
+		m.Endpoint, redactSecret(m.Username), redactSecret(m.Password),
+		m.TopicPrefix, m.HubID, m.C2STopic, m.S2CTopic, m.StatusTopic, m.HashTopics, m.QOS, m.TLS,
+	)
+}
+
 func MqttBrokerCredentialsFromMap(raw any) *MqttBrokerCredentials {
 	values := mapFromAny(raw)
 	if values == nil {
@@ -69,6 +116,12 @@ func MqttBrokerCredentialsFromMap(raw any) *MqttBrokerCredentials {
 	}
 }
 
+// Map renders the broker credentials as a plain map. Polarity note: the boolean
+// is includeSecrets, where true REVEALS the username, password, and topic
+// details and false returns only the non-sensitive endpoint and tls fields.
+// This is the OPPOSITE polarity of HubDataPlaneEndpoints.Map(redactCredentials
+// bool) in protocols.go, which redacts when its boolean is true — keep the two
+// straight at call sites.
 func (m MqttBrokerCredentials) Map(includeSecrets bool) map[string]any {
 	data := map[string]any{
 		"endpoint": m.Endpoint,

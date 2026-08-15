@@ -145,6 +145,12 @@ func (e HubDataPlaneEndpoints) HTTPBase(fallbackMaster string, fallbackPort int,
 	return endpointBase(host, fallbackPort, fallbackPath)
 }
 
+// Map renders the data-plane endpoints as a plain map. Polarity note: the
+// boolean is redactCredentials, where true STRIPS any embedded userinfo
+// credentials from each endpoint URL and false returns them verbatim. This is
+// the OPPOSITE polarity of MqttBrokerCredentials.Map(includeSecrets bool) in
+// identity.go, which reveals when its boolean is true — keep the two straight at
+// call sites.
 func (e HubDataPlaneEndpoints) Map(redactCredentials bool) map[string]string {
 	data := map[string]string{}
 	for key, endpoint := range map[string]string{

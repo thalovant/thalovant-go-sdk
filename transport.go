@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -106,7 +108,7 @@ func (t *HTTPTransport) Connect(ctx context.Context) error {
 	}
 	resp, err := t.HTTPClient.Do(req)
 	if err != nil {
-		wrapped := fmt.Errorf("%w: %v", ErrConnection, err)
+		wrapped := fmt.Errorf("%w: %v", ErrConnection, scrubTransportError(err))
 		t.failConnection(wrapped)
 		return wrapped
 	}
@@ -231,7 +233,7 @@ func (t *HTTPTransport) PollOnce(ctx context.Context) error {
 	}
 	resp, err := t.HTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrConnection, err)
+		return fmt.Errorf("%w: %v", ErrConnection, scrubTransportError(err))
 	}
 	defer resp.Body.Close()
 	var body struct {
@@ -444,7 +446,7 @@ func (t *HTTPTransport) sendHiveMessage(ctx context.Context, message HiveMessage
 	req.Header.Set("content-type", "application/x-www-form-urlencoded")
 	resp, err := t.HTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrConnection, err)
+		return fmt.Errorf("%w: %v", ErrConnection, scrubTransportError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
@@ -463,4 +465,34 @@ func mapValue(raw any) map[string]any {
 func truthy(raw any) bool {
 	value, ok := raw.(bool)
 	return ok && value
+}
+
+// scrubTransportError removes the query string from a *url.Error's URL so a
+// wrapped transport error never carries the ?authorization=<base64(user-agent:
+// access key)> data-plane credential into LastError, which ConnectionInfo() and
+// Healthcheck() serialize to JSON. Non-URL errors are returned unchanged.
+func scrubTransportError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		cleaned := *urlErr
+		cleaned.URL = stripURLQuery(urlErr.URL)
+		return &cleaned
+	}
+	return err
+}
+
+// stripURLQuery returns rawURL without its query string or fragment.
+func stripURLQuery(rawURL string) string {
+	if rawURL == "" {
+		return rawURL
+	}
+	if parsed, err := url.Parse(rawURL); err == nil {
+		parsed.RawQuery = ""
+		parsed.Fragment = ""
+		return parsed.String()
+	}
+	if idx := strings.IndexByte(rawURL, '?'); idx >= 0 {
+		return rawURL[:idx]
+	}
+	return rawURL
 }
