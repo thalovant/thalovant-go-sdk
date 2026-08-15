@@ -92,7 +92,7 @@ func (t *MQTTTransport) Connect(ctx context.Context) error {
 	t.connection.markOpen(time.Now(), false)
 	ready := t.handshakeReady
 	t.mu.Unlock()
-	if err := waitMQTTToken(ctx, client.Subscribe(t.Topics.S2C, t.Identity.MQTT.QOS, nil), "MQTT subscribe"); err != nil {
+	if err := waitMQTTToken(ctx, client.Subscribe(t.Topics.Outbound, t.Identity.MQTT.QOS, nil), "MQTT subscribe"); err != nil {
 		t.failConnection(err)
 		return err
 	}
@@ -238,7 +238,7 @@ func (t *MQTTTransport) sendHiveMessage(ctx context.Context, message HiveMessage
 	if t.Identity.MQTT != nil {
 		qos = t.Identity.MQTT.QOS
 	}
-	return waitMQTTToken(ctx, t.client.Publish(t.Topics.C2S, qos, false, payload), "MQTT publish")
+	return waitMQTTToken(ctx, t.client.Publish(t.Topics.Inbound, qos, false, payload), "MQTT publish")
 }
 
 func decodeMQTTHiveMessage(identity Identity, raw []byte) (HiveMessage, error) {
