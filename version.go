@@ -7,7 +7,7 @@ package thalovant
 //
 // Never hard-code a version inside a user-agent literal anywhere else:
 // TestNoSourceFileHardCodesAUserAgentVersion rejects it.
-const Version = "0.3.7"
+const Version = "0.3.8"
 
 // userAgentProduct is the product token shared by the data-plane and
 // control-plane user agents.
