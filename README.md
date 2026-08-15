@@ -185,6 +185,163 @@ for _, raw := range page["data"].([]any) {
 }
 ```
 
+## Provision Hubs
+
+Hubs, runtime groups, and skills can be created and managed from code. These
+routes need a **paid plan** and a token with the **`hubs:write`** scope
+("Create and update your hubs" on the dashboard's API Tokens page). A free-plan
+token fails with `HTTP 402` and `API access requires a paid plan.`, and a token
+without the scope fails with `HTTP 403` and `Insufficient scopes`.
+
+```go
+control := thalovant.NewDefaultControlPlane(os.Getenv("THALOVANT_API_TOKEN"))
+
+// 1. Discover what is installable before provisioning anything.
+catalog, err := control.ListMarketplaceSkills(ctx, thalovant.MarketplaceSkillListOptions{})
+if err != nil {
+	panic(err)
+}
+for _, raw := range catalog["data"].([]any) {
+	skill := raw.(map[string]any)
+	fmt.Println(skill["skill_id"], skill["title"], skill["access_tier"])
+}
+
+// 2. Create a runtime group to run the skills.
+group, err := control.CreateRuntimeGroup(ctx, map[string]any{
+	"name":        "kiosks",
+	"description": "Lobby kiosks",
+})
+if err != nil {
+	panic(err)
+}
+groupID := group["id"].(string)
+
+// 3. Create a hub attached to it.
+hub, err := control.CreateHub(ctx, map[string]any{
+	"name":             "joke-garden",
+	"runtime_group_id": groupID,
+	"spec":             map[string]any{"protocols": map[string]any{"wss": map[string]any{"enabled": true}}},
+}, thalovant.HubCreateOptions{})
+if err != nil {
+	panic(err)
+}
+hubID := hub["id"].(string)
+
+// 4. Install a skill from the marketplace catalog.
+if _, err := control.InstallRuntimeGroupSkill(ctx, groupID, "skill-weather", thalovant.RuntimeGroupSkillInstallOptions{}); err != nil {
+	panic(err)
+}
+
+// 5. Release: roll the runtime and the hub onto a release channel.
+_, err = control.ReleaseRuntimeGroup(ctx, groupID, thalovant.ReleaseOptions{Channel: "stable"})
+_, err = control.ReleaseHub(ctx, hubID, thalovant.ReleaseOptions{Channel: "stable"})
+```
+
+Creating a hub is idempotent. `CreateHub` always sends an `Idempotency-Key`
+header, so a call retried after a timeout returns the hub that was already
+created instead of making a second one. Set `HubCreateOptions.IdempotencyKey`
+to control the key; leave it empty and the SDK generates one.
+
+Updating and deleting a hub use optimistic locking, so `etag` is a required
+argument rather than an option. Pass the `etag` from the hub resource you read;
+the SDK sends it as `If-Match`, and the API rejects a stale or missing value
+with `HTTP 412` without changing anything:
+
+```go
+hub, err := control.GetHub(ctx, hubID)
+hub, err = control.UpdateHub(ctx, hubID, map[string]any{"active": false}, hub["etag"].(string))
+err = control.DeleteHub(ctx, hubID, hub["etag"].(string))
+```
+
+Deleting a hub also deletes its clients and ACLs. Runtime groups have no
+`If-Match` requirement, but the API refuses to delete the workspace default
+group or a group that still has hubs attached (`HTTP 409`).
+
+Payload maps take the API's snake_case keys; the camelCase spellings
+(`runtimeGroupId`, `ownerId`, `capacityProfile`, `isLocked`,
+`cloneFromDefault`) are accepted too and are renamed before the request is
+sent, so neither spelling is silently dropped.
+
+Runtime configuration is merged, not replaced, and `Personas` is replaced only
+when set:
+
+```go
+_, err = control.UpdateRuntimeGroupConfig(ctx, groupID, map[string]any{"lang": "en-us"}, thalovant.RuntimeGroupConfigOptions{})
+
+config, err := control.GetRuntimeGroupConfig(ctx, groupID)
+fmt.Println(config["config"])
+```
+
+Rating a public hub with `SetHubRating` and `ClearHubRating` needs the
+`hubs:write` scope but, unlike the routes above, no paid plan. Reading what a
+hub is actually running needs the `hubs:inspect` scope instead:
+
+```go
+capabilities, err := control.GetHubRuntimeCapabilities(ctx, hubID)
+fmt.Println(capabilities["counts"].(map[string]any)["total_intents"])
+```
+
+## Discover Skills
+
+The marketplace catalog is readable with the **`hubs:read`** scope and, unlike
+the provisioning routes above, is **not paid-gated** — a free-plan token can
+browse the whole catalog before upgrading, and only the install needs a paid
+plan.
+
+```go
+catalog, err := control.ListMarketplaceSkills(ctx, thalovant.MarketplaceSkillListOptions{})
+if err != nil {
+	panic(err)
+}
+for _, raw := range catalog["data"].([]any) {
+	skill := raw.(map[string]any)
+	fmt.Println(skill["skill_id"], skill["category"], skill["access_tier"])
+}
+```
+
+Each entry carries what an install needs (`skill_id`, `source_type`,
+`source_ref`, `config_schema`, `secret_schema`) next to presentation fields
+(`title`, `summary`, `tags`, `verified`). Admin tokens can additionally set
+`OwnerID` to read another tenant's catalog and `IncludeInactive` to see retired
+entries; both are silently ignored for non-admin callers, which are scoped to
+their own tenant and to active entries. `ForceRefresh` re-syncs the global
+catalog from source first, which is slower.
+
+Two group-scoped reads need the **`hubs:inspect`** scope and are likewise not
+paid-gated. The first resolves the catalog against one runtime group, so each
+entry reports whether it is already desired, whether it was observed running,
+and whether the tenant plan allows installing it:
+
+```go
+view, err := control.ListRuntimeGroupMarketplace(ctx, groupID, thalovant.RuntimeGroupMarketplaceOptions{})
+if err != nil {
+	panic(err)
+}
+for _, raw := range view["data"].([]any) {
+	entry := raw.(map[string]any)
+	if entry["installable"] == true && entry["active"] != true {
+		fmt.Println("available:", entry["skill_id"])
+	}
+}
+```
+
+The second answers what the group is actually running right now, rather than
+what could be installed:
+
+```go
+inventory, err := control.ListRuntimeGroupInventory(ctx, groupID, thalovant.RuntimeGroupInventoryOptions{Refresh: true})
+if err != nil {
+	panic(err)
+}
+fmt.Println(inventory["source"], len(inventory["data"].([]any)))
+```
+
+Both answer from a cached inventory snapshot by default; set
+`RefreshInventory` or `Refresh` to force a live read from the runtime operator.
+When nothing is reporting yet, `ListRuntimeGroupInventory` returns an empty
+`data` list with a pending `source` rather than failing —
+`GetHubRuntimeCapabilities` is the one that answers `HTTP 409` in that case.
+
 ## Workspace Analytics
 
 Authenticated accounts can read the same overview used by the dashboard:
@@ -429,7 +586,11 @@ for _, item := range items {
   `control.LoginWithBrowser(...)`, or mint a durable token once and pass it to
   `NewDefaultControlPlane` in CI.
 - `API access requires a paid plan`: upgrade the workspace before using the SDK
-  control-plane API to provision private resources.
+  control-plane API to provision private resources. Hub ratings and the
+  marketplace catalog are readable without one.
+- `HTTP 412` with `"ETag mismatch"`: the `etag` passed to `UpdateHub` or
+  `DeleteHub` is stale or empty. Re-read the hub with `GetHub` and retry with
+  the `etag` it returns; nothing was changed.
 - `unsupported protocol`: the hub does not expose that protocol, or the
   identity was created before that protocol was enabled.
 - MQTT fails immediately: create or download a fresh client identity after MQTT
@@ -461,6 +622,26 @@ it before resending. Per-plan limits are listed in the dashboard and at
 - `control.GetPublicHub(ctx, hubRef)`
 - `control.ListHubs(ctx, limit, cursor, ownerID)`
 - `control.GetHub(ctx, hubID)`
+- `control.CreateHub(ctx, payload, HubCreateOptions{IdempotencyKey: ...})`
+- `control.UpdateHub(ctx, hubID, payload, etag)`
+- `control.DeleteHub(ctx, hubID, etag)`
+- `control.ReleaseHub(ctx, hubID, ReleaseOptions{Channel: ..., Mode: ..., Version: ..., Images: ..., Reason: ...})`
+- `control.SetHubRating(ctx, hubID, rating)`
+- `control.ClearHubRating(ctx, hubID)`
+- `control.GetHubRuntimeCapabilities(ctx, hubID)`
+- `control.ListRuntimeGroups(ctx, ownerID)`
+- `control.GetRuntimeGroup(ctx, runtimeGroupID)`
+- `control.CreateRuntimeGroup(ctx, payload)`
+- `control.UpdateRuntimeGroup(ctx, runtimeGroupID, payload)`
+- `control.GetRuntimeGroupConfig(ctx, runtimeGroupID)`
+- `control.UpdateRuntimeGroupConfig(ctx, runtimeGroupID, config, RuntimeGroupConfigOptions{Personas: ...})`
+- `control.ReleaseRuntimeGroup(ctx, runtimeGroupID, ReleaseOptions{...})`
+- `control.DeleteRuntimeGroup(ctx, runtimeGroupID)`
+- `control.InstallRuntimeGroupSkill(ctx, runtimeGroupID, skillID, RuntimeGroupSkillInstallOptions{MarketplaceSkillID: ..., SourceType: ..., SourceRef: ..., VersionPin: ..., Active: ...})`
+- `control.UninstallRuntimeGroupSkill(ctx, runtimeGroupID, skillID)`
+- `control.ListMarketplaceSkills(ctx, MarketplaceSkillListOptions{OwnerID: ..., IncludeInactive: ..., ForceRefresh: ...})`
+- `control.ListRuntimeGroupMarketplace(ctx, runtimeGroupID, RuntimeGroupMarketplaceOptions{RefreshInventory: ...})`
+- `control.ListRuntimeGroupInventory(ctx, runtimeGroupID, RuntimeGroupInventoryOptions{Refresh: ...})`
 - `control.GetOperation(ctx, operationID)`
 - `control.GetAnalyticsOverview(ctx, options)`
 - `control.ListMemoryItems(ctx, options)`

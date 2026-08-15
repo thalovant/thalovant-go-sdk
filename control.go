@@ -111,6 +111,71 @@ type MemoryListOptions struct {
 	Offset         int
 }
 
+// HubCreateOptions carries the optional inputs of CreateHub. IdempotencyKey
+// overrides the key the SDK generates for the Idempotency-Key header; leave it
+// empty to let CreateHub mint one.
+type HubCreateOptions struct {
+	IdempotencyKey string
+}
+
+// ReleaseOptions carries the release policy ReleaseHub and ReleaseRuntimeGroup
+// apply. Every field is optional and an unset field is omitted from the request
+// body, so the API falls back to the workspace release policy for it. Setting
+// Images switches the target to "custom" mode unless Mode is also set.
+type ReleaseOptions struct {
+	Channel string
+	Mode    string
+	Version string
+	Images  map[string]string
+	Reason  string
+}
+
+// RuntimeGroupConfigOptions carries the optional inputs of
+// UpdateRuntimeGroupConfig. Personas replaces the stored personas when
+// non-nil and is omitted from the request body when nil.
+type RuntimeGroupConfigOptions struct {
+	Personas map[string]any
+}
+
+// RuntimeGroupSkillInstallOptions carries the optional inputs of
+// InstallRuntimeGroupSkill. The zero value installs an active skill from the
+// marketplace catalog: SourceType defaults to "catalog" when empty and Active
+// defaults to true when nil. A "git" install needs SourceRef set to the
+// repository URL.
+type RuntimeGroupSkillInstallOptions struct {
+	MarketplaceSkillID string
+	SourceType         string
+	SourceRef          string
+	VersionPin         string
+	Active             *bool
+}
+
+// MarketplaceSkillListOptions carries the optional inputs of
+// ListMarketplaceSkills. OwnerID and IncludeInactive are honored for admin
+// tokens only; the API silently scopes a non-admin caller to their own tenant
+// and to active entries instead of failing. ForceRefresh re-syncs the global
+// catalog from its source before answering, which is slower.
+type MarketplaceSkillListOptions struct {
+	OwnerID         string
+	IncludeInactive bool
+	ForceRefresh    bool
+}
+
+// RuntimeGroupMarketplaceOptions carries the optional inputs of
+// ListRuntimeGroupMarketplace. RefreshInventory forces a live read from the
+// runtime operator instead of answering from the cached inventory snapshot.
+type RuntimeGroupMarketplaceOptions struct {
+	RefreshInventory bool
+}
+
+// RuntimeGroupInventoryOptions carries the optional inputs of
+// ListRuntimeGroupInventory. Refresh forces a live read from the runtime
+// operator; the API also refreshes on its own when it holds no cached
+// snapshot.
+type RuntimeGroupInventoryOptions struct {
+	Refresh bool
+}
+
 func NewControlPlane(apiURL string, accessToken string) *ControlPlane {
 	return &ControlPlane{
 		APIURL:      normalizeControlAPIURL(apiURL),
@@ -455,6 +520,305 @@ func (c *ControlPlane) GetPublicHub(ctx context.Context, hubRef string) (map[str
 	return c.request(ctx, http.MethodGet, "/v1/public/hubs/"+url.PathEscape(hubRef), nil, nil, false)
 }
 
+// CreateHub creates a hub.
+//
+// payload mirrors the API's hub create body: "name" and "spec" are required,
+// and "slug", "namespace", "runtime_group_id", "domain", "active",
+// "visibility", "capacity_profile", and "owner_id" are optional. camelCase
+// keys are accepted and sent as snake_case.
+//
+// The request is idempotent: an Idempotency-Key header is always sent, using
+// HubCreateOptions.IdempotencyKey when set and a generated key otherwise, so a
+// create retried after a timeout returns the first hub instead of making a
+// second one.
+//
+// Requires a paid plan and a token with the hubs:write scope. A free-plan
+// token fails with HTTP 402.
+func (c *ControlPlane) CreateHub(ctx context.Context, payload map[string]any, opts HubCreateOptions) (map[string]any, error) {
+	idempotencyKey := opts.IdempotencyKey
+	if idempotencyKey == "" {
+		idempotencyKey = NewRequestID()
+	}
+	headers := map[string]string{"Idempotency-Key": idempotencyKey}
+	return c.request(ctx, http.MethodPost, "/v1/hubs", hubRequestPayload(payload), headers, true)
+}
+
+// UpdateHub partially updates a hub.
+//
+// The API enforces optimistic locking on this route, so etag is required: pass
+// the "etag" of the hub resource you read and the SDK sends it as If-Match. A
+// stale or empty value fails with HTTP 412 and changes nothing; re-read the
+// hub with GetHub and retry with the new etag.
+//
+// Requires a paid plan and a token with the hubs:write scope.
+func (c *ControlPlane) UpdateHub(ctx context.Context, hubID string, payload map[string]any, etag string) (map[string]any, error) {
+	headers := map[string]string{"If-Match": etag}
+	return c.request(ctx, http.MethodPatch, "/v1/hubs/"+url.PathEscape(hubID), hubRequestPayload(payload), headers, true)
+}
+
+// DeleteHub deletes a hub and its dependent clients and ACLs.
+//
+// Like UpdateHub this route requires the hub's current etag, sent as If-Match;
+// a stale or empty value fails with HTTP 412.
+//
+// Requires a paid plan and a token with the hubs:write scope.
+func (c *ControlPlane) DeleteHub(ctx context.Context, hubID string, etag string) error {
+	headers := map[string]string{"If-Match": etag}
+	_, err := c.request(ctx, http.MethodDelete, "/v1/hubs/"+url.PathEscape(hubID), nil, headers, true)
+	return err
+}
+
+// ReleaseHub applies a hub release policy and returns the updated hub.
+//
+// Requires a paid plan and a token with the hubs:write scope.
+func (c *ControlPlane) ReleaseHub(ctx context.Context, hubID string, opts ReleaseOptions) (map[string]any, error) {
+	path := "/v1/hubs/" + url.PathEscape(hubID) + "/release"
+	return c.request(ctx, http.MethodPost, path, releaseRequestPayload(opts), nil, true)
+}
+
+// SetHubRating rates a public hub from 1 to 5 and returns the updated hub.
+//
+// Only public hubs can be rated, and owners cannot rate their own hubs.
+// Requires a token with the hubs:write scope; unlike the provisioning routes
+// this one is not paid-gated.
+func (c *ControlPlane) SetHubRating(ctx context.Context, hubID string, rating int) (map[string]any, error) {
+	path := "/v1/hubs/" + url.PathEscape(hubID) + "/rating"
+	return c.request(ctx, http.MethodPut, path, map[string]any{"rating": rating}, nil, true)
+}
+
+// ClearHubRating removes the caller's rating from a public hub and returns the
+// updated hub.
+//
+// Requires a token with the hubs:write scope; it is not paid-gated.
+func (c *ControlPlane) ClearHubRating(ctx context.Context, hubID string) (map[string]any, error) {
+	path := "/v1/hubs/" + url.PathEscape(hubID) + "/rating"
+	return c.request(ctx, http.MethodDelete, path, nil, nil, true)
+}
+
+// GetHubRuntimeCapabilities reads the live skill and intent inventory a hub
+// runtime exposes.
+//
+// Requires a token with the hubs:inspect scope. The API answers HTTP 409 when
+// the hub has no connected client that can report inventory and no runtime
+// group snapshot to fall back on. ListRuntimeGroupInventory is the read that
+// reports a pending source instead of failing.
+func (c *ControlPlane) GetHubRuntimeCapabilities(ctx context.Context, hubID string) (map[string]any, error) {
+	path := "/v1/hubs/" + url.PathEscape(hubID) + "/runtime-capabilities"
+	return c.request(ctx, http.MethodGet, path, nil, nil, true)
+}
+
+// ListRuntimeGroups lists the runtime groups visible to the authenticated
+// user. An empty ownerID is omitted from the query.
+//
+// Requires a token with the hubs:read scope.
+func (c *ControlPlane) ListRuntimeGroups(ctx context.Context, ownerID string) (map[string]any, error) {
+	path := "/v1/runtime-groups"
+	query := url.Values{}
+	setStringQuery(query, "owner_id", ownerID)
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	return c.request(ctx, http.MethodGet, path, nil, nil, true)
+}
+
+// GetRuntimeGroup fetches one runtime group.
+//
+// Requires a token with the hubs:read scope.
+func (c *ControlPlane) GetRuntimeGroup(ctx context.Context, runtimeGroupID string) (map[string]any, error) {
+	return c.request(ctx, http.MethodGet, "/v1/runtime-groups/"+url.PathEscape(runtimeGroupID), nil, nil, true)
+}
+
+// CreateRuntimeGroup creates a runtime group.
+//
+// payload takes the API's create body: "name" is required, and "description",
+// "environment", "owner_id", and "clone_from_default" are optional. camelCase
+// keys are accepted and sent as snake_case.
+//
+// Requires a paid plan and a token with the hubs:write scope.
+func (c *ControlPlane) CreateRuntimeGroup(ctx context.Context, payload map[string]any) (map[string]any, error) {
+	return c.request(ctx, http.MethodPost, "/v1/runtime-groups", runtimeGroupRequestPayload(payload), nil, true)
+}
+
+// UpdateRuntimeGroup updates a runtime group's "name", "description", or
+// "spec". "spec" patches "replicas" and container "resources". Unlike the hub
+// routes this one reads no If-Match header.
+//
+// Requires a paid plan and a token with the hubs:write scope.
+func (c *ControlPlane) UpdateRuntimeGroup(ctx context.Context, runtimeGroupID string, payload map[string]any) (map[string]any, error) {
+	path := "/v1/runtime-groups/" + url.PathEscape(runtimeGroupID)
+	return c.request(ctx, http.MethodPatch, path, runtimeGroupRequestPayload(payload), nil, true)
+}
+
+// GetRuntimeGroupConfig reads a runtime group's runtime configuration and
+// personas.
+//
+// Requires a token with the hubs:read scope.
+func (c *ControlPlane) GetRuntimeGroupConfig(ctx context.Context, runtimeGroupID string) (map[string]any, error) {
+	path := "/v1/runtime-groups/" + url.PathEscape(runtimeGroupID) + "/config"
+	return c.request(ctx, http.MethodGet, path, nil, nil, true)
+}
+
+// UpdateRuntimeGroupConfig merges runtime configuration into a runtime group.
+//
+// The API merges config into the stored configuration rather than replacing
+// it, and marks the group pending so the runtime operator reconciles the
+// change. RuntimeGroupConfigOptions.Personas is replaced only when non-nil.
+//
+// Requires a paid plan and a token with the hubs:write scope.
+func (c *ControlPlane) UpdateRuntimeGroupConfig(ctx context.Context, runtimeGroupID string, config map[string]any, opts RuntimeGroupConfigOptions) (map[string]any, error) {
+	if config == nil {
+		config = map[string]any{}
+	}
+	payload := map[string]any{"config": config}
+	if opts.Personas != nil {
+		payload["personas"] = opts.Personas
+	}
+	path := "/v1/runtime-groups/" + url.PathEscape(runtimeGroupID) + "/config"
+	return c.request(ctx, http.MethodPatch, path, payload, nil, true)
+}
+
+// ReleaseRuntimeGroup applies a runtime image policy and returns the updated
+// runtime group. Options behave like ReleaseHub.
+//
+// Requires a paid plan and a token with the hubs:write scope.
+func (c *ControlPlane) ReleaseRuntimeGroup(ctx context.Context, runtimeGroupID string, opts ReleaseOptions) (map[string]any, error) {
+	path := "/v1/runtime-groups/" + url.PathEscape(runtimeGroupID) + "/release"
+	return c.request(ctx, http.MethodPost, path, releaseRequestPayload(opts), nil, true)
+}
+
+// DeleteRuntimeGroup deletes a runtime group.
+//
+// The API answers HTTP 409 for the workspace default group and for a group
+// that still has hubs attached.
+//
+// Requires a paid plan and a token with the hubs:write scope.
+func (c *ControlPlane) DeleteRuntimeGroup(ctx context.Context, runtimeGroupID string) error {
+	_, err := c.request(ctx, http.MethodDelete, "/v1/runtime-groups/"+url.PathEscape(runtimeGroupID), nil, nil, true)
+	return err
+}
+
+// InstallRuntimeGroupSkill installs, or re-installs, a skill in a runtime
+// group.
+//
+// The default source type of "catalog" installs a marketplace skill and
+// requires the skill to exist in the catalog; a "git" install needs
+// RuntimeGroupSkillInstallOptions.SourceRef. Installing a skill that is
+// already present updates the existing entry.
+//
+// Requires a paid plan and a token with the hubs:write scope. Paid marketplace
+// skills also need marketplace access on the tenant plan.
+func (c *ControlPlane) InstallRuntimeGroupSkill(ctx context.Context, runtimeGroupID string, skillID string, opts RuntimeGroupSkillInstallOptions) (map[string]any, error) {
+	sourceType := opts.SourceType
+	if sourceType == "" {
+		sourceType = "catalog"
+	}
+	active := true
+	if opts.Active != nil {
+		active = *opts.Active
+	}
+	payload := map[string]any{
+		"skill_id":    skillID,
+		"source_type": sourceType,
+		"active":      active,
+	}
+	if opts.MarketplaceSkillID != "" {
+		payload["marketplace_skill_id"] = opts.MarketplaceSkillID
+	}
+	if opts.SourceRef != "" {
+		payload["source_ref"] = opts.SourceRef
+	}
+	if opts.VersionPin != "" {
+		payload["version_pin"] = opts.VersionPin
+	}
+	path := "/v1/runtime-groups/" + url.PathEscape(runtimeGroupID) + "/skills"
+	return c.request(ctx, http.MethodPost, path, payload, nil, true)
+}
+
+// UninstallRuntimeGroupSkill removes a skill from a runtime group.
+//
+// Requires a paid plan and a token with the hubs:write scope.
+func (c *ControlPlane) UninstallRuntimeGroupSkill(ctx context.Context, runtimeGroupID string, skillID string) error {
+	path := "/v1/runtime-groups/" + url.PathEscape(runtimeGroupID) + "/skills/" + url.PathEscape(skillID)
+	_, err := c.request(ctx, http.MethodDelete, path, nil, nil, true)
+	return err
+}
+
+// ListMarketplaceSkills lists the marketplace skill catalog visible to the
+// authenticated user.
+//
+// The returned "data" entries carry the catalog fields an install needs --
+// "skill_id", "source_type", "source_ref", "package_name", "version"
+// compatibility, "config_schema" and "secret_schema" -- alongside presentation
+// and access fields such as "category", "tags", "verified", "access_tier" and
+// "billing_sku". Global catalog entries and the caller's own tenant entries
+// are both included.
+//
+// Requires a token with the hubs:read scope. Unlike the provisioning routes
+// this catalog is not paid-gated, so free-plan callers can browse the
+// marketplace before upgrading; only the install itself needs a paid plan.
+func (c *ControlPlane) ListMarketplaceSkills(ctx context.Context, opts MarketplaceSkillListOptions) (map[string]any, error) {
+	path := "/v1/marketplace/skills"
+	query := url.Values{}
+	setStringQuery(query, "owner_id", opts.OwnerID)
+	if opts.IncludeInactive {
+		query.Set("include_inactive", "true")
+	}
+	if opts.ForceRefresh {
+		query.Set("force_refresh", "true")
+	}
+	if encoded := query.Encode(); encoded != "" {
+		path += "?" + encoded
+	}
+	return c.request(ctx, http.MethodGet, path, nil, nil, true)
+}
+
+// ListRuntimeGroupMarketplace lists the marketplace catalog resolved against
+// one runtime group.
+//
+// This is the discovery view to use before installing: every catalog entry is
+// returned with the group's own state folded in -- whether the skill is
+// desired ("active", "version_pin", "source_type"), whether it was observed
+// running ("observed_source", "observed_at", intent counts), operator status
+// fields, and the access verdict for the tenant plan ("purchase_required",
+// "installable", "access_message"). The envelope also carries
+// "runtime_group_id", "observed_at", "source", "operator_phase" and
+// "operator_message".
+//
+// Requires a token with the hubs:inspect scope; no paid plan is needed to
+// browse. The API answers HTTP 404 for an unknown group and HTTP 403 when the
+// caller does not own it.
+func (c *ControlPlane) ListRuntimeGroupMarketplace(ctx context.Context, runtimeGroupID string, opts RuntimeGroupMarketplaceOptions) (map[string]any, error) {
+	path := "/v1/runtime-groups/" + url.PathEscape(runtimeGroupID) + "/marketplace"
+	if opts.RefreshInventory {
+		path += "?refresh_inventory=true"
+	}
+	return c.request(ctx, http.MethodGet, path, nil, nil, true)
+}
+
+// ListRuntimeGroupInventory lists the skills a runtime group is actually
+// observed running.
+//
+// Where ListRuntimeGroupMarketplace answers "what could be installed here",
+// this answers "what is loaded right now": each entry carries "skill_id",
+// "version", "source", "active", "adapt_intents", "padatious_intents",
+// "total_intents" and "observed_at". The envelope reports the observation's
+// provenance in "source" -- "ovos-runtime-operator", "runtime-group-cache" or
+// "ovos-runtime-operator-pending" -- plus "operator_phase" and
+// "operator_message".
+//
+// Unlike GetHubRuntimeCapabilities this route does not answer HTTP 409 when
+// nothing is reporting: it returns an empty "data" list with a pending
+// "source" instead.
+//
+// Requires a token with the hubs:inspect scope; no paid plan is needed.
+func (c *ControlPlane) ListRuntimeGroupInventory(ctx context.Context, runtimeGroupID string, opts RuntimeGroupInventoryOptions) (map[string]any, error) {
+	path := "/v1/runtime-groups/" + url.PathEscape(runtimeGroupID) + "/inventory"
+	if opts.Refresh {
+		path += "?refresh=true"
+	}
+	return c.request(ctx, http.MethodGet, path, nil, nil, true)
+}
+
 func (c *ControlPlane) CreateClient(ctx context.Context, payload map[string]any, idempotencyKey string) (map[string]any, error) {
 	if idempotencyKey == "" {
 		idempotencyKey = NewRequestID()
@@ -669,6 +1033,63 @@ func normalizeControlAPIURL(apiURL string) string {
 	}
 	normalized = strings.TrimSuffix(normalized, "/v1")
 	return strings.TrimRight(normalized, "/") + "/"
+}
+
+// snakeCaseRequestPayload copies a request body, renaming the camelCase keys
+// the API takes as snake_case. Renaming rather than duplicating keeps an
+// unknown camelCase key from being silently dropped by the API's request
+// model.
+func snakeCaseRequestPayload(payload map[string]any, renames map[string]string) map[string]any {
+	if payload == nil {
+		return nil
+	}
+	data := make(map[string]any, len(payload))
+	for key, val := range payload {
+		if target, ok := renames[key]; ok {
+			key = target
+		}
+		data[key] = val
+	}
+	return data
+}
+
+func hubRequestPayload(payload map[string]any) map[string]any {
+	return snakeCaseRequestPayload(payload, map[string]string{
+		"ownerId":         "owner_id",
+		"runtimeGroupId":  "runtime_group_id",
+		"capacityProfile": "capacity_profile",
+		"isLocked":        "is_locked",
+	})
+}
+
+func runtimeGroupRequestPayload(payload map[string]any) map[string]any {
+	return snakeCaseRequestPayload(payload, map[string]string{
+		"ownerId":          "owner_id",
+		"cloneFromDefault": "clone_from_default",
+	})
+}
+
+// releaseRequestPayload builds a release-apply body, omitting the options the
+// caller left unset. The result is never nil, so a fully unset ReleaseOptions
+// still sends an empty JSON object rather than no body at all.
+func releaseRequestPayload(opts ReleaseOptions) map[string]any {
+	payload := map[string]any{}
+	if opts.Channel != "" {
+		payload["channel"] = opts.Channel
+	}
+	if opts.Mode != "" {
+		payload["mode"] = opts.Mode
+	}
+	if opts.Version != "" {
+		payload["version"] = opts.Version
+	}
+	if opts.Images != nil {
+		payload["images"] = opts.Images
+	}
+	if opts.Reason != "" {
+		payload["reason"] = opts.Reason
+	}
+	return payload
 }
 
 func setStringQuery(query url.Values, key string, val string) {
