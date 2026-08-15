@@ -16,9 +16,10 @@
 - Redact secrets from human-facing formatting. `Identity`,
   `MqttBrokerCredentials`, and `ControlPlane` now implement `String()`, so the
   `%v`, `%s`, and `%+v` verbs print `[REDACTED]` in place of the access key,
-  password, crypto key, MQTT username/password, and control-plane access token.
-  This changes formatted output only: `json.Marshal` — the wire protocol and the
-  persisted identity file — still serializes the real secret values.
+  password, crypto key, MQTT username/password, control-plane access token, and
+  any userinfo embedded in data-plane endpoint URLs. This changes formatted
+  output only: `json.Marshal` — the wire protocol and the persisted identity
+  file — still serializes the real secret values.
 - `BootstrapIdentityResult.Summary(false)` — the default — now redacts the
   secrets echoed in the raw `hub` and `client` maps (the `initial_identify`
   access key/password/crypto key/MQTT credentials, the `initial_identify_token`,
@@ -28,9 +29,11 @@
 - Strip the `?authorization=` query from data-plane transport errors before they
   are stored in `LastError`, so `ConnectionInfo()`/`Healthcheck()` and their
   JSON no longer leak the data-plane access key when a connection fails.
-- Bound the server detail interpolated into control-plane HTTP errors to a
-  short, single-line snippet instead of the raw response body, which for
-  `POST /v1/clients` could echo the just-sent `apiKey`/`password`/`cryptoKey`.
+- Surface only an allowlist of non-secret JSON message fields (`detail`,
+  `message`, `error`, ...) in control-plane HTTP errors, bounded and
+  single-line, and omit any other body. A failed `POST /v1/clients` response can
+  echo the just-sent `apiKey`/`password`/`cryptoKey`, so arbitrary response body
+  text is never interpolated into an error string.
 - Document the inverted boolean polarity of the two `Map` methods
   (`HubDataPlaneEndpoints.Map(redactCredentials)` redacts when true;
   `MqttBrokerCredentials.Map(includeSecrets)` reveals when true) and the

@@ -70,11 +70,14 @@ func (i Identity) String() string {
 	if i.MQTT != nil {
 		mqtt = i.MQTT.String()
 	}
+	// Map(true) strips any embedded userinfo from the endpoint URLs so a
+	// data-plane endpoint like https://user:pass@host cannot leak its
+	// credentials through %v/%s/%+v.
 	return fmt.Sprintf(
 		"Identity{AccessKey:%s Password:%s CryptoKey:%s SiteID:%q DefaultMaster:%q DefaultPort:%d DefaultPath:%q PublicKey:%q DataPlaneEndpoints:%+v Protocols:%+v MQTT:%s}",
 		redactSecret(i.AccessKey), redactSecret(i.Password), redactSecret(i.CryptoKey),
 		i.SiteID, i.DefaultMaster, i.DefaultPort, i.DefaultPath, i.PublicKey,
-		i.DataPlaneEndpoints, i.Protocols, mqtt,
+		i.DataPlaneEndpoints.Map(true), i.Protocols, mqtt,
 	)
 }
 

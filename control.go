@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"reflect"
 	"runtime"
 	"strings"
 	"time"
@@ -986,22 +987,42 @@ func redactBootstrapSecrets(value map[string]any) map[string]any {
 	return redacted
 }
 
+// redactSensitiveTree returns value with the values of any secret-named keys
+// (see bootstrapSecretKeys) replaced by secretPlaceholder, recursing through
+// nested maps and slices of ANY key/element type. It reflects rather than
+// switching on map[string]any/[]any alone so a caller-built result carrying a
+// typed container (map[string]string, []string, []map[string]string, ...)
+// cannot smuggle a nested secret past the gate. The source is never mutated:
+// each container is rebuilt as a fresh map[string]any / []any.
 func redactSensitiveTree(value any) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		cloned := make(map[string]any, len(typed))
-		for key, val := range typed {
+	if value == nil {
+		return nil
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Map:
+		cloned := make(map[string]any, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			key := fmt.Sprint(iter.Key().Interface())
 			if _, secret := bootstrapSecretKeys[strings.ToLower(key)]; secret {
 				cloned[key] = secretPlaceholder
 				continue
 			}
-			cloned[key] = redactSensitiveTree(val)
+			cloned[key] = redactSensitiveTree(iter.Value().Interface())
 		}
 		return cloned
-	case []any:
-		cloned := make([]any, len(typed))
-		for i, val := range typed {
-			cloned[i] = redactSensitiveTree(val)
+	case reflect.Slice, reflect.Array:
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			// A []byte is opaque bytes, not a container of nested values; leave
+			// it intact rather than exploding it into a slice of numbers. A
+			// secret-named []byte is already redacted by the map branch above
+			// before recursion ever reaches it.
+			return value
+		}
+		cloned := make([]any, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			cloned[i] = redactSensitiveTree(rv.Index(i).Interface())
 		}
 		return cloned
 	default:
@@ -1074,21 +1095,50 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 	return resp.StatusCode, raw, nil
 }
 
-// maxServerErrorDetail bounds how much of a non-2xx response body is echoed
-// into an error message.
+// maxServerErrorDetail bounds how much of a surfaced server message is echoed
+// into an error string.
 const maxServerErrorDetail = 256
 
-// serverErrorDetail turns a raw response body into a short, single-line detail
-// for an error message. It collapses all whitespace (so an embedded newline
-// cannot break log parsing) and truncates to maxServerErrorDetail runes. This
-// keeps the error bounded instead of interpolating an unbounded body that, for
-// routes such as POST /v1/clients, may echo the request's freshly minted
-// apiKey/password/cryptoKey back to the caller.
+// serverErrorOmitted stands in for a body that is not a recognizable JSON error
+// object, so a response that reflects the request cannot launder secrets into an
+// error string.
+const serverErrorOmitted = "(server error response omitted)"
+
+// serverErrorDetailFields is the allowlist of top-level JSON fields a control
+// plane error body may surface. They are the server's own human-readable
+// message, never the echoed request payload, which carries the freshly minted
+// apiKey/password/cryptoKey under other keys such as "spec".
+var serverErrorDetailFields = []string{"detail", "message", "error", "error_description", "code", "title"}
+
+// serverErrorDetail turns a raw non-2xx response body into a short, single-line
+// error detail. It never interpolates arbitrary body text: it decodes the body
+// as a JSON object and surfaces only the allowlisted, non-secret message fields
+// (whitespace-collapsed and length-bounded). A body that is not a JSON object,
+// or that carries none of those fields, is omitted entirely -- a failed
+// POST /v1/clients response can echo the request's apiKey/password/cryptoKey,
+// and truncation alone would not protect a secret near the start of the body.
 func serverErrorDetail(raw []byte) string {
-	detail := strings.Join(strings.Fields(string(raw)), " ")
-	if detail == "" {
+	if len(bytes.TrimSpace(raw)) == 0 {
 		return "(no response body)"
 	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return serverErrorOmitted
+	}
+	parts := make([]string, 0, len(serverErrorDetailFields))
+	for _, field := range serverErrorDetailFields {
+		text, ok := decoded[field].(string)
+		if !ok {
+			continue
+		}
+		if text = strings.TrimSpace(text); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	if len(parts) == 0 {
+		return serverErrorOmitted
+	}
+	detail := strings.Join(strings.Fields(strings.Join(parts, " ")), " ")
 	if runes := []rune(detail); len(runes) > maxServerErrorDetail {
 		detail = string(runes[:maxServerErrorDetail]) + "…"
 	}

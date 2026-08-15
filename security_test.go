@@ -26,6 +26,10 @@ func TestIdentityStringRedactsSecretsButJSONRetainsThem(t *testing.T) {
 		DefaultMaster: "https://hub.example.com",
 		DefaultPort:   443,
 		PublicKey:     "pub-not-secret",
+		DataPlaneEndpoints: HubDataPlaneEndpoints{
+			HTTPS: "https://ep-user:ep-pass-SECRET-6666@hub.example.com",
+			WSS:   "wss://hub.example.com",
+		},
 		MQTT: &MqttBrokerCredentials{
 			Endpoint: "mqtts://broker.example.com:8883",
 			Username: "mqtt-user-SECRET-4444",
@@ -36,6 +40,7 @@ func TestIdentityStringRedactsSecretsButJSONRetainsThem(t *testing.T) {
 	secrets := []string{
 		identity.AccessKey, identity.Password, identity.CryptoKey,
 		identity.MQTT.Username, identity.MQTT.Password,
+		"ep-pass-SECRET-6666", // userinfo embedded in a data-plane endpoint URL
 	}
 
 	for _, format := range []string{"%v", "%s", "%+v"} {
@@ -159,6 +164,9 @@ func TestBootstrapSummaryRedactsHubAndClientSecretsByDefault(t *testing.T) {
 		"id":        "hub-1",
 		"name":      "kiosk-hub",
 		"bootstrap": map[string]any{"access_key": "hub-ak-SECRET"},
+		// Typed containers a caller could hand-build must be traversed too.
+		"typed_creds": map[string]string{"password": "typedmap-SECRET"},
+		"typed_list":  []map[string]string{{"crypto_key": "typedslice-SECRET"}},
 	}
 	result := BootstrapIdentityResult{
 		Identity: Identity{
@@ -173,6 +181,7 @@ func TestBootstrapSummaryRedactsHubAndClientSecretsByDefault(t *testing.T) {
 		"iit-SECRET-token", "ak-SECRET", "pw-SECRET", "ck-SECRET", "mqttpw-SECRET",
 		"specak-SECRET", "specpw-SECRET", "specck-SECRET", "hub-ak-SECRET",
 		"id-ak-SECRET", "id-pw-SECRET", "id-ck-SECRET",
+		"typedmap-SECRET", "typedslice-SECRET",
 	}
 
 	safe, err := json.Marshal(result.Summary(false))
@@ -195,7 +204,7 @@ func TestBootstrapSummaryRedactsHubAndClientSecretsByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, secret := range []string{"iit-SECRET-token", "specak-SECRET", "mqttpw-SECRET", "id-ak-SECRET"} {
+	for _, secret := range []string{"iit-SECRET-token", "specak-SECRET", "mqttpw-SECRET", "id-ak-SECRET", "typedmap-SECRET", "typedslice-SECRET"} {
 		if !strings.Contains(string(revealed), secret) {
 			t.Fatalf("include-secrets summary dropped secret %q: %s", secret, revealed)
 		}
@@ -239,6 +248,15 @@ func TestStripURLQueryRemovesQueryAndFragment(t *testing.T) {
 	}
 	if got := stripURLQuery(""); got != "" {
 		t.Fatalf("empty input should stay empty, got %q", got)
+	}
+	// The fallback path (url.Parse fails on the invalid control character) must
+	// drop a fragment, not only a query.
+	malformed := "http://host/\x7fpath#authorization=frag"
+	if _, err := url.Parse(malformed); err == nil {
+		t.Fatal("test precondition: expected url.Parse to reject the malformed URL")
+	}
+	if got := stripURLQuery(malformed); strings.ContainsAny(got, "#") || strings.Contains(got, "authorization") {
+		t.Fatalf("fallback must strip the fragment, got %q", got)
 	}
 }
 
@@ -295,21 +313,38 @@ func TestHTTPTransportConnectDoesNotLeakAccessKeyInLastError(t *testing.T) {
 // F9: non-2xx control-plane errors keep the status plus a bounded, single-line
 // server detail instead of interpolating the raw (possibly secret-echoing) body.
 
-func TestServerErrorDetailBoundsAndCollapsesBody(t *testing.T) {
+func TestServerErrorDetailSurfacesOnlyAllowlistedJSONFields(t *testing.T) {
 	if got := serverErrorDetail(nil); got != "(no response body)" {
 		t.Fatalf("empty body: got %q", got)
 	}
 	if got := serverErrorDetail([]byte("  \n\t ")); got != "(no response body)" {
 		t.Fatalf("whitespace-only body: got %q", got)
 	}
-	multiline := serverErrorDetail([]byte("first line\nsecond line\r\nthird"))
-	if strings.ContainsAny(multiline, "\n\r") {
-		t.Fatalf("detail must be single-line: %q", multiline)
+	// A non-JSON body is omitted, never echoed.
+	if got := serverErrorDetail([]byte("<html>token-abc-1234</html>")); got != serverErrorOmitted {
+		t.Fatalf("non-json body should be omitted, got %q", got)
 	}
-	if multiline != "first line second line third" {
-		t.Fatalf("unexpected collapsed detail: %q", multiline)
+	// JSON without an allowlisted field is omitted (the request-echo case).
+	if got := serverErrorDetail([]byte(`{"spec":{"apiKey":"leak-SECRET"}}`)); got != serverErrorOmitted {
+		t.Fatalf("json without an allowlisted field should be omitted, got %q", got)
 	}
-	long := serverErrorDetail([]byte(strings.Repeat("A", maxServerErrorDetail+50)))
+	// A failed POST /v1/clients response that both echoes the request and
+	// carries a server message must surface only the message, never the secrets.
+	echoed := serverErrorDetail([]byte(`{"detail":"invalid client spec","spec":{"apiKey":"ak-SECRET","password":"pw-SECRET","cryptoKey":"ck-SECRET"}}`))
+	if echoed != "invalid client spec" {
+		t.Fatalf("expected only the detail message, got %q", echoed)
+	}
+	for _, secret := range []string{"ak-SECRET", "pw-SECRET", "ck-SECRET"} {
+		if strings.Contains(echoed, secret) {
+			t.Fatalf("detail leaked request secret %q: %s", secret, echoed)
+		}
+	}
+	// The surfaced message is whitespace-collapsed to a single line.
+	if got := serverErrorDetail([]byte("{\"message\":\"line one\\nline two\"}")); got != "line one line two" {
+		t.Fatalf("message whitespace not collapsed: %q", got)
+	}
+	// An over-long message is bounded with an ellipsis.
+	long := serverErrorDetail([]byte(`{"detail":"` + strings.Repeat("A", maxServerErrorDetail+50) + `"}`))
 	if runes := []rune(long); len(runes) != maxServerErrorDetail+1 { // +1 for the ellipsis
 		t.Fatalf("expected %d runes, got %d: %q", maxServerErrorDetail+1, len(runes), long)
 	}
@@ -318,8 +353,10 @@ func TestServerErrorDetailBoundsAndCollapsesBody(t *testing.T) {
 	}
 }
 
-func TestControlPlaneErrorBodyIsBoundedAndSingleLine(t *testing.T) {
-	body := "error-head\n" + strings.Repeat("x", maxServerErrorDetail) + "TAIL-MARKER"
+func TestControlPlaneErrorBodyIsBoundedAndScrubbed(t *testing.T) {
+	// A JSON error that both overflows the bound and echoes the request's
+	// generated secrets under "spec".
+	body := `{"detail":"` + strings.Repeat("d", maxServerErrorDetail) + `TAIL-MARKER","spec":{"apiKey":"echoed-SECRET","password":"echoed-pw-SECRET"}}`
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 		_, _ = w.Write([]byte(body))
@@ -341,11 +378,26 @@ func TestControlPlaneErrorBodyIsBoundedAndSingleLine(t *testing.T) {
 	if !strings.Contains(msg, "500") {
 		t.Fatalf("error should report the HTTP status: %q", msg)
 	}
+	for _, secret := range []string{"echoed-SECRET", "echoed-pw-SECRET"} {
+		if strings.Contains(msg, secret) {
+			t.Fatalf("error leaked an echoed request secret %q: %s", secret, msg)
+		}
+	}
 	if strings.Contains(msg, "TAIL-MARKER") {
-		t.Fatalf("error must be truncated, not echo the whole body: %q", msg)
+		t.Fatalf("error must be truncated, not echo the whole message: %q", msg)
 	}
 	if !strings.HasSuffix(msg, "…") {
 		t.Fatalf("truncated error should end with an ellipsis: %q", msg)
+	}
+
+	// A non-JSON error body is omitted entirely rather than echoed.
+	plain := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+		_, _ = w.Write([]byte("upstream said secret-xyz"))
+	}))
+	defer plain.Close()
+	if _, err := NewControlPlane(plain.URL, "").Login(context.Background(), "ada@example.com", "secret", ""); err == nil || strings.Contains(err.Error(), "secret-xyz") {
+		t.Fatalf("non-json error body must be omitted, got %v", err)
 	}
 }
 

@@ -491,7 +491,7 @@ func stripURLQuery(rawURL string) string {
 		parsed.Fragment = ""
 		return parsed.String()
 	}
-	if idx := strings.IndexByte(rawURL, '?'); idx >= 0 {
+	if idx := strings.IndexAny(rawURL, "?#"); idx >= 0 {
 		return rawURL[:idx]
 	}
 	return rawURL
