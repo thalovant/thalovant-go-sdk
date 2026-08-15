@@ -397,7 +397,7 @@ func TestNewClientWithOptionsSelectsWSSAndMQTT(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if topics.C2S != "hivemind/hub/c2s/access" || topics.S2C != "hivemind/hub/s2c/access" || topics.Status != "hivemind/hub/status/access" {
+	if topics.Inbound != "hivemind/hub/access/in" || topics.Outbound != "hivemind/hub/access/out" || topics.Status != "hivemind/hub/access/status" {
 		t.Fatalf("unexpected topics: %+v", topics)
 	}
 }
@@ -525,7 +525,7 @@ func TestClientQueryUsesDirectHiveMindQueryFrame(t *testing.T) {
 	}
 }
 
-func TestMQTTTopicsAppendHubIDForScopedACLs(t *testing.T) {
+func TestMQTTTopicsUseTopicPrefixVerbatimAndStripSlashes(t *testing.T) {
 	identity, err := IdentityFromMap(map[string]any{
 		"key":      "access",
 		"password": "secret",
@@ -535,8 +535,7 @@ func TestMQTTTopicsAppendHubIDForScopedACLs(t *testing.T) {
 			"endpoint":     "mqtts://mqtt.example.com:8883",
 			"username":     "access",
 			"password":     "broker-password",
-			"topic_prefix": "hivemind",
-			"hub_id":       "hub-1",
+			"topic_prefix": "/hivemind/hub-1/access/",
 		},
 	})
 	if err != nil {
@@ -546,8 +545,28 @@ func TestMQTTTopicsAppendHubIDForScopedACLs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if topics.C2S != "hivemind/hub-1/c2s/access" || topics.S2C != "hivemind/hub-1/s2c/access" || topics.Status != "hivemind/hub-1/status/access" {
+	if topics.Inbound != "hivemind/hub-1/access/in" || topics.Outbound != "hivemind/hub-1/access/out" || topics.Status != "hivemind/hub-1/access/status" {
 		t.Fatalf("unexpected topics: %+v", topics)
+	}
+}
+
+func TestMQTTTopicsRequireTopicPrefix(t *testing.T) {
+	identity, err := IdentityFromMap(map[string]any{
+		"key":      "access",
+		"password": "secret",
+		"site":     "site",
+		"host":     "https://hub.example.com",
+		"mqtt": map[string]any{
+			"endpoint": "mqtts://mqtt.example.com:8883",
+			"username": "access",
+			"password": "broker-password",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := MQTTTopicsForIdentity(identity); err == nil || !strings.Contains(err.Error(), "topic_prefix") {
+		t.Fatalf("expected topic_prefix error, got %v", err)
 	}
 }
 

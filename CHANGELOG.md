@@ -10,6 +10,18 @@
   `GET /v1/admin/analytics/overview` branch and its `owner_id` query are
   removed. This SDK serves non-admin customers, so callers that set `Admin` or
   `OwnerID` must drop them.
+- Migrate the MQTT data-plane topic scheme to `<topic_prefix>/in|out|status`.
+  `MqttBrokerCredentials.TopicPrefix` is now the full plaintext base
+  (`hivemind/<hub-id>/<access-key>`) and the transport appends the fixed
+  suffixes: publish requests go to `<prefix>/in`, subscribe replies to
+  `<prefix>/out`, and the retained presence/LWT to `<prefix>/status`. The old
+  `<base>/c2s|s2c|status/<access-key>` scheme, the `HashTopics` hashing, and the
+  hub-id fallback are removed. `MqttTopicSet` renames its `C2S`/`S2C` fields to
+  `Inbound`/`Outbound`, and `MqttBrokerCredentials` drops the `HubID`,
+  `C2STopic`, `S2CTopic`, `StatusTopic`, and `HashTopics` fields (and their
+  `hub_id`/`c2s_topic`/`s2c_topic`/`status_topic`/`hash_topics` JSON keys and
+  `MQTT_*` environment variables). `TopicPrefix` is now required:
+  `MQTTTopicsForIdentity` errors when it is empty.
 
 ### Security
 

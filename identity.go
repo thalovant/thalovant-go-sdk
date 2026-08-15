@@ -34,11 +34,6 @@ type MqttBrokerCredentials struct {
 	Username    string `json:"username"`
 	Password    string `json:"password"`
 	TopicPrefix string `json:"topic_prefix,omitempty"`
-	HubID       string `json:"hub_id,omitempty"`
-	C2STopic    string `json:"c2s_topic,omitempty"`
-	S2CTopic    string `json:"s2c_topic,omitempty"`
-	StatusTopic string `json:"status_topic,omitempty"`
-	HashTopics  bool   `json:"hash_topics,omitempty"`
 	QOS         byte   `json:"qos,omitempty"`
 	TLS         bool   `json:"tls"`
 }
@@ -87,9 +82,9 @@ func (i Identity) String() string {
 // affect json.Marshal, which still serializes the real values.
 func (m MqttBrokerCredentials) String() string {
 	return fmt.Sprintf(
-		"MqttBrokerCredentials{Endpoint:%q Username:%s Password:%s TopicPrefix:%q HubID:%q C2STopic:%q S2CTopic:%q StatusTopic:%q HashTopics:%t QOS:%d TLS:%t}",
+		"MqttBrokerCredentials{Endpoint:%q Username:%s Password:%s TopicPrefix:%q QOS:%d TLS:%t}",
 		m.Endpoint, redactSecret(m.Username), redactSecret(m.Password),
-		m.TopicPrefix, m.HubID, m.C2STopic, m.S2CTopic, m.StatusTopic, m.HashTopics, m.QOS, m.TLS,
+		m.TopicPrefix, m.QOS, m.TLS,
 	)
 }
 
@@ -109,11 +104,6 @@ func MqttBrokerCredentialsFromMap(raw any) *MqttBrokerCredentials {
 		Username:    username,
 		Password:    password,
 		TopicPrefix: optional(value(values, "topic_prefix", "topicPrefix")),
-		HubID:       optional(value(values, "hub_id", "hubId")),
-		C2STopic:    optional(value(values, "c2s_topic", "c2sTopic")),
-		S2CTopic:    optional(value(values, "s2c_topic", "s2cTopic")),
-		StatusTopic: optional(value(values, "status_topic", "statusTopic")),
-		HashTopics:  boolValue(value(values, "hash_topics", "hashTopics"), false),
 		QOS:         qosValue(value(values, "qos"), 1),
 		TLS:         boolValue(value(values, "tls"), strings.HasPrefix(endpoint, "mqtts://")),
 	}
@@ -135,21 +125,6 @@ func (m MqttBrokerCredentials) Map(includeSecrets bool) map[string]any {
 		data["password"] = m.Password
 		if m.TopicPrefix != "" {
 			data["topic_prefix"] = m.TopicPrefix
-		}
-		if m.HubID != "" {
-			data["hub_id"] = m.HubID
-		}
-		if m.C2STopic != "" {
-			data["c2s_topic"] = m.C2STopic
-		}
-		if m.S2CTopic != "" {
-			data["s2c_topic"] = m.S2CTopic
-		}
-		if m.StatusTopic != "" {
-			data["status_topic"] = m.StatusTopic
-		}
-		if m.HashTopics {
-			data["hash_topics"] = true
 		}
 		if m.QOS != 1 {
 			data["qos"] = m.QOS
@@ -237,11 +212,6 @@ func IdentityFromEnv(prefix string) (Identity, error) {
 			"username":     os.Getenv(prefix + "MQTT_USERNAME"),
 			"password":     os.Getenv(prefix + "MQTT_PASSWORD"),
 			"topic_prefix": os.Getenv(prefix + "MQTT_TOPIC_PREFIX"),
-			"hub_id":       os.Getenv(prefix + "MQTT_HUB_ID"),
-			"c2s_topic":    os.Getenv(prefix + "MQTT_C2S_TOPIC"),
-			"s2c_topic":    os.Getenv(prefix + "MQTT_S2C_TOPIC"),
-			"status_topic": os.Getenv(prefix + "MQTT_STATUS_TOPIC"),
-			"hash_topics":  os.Getenv(prefix + "MQTT_HASH_TOPICS"),
 			"qos":          os.Getenv(prefix + "MQTT_QOS"),
 		},
 	})
