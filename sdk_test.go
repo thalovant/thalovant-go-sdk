@@ -1296,6 +1296,485 @@ func TestControlPlaneGetsAnalyticsOverview(t *testing.T) {
 	}
 }
 
+// recordedControlRequest captures what the provisioning helpers actually put
+// on the wire: verb, path, query, the headers the routes key off, and the
+// decoded body. body stays nil when no body was sent at all, which is what
+// separates "sent {}" from "sent nothing".
+type recordedControlRequest struct {
+	method         string
+	path           string
+	rawQuery       string
+	ifMatch        string
+	idempotencyKey string
+	body           map[string]any
+}
+
+func recordControlRequest(r *http.Request) recordedControlRequest {
+	entry := recordedControlRequest{
+		method:         r.Method,
+		path:           r.URL.Path,
+		rawQuery:       r.URL.RawQuery,
+		ifMatch:        r.Header.Get("If-Match"),
+		idempotencyKey: r.Header.Get("Idempotency-Key"),
+	}
+	var payload map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&payload); err == nil {
+		entry.body = payload
+	}
+	return entry
+}
+
+func TestControlPlaneProvisionsHubs(t *testing.T) {
+	var requests []recordedControlRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("authorization") != "Bearer token" {
+			t.Errorf("unexpected authorization header %q", r.Header.Get("authorization"))
+		}
+		requests = append(requests, recordControlRequest(r))
+		w.Header().Set("content-type", "application/json")
+		if r.Method == http.MethodDelete && r.URL.Path == "/v1/hubs/hub-1" {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"hub-1","etag":"etag-2","counts":{"total_intents":3}}`))
+	}))
+	defer server.Close()
+
+	control := NewControlPlane(server.URL, "token")
+	ctx := context.Background()
+
+	created, err := control.CreateHub(ctx, map[string]any{
+		"name":            "joke-garden",
+		"runtimeGroupId":  "rg-1",
+		"ownerId":         "owner-1",
+		"capacityProfile": "autoscaling",
+		"isLocked":        false,
+		"spec":            map[string]any{"protocols": map[string]any{"wss": map[string]any{"enabled": true}}},
+	}, HubCreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created["id"] != "hub-1" {
+		t.Fatalf("unexpected created hub %+v", created)
+	}
+	if _, err := control.CreateHub(ctx, map[string]any{"name": "second"}, HubCreateOptions{IdempotencyKey: "hub-create-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.UpdateHub(ctx, "hub-1", map[string]any{"active": false}, "etag-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.DeleteHub(ctx, "hub-1", "etag-2"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.ReleaseHub(ctx, "hub-1", ReleaseOptions{
+		Channel: "stable",
+		Mode:    "custom",
+		Version: "1.4.0",
+		Images:  map[string]string{"ovos-core": "ghcr.io/thalovant/ovos-core:1.4.0"},
+		Reason:  "pin the kiosk fleet",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.ReleaseHub(ctx, "hub-1", ReleaseOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.SetHubRating(ctx, "hub-1", 5); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.ClearHubRating(ctx, "hub-1"); err != nil {
+		t.Fatal(err)
+	}
+	capabilities, err := control.GetHubRuntimeCapabilities(ctx, "hub-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mapValue(capabilities["counts"])["total_intents"] != float64(3) {
+		t.Fatalf("unexpected runtime capabilities %+v", capabilities)
+	}
+
+	if len(requests) != 9 {
+		t.Fatalf("unexpected request count %d: %+v", len(requests), requests)
+	}
+
+	create := requests[0]
+	if create.method != http.MethodPost || create.path != "/v1/hubs" {
+		t.Fatalf("unexpected create request %+v", create)
+	}
+	if create.idempotencyKey == "" {
+		t.Fatal("create hub must send a generated Idempotency-Key")
+	}
+	for key, want := range map[string]any{
+		"name":             "joke-garden",
+		"runtime_group_id": "rg-1",
+		"owner_id":         "owner-1",
+		"capacity_profile": "autoscaling",
+		"is_locked":        false,
+	} {
+		if create.body[key] != want {
+			t.Fatalf("unexpected create body %s=%v, want %v: %+v", key, create.body[key], want, create.body)
+		}
+	}
+	for _, camel := range []string{"runtimeGroupId", "ownerId", "capacityProfile", "isLocked"} {
+		if _, present := create.body[camel]; present {
+			t.Fatalf("camelCase key %s must be renamed, not duplicated: %+v", camel, create.body)
+		}
+	}
+	if requests[1].idempotencyKey != "hub-create-1" {
+		t.Fatalf("explicit idempotency key was not sent: %+v", requests[1])
+	}
+
+	update := requests[2]
+	if update.method != http.MethodPatch || update.path != "/v1/hubs/hub-1" || update.ifMatch != "etag-1" {
+		t.Fatalf("unexpected update request %+v", update)
+	}
+	if update.body["active"] != false {
+		t.Fatalf("unexpected update body %+v", update.body)
+	}
+
+	del := requests[3]
+	if del.method != http.MethodDelete || del.path != "/v1/hubs/hub-1" || del.ifMatch != "etag-2" {
+		t.Fatalf("unexpected delete request %+v", del)
+	}
+
+	release := requests[4]
+	if release.method != http.MethodPost || release.path != "/v1/hubs/hub-1/release" {
+		t.Fatalf("unexpected release request %+v", release)
+	}
+	if release.body["channel"] != "stable" || release.body["mode"] != "custom" ||
+		release.body["version"] != "1.4.0" || release.body["reason"] != "pin the kiosk fleet" {
+		t.Fatalf("unexpected release body %+v", release.body)
+	}
+	if mapValue(release.body["images"])["ovos-core"] != "ghcr.io/thalovant/ovos-core:1.4.0" {
+		t.Fatalf("unexpected release images %+v", release.body)
+	}
+	if emptyRelease := requests[5]; emptyRelease.body == nil || len(emptyRelease.body) != 0 {
+		t.Fatalf("an unset ReleaseOptions must send an empty JSON object: %+v", emptyRelease)
+	}
+
+	rate := requests[6]
+	if rate.method != http.MethodPut || rate.path != "/v1/hubs/hub-1/rating" || rate.body["rating"] != float64(5) {
+		t.Fatalf("unexpected rating request %+v", rate)
+	}
+	cleared := requests[7]
+	if cleared.method != http.MethodDelete || cleared.path != "/v1/hubs/hub-1/rating" || cleared.body != nil {
+		t.Fatalf("unexpected rating clear request %+v", cleared)
+	}
+	inspect := requests[8]
+	if inspect.method != http.MethodGet || inspect.path != "/v1/hubs/hub-1/runtime-capabilities" {
+		t.Fatalf("unexpected runtime capabilities request %+v", inspect)
+	}
+}
+
+func TestControlPlaneManagesRuntimeGroups(t *testing.T) {
+	var requests []recordedControlRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, recordControlRequest(r))
+		w.Header().Set("content-type", "application/json")
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"rg-1","name":"kiosks","config":{"lang":"en-us"}}`))
+	}))
+	defer server.Close()
+
+	control := NewControlPlane(server.URL, "token")
+	ctx := context.Background()
+
+	if _, err := control.ListRuntimeGroups(ctx, "owner-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.ListRuntimeGroups(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	group, err := control.GetRuntimeGroup(ctx, "rg-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group["id"] != "rg-1" {
+		t.Fatalf("unexpected runtime group %+v", group)
+	}
+	if _, err := control.CreateRuntimeGroup(ctx, map[string]any{
+		"name":             "kiosks",
+		"description":      "Lobby kiosks",
+		"ownerId":          "owner-1",
+		"cloneFromDefault": true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.UpdateRuntimeGroup(ctx, "rg-1", map[string]any{
+		"description": "Lobby and cafe kiosks",
+		"spec":        map[string]any{"replicas": 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.GetRuntimeGroupConfig(ctx, "rg-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.UpdateRuntimeGroupConfig(ctx, "rg-1", map[string]any{"lang": "en-us"}, RuntimeGroupConfigOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.UpdateRuntimeGroupConfig(ctx, "rg-1", map[string]any{"lang": "fr-ca"}, RuntimeGroupConfigOptions{
+		Personas: map[string]any{"default": "concierge"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.ReleaseRuntimeGroup(ctx, "rg-1", ReleaseOptions{Channel: "stable"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.DeleteRuntimeGroup(ctx, "rg-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(requests) != 10 {
+		t.Fatalf("unexpected request count %d: %+v", len(requests), requests)
+	}
+	// No runtime-group route reads If-Match or an idempotency header, so the
+	// SDK must not invent one for them.
+	for _, entry := range requests {
+		if entry.ifMatch != "" || entry.idempotencyKey != "" {
+			t.Fatalf("runtime-group routes take no If-Match or Idempotency-Key: %+v", entry)
+		}
+	}
+
+	if requests[0].method != http.MethodGet || requests[0].path != "/v1/runtime-groups" || requests[0].rawQuery != "owner_id=owner-1" {
+		t.Fatalf("unexpected list request %+v", requests[0])
+	}
+	if requests[1].rawQuery != "" {
+		t.Fatalf("an empty owner id must be omitted from the query: %+v", requests[1])
+	}
+	if requests[2].method != http.MethodGet || requests[2].path != "/v1/runtime-groups/rg-1" {
+		t.Fatalf("unexpected get request %+v", requests[2])
+	}
+
+	create := requests[3]
+	if create.method != http.MethodPost || create.path != "/v1/runtime-groups" {
+		t.Fatalf("unexpected create request %+v", create)
+	}
+	if create.body["owner_id"] != "owner-1" || create.body["clone_from_default"] != true {
+		t.Fatalf("unexpected create body %+v", create.body)
+	}
+	if _, present := create.body["cloneFromDefault"]; present {
+		t.Fatalf("camelCase key must be renamed, not duplicated: %+v", create.body)
+	}
+
+	update := requests[4]
+	if update.method != http.MethodPatch || update.path != "/v1/runtime-groups/rg-1" {
+		t.Fatalf("unexpected update request %+v", update)
+	}
+	if mapValue(update.body["spec"])["replicas"] != float64(2) {
+		t.Fatalf("unexpected update body %+v", update.body)
+	}
+
+	if requests[5].method != http.MethodGet || requests[5].path != "/v1/runtime-groups/rg-1/config" {
+		t.Fatalf("unexpected config read %+v", requests[5])
+	}
+
+	config := requests[6]
+	if config.method != http.MethodPatch || config.path != "/v1/runtime-groups/rg-1/config" {
+		t.Fatalf("unexpected config update %+v", config)
+	}
+	if mapValue(config.body["config"])["lang"] != "en-us" {
+		t.Fatalf("unexpected config body %+v", config.body)
+	}
+	if _, present := config.body["personas"]; present {
+		t.Fatalf("personas must be omitted when unset: %+v", config.body)
+	}
+	if personas := mapValue(requests[7].body["personas"]); personas["default"] != "concierge" {
+		t.Fatalf("unexpected personas body %+v", requests[7].body)
+	}
+
+	release := requests[8]
+	if release.method != http.MethodPost || release.path != "/v1/runtime-groups/rg-1/release" || release.body["channel"] != "stable" {
+		t.Fatalf("unexpected release request %+v", release)
+	}
+	if _, present := release.body["mode"]; present {
+		t.Fatalf("unset release options must be omitted: %+v", release.body)
+	}
+	if requests[9].method != http.MethodDelete || requests[9].path != "/v1/runtime-groups/rg-1" {
+		t.Fatalf("unexpected delete request %+v", requests[9])
+	}
+}
+
+func TestControlPlaneDiscoversAndInstallsSkills(t *testing.T) {
+	var requests []recordedControlRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, recordControlRequest(r))
+		w.Header().Set("content-type", "application/json")
+		switch {
+		case r.Method == http.MethodDelete:
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/v1/runtime-groups/rg-1/inventory":
+			_, _ = w.Write([]byte(`{"runtime_group_id":"rg-1","data":[],"source":"ovos-runtime-operator-pending"}`))
+		default:
+			_, _ = w.Write([]byte(`{"data":[{"skill_id":"skill-weather","access_tier":"free","installable":true}]}`))
+		}
+	}))
+	defer server.Close()
+
+	control := NewControlPlane(server.URL, "token")
+	ctx := context.Background()
+
+	catalog, err := control.ListMarketplaceSkills(ctx, MarketplaceSkillListOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog["data"].([]any)) != 1 {
+		t.Fatalf("unexpected catalog %+v", catalog)
+	}
+	if _, err := control.ListMarketplaceSkills(ctx, MarketplaceSkillListOptions{
+		OwnerID:         "owner-1",
+		IncludeInactive: true,
+		ForceRefresh:    true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.ListRuntimeGroupMarketplace(ctx, "rg-1", RuntimeGroupMarketplaceOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.ListRuntimeGroupMarketplace(ctx, "rg-1", RuntimeGroupMarketplaceOptions{RefreshInventory: true}); err != nil {
+		t.Fatal(err)
+	}
+	// A runtime group with nothing reporting answers with an empty data list
+	// and a pending source instead of the 409 the hub route returns.
+	inventory, err := control.ListRuntimeGroupInventory(ctx, "rg-1", RuntimeGroupInventoryOptions{Refresh: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inventory["source"] != "ovos-runtime-operator-pending" || len(inventory["data"].([]any)) != 0 {
+		t.Fatalf("unexpected inventory %+v", inventory)
+	}
+	if _, err := control.ListRuntimeGroupInventory(ctx, "rg-1", RuntimeGroupInventoryOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := control.InstallRuntimeGroupSkill(ctx, "rg-1", "skill-weather", RuntimeGroupSkillInstallOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	inactive := false
+	if _, err := control.InstallRuntimeGroupSkill(ctx, "rg-1", "skill-lab", RuntimeGroupSkillInstallOptions{
+		MarketplaceSkillID: "mk-1",
+		SourceType:         "git",
+		SourceRef:          "https://github.com/thalovant/skill-lab",
+		VersionPin:         "0.2.0",
+		Active:             &inactive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := control.UninstallRuntimeGroupSkill(ctx, "rg-1", "skill-weather"); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(requests) != 9 {
+		t.Fatalf("unexpected request count %d: %+v", len(requests), requests)
+	}
+	if requests[0].method != http.MethodGet || requests[0].path != "/v1/marketplace/skills" || requests[0].rawQuery != "" {
+		t.Fatalf("false and empty catalog options must be omitted: %+v", requests[0])
+	}
+	if requests[1].rawQuery != "force_refresh=true&include_inactive=true&owner_id=owner-1" {
+		t.Fatalf("unexpected catalog query %+v", requests[1])
+	}
+	if requests[2].path != "/v1/runtime-groups/rg-1/marketplace" || requests[2].rawQuery != "" {
+		t.Fatalf("refresh_inventory must be omitted when false: %+v", requests[2])
+	}
+	if requests[3].rawQuery != "refresh_inventory=true" {
+		t.Fatalf("unexpected group marketplace query %+v", requests[3])
+	}
+	if requests[4].path != "/v1/runtime-groups/rg-1/inventory" || requests[4].rawQuery != "refresh=true" {
+		t.Fatalf("unexpected inventory query %+v", requests[4])
+	}
+	if requests[5].rawQuery != "" {
+		t.Fatalf("refresh must be omitted when false: %+v", requests[5])
+	}
+
+	install := requests[6]
+	if install.method != http.MethodPost || install.path != "/v1/runtime-groups/rg-1/skills" {
+		t.Fatalf("unexpected install request %+v", install)
+	}
+	if install.body["skill_id"] != "skill-weather" || install.body["source_type"] != "catalog" || install.body["active"] != true {
+		t.Fatalf("a zero-value install must default to an active catalog install: %+v", install.body)
+	}
+	for _, key := range []string{"marketplace_skill_id", "source_ref", "version_pin"} {
+		if _, present := install.body[key]; present {
+			t.Fatalf("unset install option %s must be omitted: %+v", key, install.body)
+		}
+	}
+
+	gitInstall := requests[7]
+	for key, want := range map[string]any{
+		"skill_id":             "skill-lab",
+		"marketplace_skill_id": "mk-1",
+		"source_type":          "git",
+		"source_ref":           "https://github.com/thalovant/skill-lab",
+		"version_pin":          "0.2.0",
+		"active":               false,
+	} {
+		if gitInstall.body[key] != want {
+			t.Fatalf("unexpected install body %s=%v, want %v: %+v", key, gitInstall.body[key], want, gitInstall.body)
+		}
+	}
+
+	uninstall := requests[8]
+	if uninstall.method != http.MethodDelete || uninstall.path != "/v1/runtime-groups/rg-1/skills/skill-weather" {
+		t.Fatalf("unexpected uninstall request %+v", uninstall)
+	}
+}
+
+func TestControlPlaneProvisioningErrorsCarryAPIStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/hubs":
+			w.WriteHeader(http.StatusPaymentRequired)
+			_, _ = w.Write([]byte(`{"detail":"API access requires a paid plan."}`))
+		case r.Method == http.MethodPatch && r.URL.Path == "/v1/hubs/hub-1":
+			w.WriteHeader(http.StatusPreconditionFailed)
+			_, _ = w.Write([]byte(`{"detail":"ETag mismatch"}`))
+		case r.Method == http.MethodDelete && r.URL.Path == "/v1/hubs/hub-1":
+			w.WriteHeader(http.StatusPreconditionFailed)
+			_, _ = w.Write([]byte(`{"detail":"ETag mismatch"}`))
+		case r.URL.Path == "/v1/runtime-groups/rg-1/marketplace":
+			w.WriteHeader(http.StatusForbidden)
+			_, _ = w.Write([]byte(`{"detail":"Not authorized"}`))
+		case r.URL.Path == "/v1/hubs/hub-1/runtime-capabilities":
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"detail":"Live skills and intents are not available for this hub yet."}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	control := NewControlPlane(server.URL, "token")
+	ctx := context.Background()
+
+	_, paidErr := control.CreateHub(ctx, map[string]any{"name": "joke-garden"}, HubCreateOptions{})
+	assertControlAPIError(t, paidErr, "402", "paid plan")
+
+	_, staleErr := control.UpdateHub(ctx, "hub-1", map[string]any{"active": false}, "stale-etag")
+	assertControlAPIError(t, staleErr, "412", "ETag mismatch")
+
+	assertControlAPIError(t, control.DeleteHub(ctx, "hub-1", "stale-etag"), "412", "ETag mismatch")
+
+	_, forbiddenErr := control.ListRuntimeGroupMarketplace(ctx, "rg-1", RuntimeGroupMarketplaceOptions{})
+	assertControlAPIError(t, forbiddenErr, "403", "Not authorized")
+
+	_, conflictErr := control.GetHubRuntimeCapabilities(ctx, "hub-1")
+	assertControlAPIError(t, conflictErr, "409", "not available")
+}
+
+func assertControlAPIError(t *testing.T, err error, status string, detail string) {
+	t.Helper()
+	if err == nil {
+		t.Fatalf("expected an HTTP %s error", status)
+	}
+	if !errors.Is(err, ErrAPI) {
+		t.Fatalf("error %v does not wrap ErrAPI", err)
+	}
+	if !strings.Contains(err.Error(), status) || !strings.Contains(err.Error(), detail) {
+		t.Fatalf("error %v does not report HTTP %s and %q", err, status, detail)
+	}
+}
+
 func TestControlPlaneBootstrapPreservesAPIReturnedMQTTCredentials(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")

@@ -1,5 +1,44 @@
 # Changelog
 
+## 0.3.6
+
+- Add hub provisioning to the control plane: `CreateHub`, `UpdateHub`,
+  `DeleteHub`, `ReleaseHub`, `SetHubRating`, `ClearHubRating`, and
+  `GetHubRuntimeCapabilities`. `CreateHub` always sends an `Idempotency-Key`
+  header, generating one unless `HubCreateOptions.IdempotencyKey` is set.
+  `UpdateHub` and `DeleteHub` take `etag` as a required argument, not an
+  option, because the API rejects a missing or stale `If-Match` with HTTP 412.
+- Add runtime-group management: `ListRuntimeGroups`, `GetRuntimeGroup`,
+  `CreateRuntimeGroup`, `UpdateRuntimeGroup`, `GetRuntimeGroupConfig`,
+  `UpdateRuntimeGroupConfig`, `ReleaseRuntimeGroup`, and `DeleteRuntimeGroup`.
+  These routes read no `If-Match` and no idempotency header, so the SDK sends
+  neither. Configuration is merged rather than replaced, and personas are
+  replaced only when `RuntimeGroupConfigOptions.Personas` is set.
+- Add skill discovery and installation: `ListMarketplaceSkills`,
+  `ListRuntimeGroupMarketplace`, `ListRuntimeGroupInventory`,
+  `InstallRuntimeGroupSkill`, and `UninstallRuntimeGroupSkill`. A zero-value
+  `RuntimeGroupSkillInstallOptions` installs an active skill from the
+  marketplace catalog.
+- Export the option types the new calls take: `HubCreateOptions`,
+  `ReleaseOptions`, `RuntimeGroupConfigOptions`,
+  `RuntimeGroupSkillInstallOptions`, `MarketplaceSkillListOptions`,
+  `RuntimeGroupMarketplaceOptions`, and `RuntimeGroupInventoryOptions`. False
+  and empty options are omitted from the query string, and an unset
+  `ReleaseOptions` sends an empty JSON body so the API applies the workspace
+  release policy.
+- Accept the camelCase spellings of the hub and runtime-group body keys
+  (`runtimeGroupId`, `ownerId`, `capacityProfile`, `isLocked`,
+  `cloneFromDefault`) and rename them to snake_case before sending, so a
+  camelCase payload is no longer silently dropped by the API's request model.
+- Document the plan and scope requirements: the provisioning writes need a paid
+  plan and `hubs:write` (HTTP 402 on the free plan), hub ratings need
+  `hubs:write` but no paid plan, the marketplace catalog needs only `hubs:read`
+  and is not paid-gated, and the group-scoped inventory reads need
+  `hubs:inspect`. `ListRuntimeGroupInventory` reports a pending source instead
+  of the HTTP 409 `GetHubRuntimeCapabilities` returns when nothing is
+  reporting.
+- No existing signature changed.
+
 ## 0.3.5
 
 - Derive both user agents from a single exported `Version` constant in
