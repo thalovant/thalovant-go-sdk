@@ -116,6 +116,53 @@ func TestMqttBrokerCredentialsStringRedactsSecrets(t *testing.T) {
 	}
 }
 
+// Regression for the MQTT topic migration: TopicPrefix is now
+// hivemind/<hub-id>/<access-key>, so it embeds the same access key that the
+// Username redaction hides. String() must redact TopicPrefix in both the
+// credentials and the enclosing Identity, or %v/%s/%+v would leak the access
+// key that redactSecret(Username) exists to protect. json.Marshal must still
+// carry the real prefix (wire + identity file).
+func TestMqttBrokerCredentialsStringRedactsTopicPrefix(t *testing.T) {
+	const accessKey = "ak-SECRET-topic-7777"
+	topicPrefix := "hivemind/hub-1/" + accessKey
+	creds := MqttBrokerCredentials{
+		Endpoint:    "mqtts://broker.example.com:8883",
+		Username:    accessKey,
+		Password:    "pass-SECRET-bbbb",
+		TopicPrefix: topicPrefix,
+		TLS:         true,
+	}
+	identity := Identity{
+		AccessKey:     accessKey,
+		Password:      "pw-SECRET-2222",
+		SiteID:        "site-1",
+		DefaultMaster: "https://hub.example.com",
+		DefaultPort:   443,
+		MQTT:          &creds,
+	}
+	leaks := []string{accessKey, topicPrefix}
+	for _, arg := range []any{creds, &creds, identity, &identity} {
+		for _, format := range []string{"%v", "%s", "%+v"} {
+			rendered := fmt.Sprintf(format, arg)
+			for _, leak := range leaks {
+				if strings.Contains(rendered, leak) {
+					t.Fatalf("%T %s leaks topic_prefix/access key %q: %s", arg, format, leak, rendered)
+				}
+			}
+			if !strings.Contains(rendered, secretPlaceholder) {
+				t.Fatalf("%T %s redacted nothing: %s", arg, format, rendered)
+			}
+		}
+	}
+	raw, err := json.Marshal(creds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), topicPrefix) {
+		t.Fatalf("json.Marshal dropped topic_prefix: %s", raw)
+	}
+}
+
 func TestControlPlaneStringRedactsAccessToken(t *testing.T) {
 	cp := NewControlPlane("https://api.example.com", "token-SECRET-zzzz")
 	for _, arg := range []any{*cp, cp} {

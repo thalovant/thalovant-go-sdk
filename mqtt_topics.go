@@ -22,7 +22,15 @@ func MQTTTopicsForIdentity(identity Identity) (MqttTopicSet, error) {
 	}
 	base := strings.Trim(strings.TrimSpace(identity.MQTT.TopicPrefix), "/")
 	if base == "" {
-		return MqttTopicSet{}, fmt.Errorf("%w: MQTT credentials must include topic_prefix.", ErrConnection)
+		return MqttTopicSet{}, fmt.Errorf("%w: MQTT credentials must include topic_prefix", ErrConnection)
+	}
+	// Reject MQTT wildcards (# and +) and ASCII control characters (< 0x20,
+	// including NUL): a topic_prefix carrying them would build a malformed or
+	// silently widened subscribe/publish topic.
+	for i := 0; i < len(base); i++ {
+		if c := base[i]; c == '#' || c == '+' || c < 0x20 {
+			return MqttTopicSet{}, fmt.Errorf("%w: MQTT topic_prefix contains characters that are not valid in an MQTT topic", ErrConnection)
+		}
 	}
 	return MqttTopicSet{
 		Inbound:  base + "/in",
