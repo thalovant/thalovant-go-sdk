@@ -51,6 +51,20 @@
   `MqttBrokerCredentials.Map(includeSecrets)` reveals when true) and the
   protocol-mandated appearance of the access key in the MQTT client ID and topic
   segments.
+- Redact `MqttBrokerCredentials.TopicPrefix` from human-facing formatting. Since
+  the topic migration `TopicPrefix` carries `hivemind/<hub-id>/<access-key>`,
+  `MqttBrokerCredentials.String()` — and the `Identity.String()` that embeds it —
+  now print `[REDACTED]` for it instead of the raw prefix, closing a `%v`/`%s`/
+  `%+v` path that leaked the same access key the username/password redaction
+  already hides. `json.Marshal` still serializes the real prefix.
+- Harden `topic_prefix` validation in `MQTTTopicsForIdentity`. The prefix is
+  trimmed of surrounding whitespace before its leading/trailing `/`, a
+  whitespace-only prefix is now rejected with the existing topic_prefix error,
+  and a prefix containing an MQTT wildcard (`#` or `+`) or an ASCII control
+  character (`< 0x20`, including NUL) is rejected, so a malformed or
+  subscription-widening base can no longer build the `<prefix>/in|out|status`
+  topic set. The topic_prefix error also drops its trailing period (staticcheck
+  ST1005).
 
 ## 0.3.6
 

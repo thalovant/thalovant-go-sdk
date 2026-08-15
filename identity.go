@@ -84,7 +84,7 @@ func (m MqttBrokerCredentials) String() string {
 	return fmt.Sprintf(
 		"MqttBrokerCredentials{Endpoint:%q Username:%s Password:%s TopicPrefix:%q QOS:%d TLS:%t}",
 		m.Endpoint, redactSecret(m.Username), redactSecret(m.Password),
-		m.TopicPrefix, m.QOS, m.TLS,
+		redactSecret(m.TopicPrefix), m.QOS, m.TLS,
 	)
 }
 

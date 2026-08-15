@@ -570,6 +570,49 @@ func TestMQTTTopicsRequireTopicPrefix(t *testing.T) {
 	}
 }
 
+// mqttIdentityWithTopicPrefix builds an Identity carrying the given TopicPrefix
+// verbatim (bypassing the map loader's own TrimSpace) so MQTTTopicsForIdentity's
+// validation is exercised on exactly the supplied bytes.
+func mqttIdentityWithTopicPrefix(prefix string) Identity {
+	return Identity{
+		AccessKey:     "access",
+		Password:      "secret",
+		SiteID:        "site",
+		DefaultMaster: "https://hub.example.com",
+		DefaultPort:   443,
+		MQTT: &MqttBrokerCredentials{
+			Endpoint:    "mqtts://mqtt.example.com:8883",
+			Username:    "access",
+			Password:    "broker-password",
+			TopicPrefix: prefix,
+		},
+	}
+}
+
+func TestMQTTTopicsRejectWhitespaceOnlyTopicPrefix(t *testing.T) {
+	identity := mqttIdentityWithTopicPrefix("  \t \n ")
+	if _, err := MQTTTopicsForIdentity(identity); err == nil || !strings.Contains(err.Error(), "topic_prefix") {
+		t.Fatalf("expected topic_prefix error for whitespace-only prefix, got %v", err)
+	}
+}
+
+func TestMQTTTopicsRejectInvalidTopicPrefixCharacters(t *testing.T) {
+	cases := map[string]string{
+		"multi-level wildcard":  "hivemind/hub-1/access/#",
+		"single-level wildcard": "hivemind/+/access",
+		"control char":          "hivemind/hub-1/acc\x01ess",
+		"nul byte":              "hivemind/hub-1/acc\x00ess",
+	}
+	for name, prefix := range cases {
+		t.Run(name, func(t *testing.T) {
+			identity := mqttIdentityWithTopicPrefix(prefix)
+			if _, err := MQTTTopicsForIdentity(identity); err == nil || !strings.Contains(err.Error(), "not valid in an MQTT topic") {
+				t.Fatalf("expected invalid-character error for %q, got %v", prefix, err)
+			}
+		})
+	}
+}
+
 func TestPahoBrokerURLHonorsTLSFlag(t *testing.T) {
 	secure, err := pahoBrokerURL("mqtt://mqtt.example.com", true)
 	if err != nil {
