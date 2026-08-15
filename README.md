@@ -164,8 +164,16 @@ page, err := control.ListHubs(ctx, 50, "", "")
 `ControlPlane.AccessToken` is an exported field, so an existing instance can
 also be pointed at a token directly: `control.AccessToken = token`.
 
-Keep `result.Identity` secret. It contains the client credentials used by the
-hub. Do not log `result.Summary(true)`.
+Keep `result.Identity` secret: it holds the client's data-plane credentials.
+`result.Summary(false)` — the default — is safe to log: it redacts the secret
+fields of the identity **and** of the raw `hub`/`client` maps (the
+`initial_identify` access key/password/crypto key/MQTT password, the
+`initial_identify_token`, and the echoed spec `apiKey`/`password`/`cryptoKey`).
+`result.Summary(true)` returns every one of those secrets in the clear and must
+never be logged or written to an untrusted sink. The redaction covers
+human-facing formatting only; `json.Marshal` of the identity itself (for the
+identity file you persist with `chmod 600`) still contains the real secrets by
+design.
 
 ## List Your Hubs
 

@@ -1240,7 +1240,7 @@ func TestControlPlaneGetsAnalyticsOverview(t *testing.T) {
 	weekday := 6
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
-		if r.URL.Path != "/v1/admin/analytics/overview" {
+		if r.URL.Path != "/v1/analytics/overview" {
 			t.Fatalf("unexpected path %s", r.URL.Path)
 		}
 		if r.Header.Get("authorization") != "Bearer token" {
@@ -1250,7 +1250,6 @@ func TestControlPlaneGetsAnalyticsOverview(t *testing.T) {
 		expected := map[string]string{
 			"range":      "30d",
 			"bucket":     "1d",
-			"owner_id":   "owner-1",
 			"hub_id":     "hub-1",
 			"client_id":  "client-1",
 			"country":    "CA",
@@ -1273,10 +1272,8 @@ func TestControlPlaneGetsAnalyticsOverview(t *testing.T) {
 
 	control := NewControlPlane(server.URL, "token")
 	overview, err := control.GetAnalyticsOverview(context.Background(), AnalyticsOverviewOptions{
-		Admin:     true,
 		Range:     "30d",
 		Bucket:    "1d",
-		OwnerID:   "owner-1",
 		HubID:     "hub-1",
 		ClientID:  "client-1",
 		Country:   "CA",

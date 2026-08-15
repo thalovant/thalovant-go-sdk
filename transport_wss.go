@@ -53,7 +53,9 @@ func (t *WSSTransport) Connect(ctx context.Context) error {
 	}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, nil)
 	if err != nil {
-		wrapped := fmt.Errorf("%w: %v", ErrConnection, err)
+		// scrubTransportError drops any ?authorization= query so a dial failure
+		// cannot leak the access key into LastError (see transport.go).
+		wrapped := fmt.Errorf("%w: %v", ErrConnection, scrubTransportError(err))
 		t.failConnection(wrapped)
 		return wrapped
 	}

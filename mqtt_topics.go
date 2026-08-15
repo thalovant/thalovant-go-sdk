@@ -59,6 +59,12 @@ func MQTTTopicsForIdentity(identity Identity) (MqttTopicSet, error) {
 	if base == "" {
 		return MqttTopicSet{}, fmt.Errorf("%w: MQTT credentials must include topic_prefix, hub_id, or explicit c2s/s2c topics", ErrConnection)
 	}
+	// satelliteID is the data-plane access key (or its SHA-256 prefix when
+	// HashTopics is set) and becomes a topic segment here. This is a
+	// protocol-mandated exposure: the broker routes and authorizes messages by
+	// topic, so the key -- unless HashTopics opts into the hashed form -- travels
+	// in the topic path by design. It is not masked; do not treat these topics as
+	// secret-free.
 	return MqttTopicSet{
 		C2S:    base + "/c2s/" + satelliteID,
 		S2C:    base + "/s2c/" + satelliteID,

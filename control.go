@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"reflect"
 	"runtime"
 	"strings"
 	"time"
@@ -65,6 +66,17 @@ type ControlPlane struct {
 	HTTPClient  *http.Client
 }
 
+// String implements fmt.Stringer so the %v, %s, and %+v verbs render a
+// ControlPlane with its AccessToken (a bearer API token) redacted. The receiver
+// is a value so a dereferenced *ControlPlane printed with %v is redacted too.
+// This is a human-facing formatting guard only; it does not affect json.Marshal.
+func (c ControlPlane) String() string {
+	return fmt.Sprintf(
+		"ControlPlane{APIURL:%q AccessToken:%s UserAgent:%q}",
+		c.APIURL, redactSecret(c.AccessToken), c.UserAgent,
+	)
+}
+
 type BootstrapIdentityOptions struct {
 	Name               string
 	SiteID             string
@@ -83,10 +95,8 @@ type BootstrapIdentityResult struct {
 }
 
 type AnalyticsOverviewOptions struct {
-	Admin     bool
 	Range     string
 	Bucket    string
-	OwnerID   string
 	HubID     string
 	ClientID  string
 	Country   string
@@ -345,7 +355,7 @@ func (c *ControlPlane) pollDeviceToken(
 		case "expired_token":
 			return nil, fmt.Errorf("%w: the device sign-in code expired before it was approved; call LoginWithBrowser again to request a new code", ErrDeviceCodeExpired)
 		default:
-			return nil, fmt.Errorf("%w: HTTP %d: %s", ErrAPI, status, string(raw))
+			return nil, fmt.Errorf("%w: HTTP %d: %s", ErrAPI, status, serverErrorDetail(raw))
 		}
 		remaining := deadline.Sub(now())
 		if remaining <= 0 {
@@ -483,15 +493,9 @@ func (c *ControlPlane) DeleteMemoryItem(ctx context.Context, memoryID string) er
 
 func (c *ControlPlane) GetAnalyticsOverview(ctx context.Context, opts AnalyticsOverviewOptions) (map[string]any, error) {
 	endpoint := "/v1/analytics/overview"
-	if opts.Admin {
-		endpoint = "/v1/admin/analytics/overview"
-	}
 	query := url.Values{}
 	setStringQuery(query, "range", opts.Range)
 	setStringQuery(query, "bucket", opts.Bucket)
-	if opts.Admin {
-		setStringQuery(query, "owner_id", opts.OwnerID)
-	}
 	setStringQuery(query, "hub_id", opts.HubID)
 	setStringQuery(query, "client_id", opts.ClientID)
 	setStringQuery(query, "country", opts.Country)
@@ -922,6 +926,8 @@ func (r BootstrapIdentityResult) SelectedProtocol() HubProtocol {
 
 func (r BootstrapIdentityResult) Summary(includeSecrets bool) map[string]any {
 	identity := r.Identity.Summary()
+	hub := r.Hub
+	client := r.Client
 	if includeSecrets {
 		identity["access_key"] = r.Identity.AccessKey
 		identity["password"] = r.Identity.Password
@@ -929,17 +935,99 @@ func (r BootstrapIdentityResult) Summary(includeSecrets bool) map[string]any {
 		if r.Identity.MQTT != nil {
 			identity["mqtt"] = r.Identity.MQTT.Map(true)
 		}
+	} else {
+		// The raw hub/client maps echo the freshly minted data-plane secrets:
+		// initial_identify's access_key/password/crypto_key/mqtt.password, the
+		// initial_identify_token, and the spec's apiKey/password/cryptoKey. Gate
+		// them behind includeSecrets exactly like the identity fields above so
+		// the default summary is safe to log.
+		hub = redactBootstrapSecrets(r.Hub)
+		client = redactBootstrapSecrets(r.Client)
 	}
 	summary := map[string]any{
 		"identity":          identity,
-		"hub":               r.Hub,
-		"client":            r.Client,
+		"hub":               hub,
+		"client":            client,
 		"selected_protocol": r.SelectedProtocol(),
 	}
 	if r.Endpoint != nil {
 		summary["selected_endpoint"] = r.Endpoint.Endpoint
 	}
 	return summary
+}
+
+// bootstrapSecretKeys names the map keys whose values the bootstrap hub/client
+// maps may carry as freshly minted data-plane secrets. Comparison is
+// case-insensitive so both snake_case and camelCase spellings (crypto_key vs
+// cryptoKey, api_key vs apiKey) match. "username" is included because the MQTT
+// broker username is the data-plane access key, which the SDK treats as secret
+// everywhere else (MqttBrokerCredentials.Map(false) omits it); redacting only
+// access_key while leaving the same value under mqtt.username would be an
+// incomplete gate.
+var bootstrapSecretKeys = map[string]struct{}{
+	"access_key":             {},
+	"password":               {},
+	"crypto_key":             {},
+	"cryptokey":              {},
+	"api_key":                {},
+	"apikey":                 {},
+	"username":               {},
+	"initial_identify_token": {},
+}
+
+// redactBootstrapSecrets returns a deep copy of value with the values of any
+// secret-bearing keys (see bootstrapSecretKeys) replaced by secretPlaceholder,
+// at every depth. It never mutates value, so the includeSecrets=true path can
+// still hand back the raw maps untouched. A nil input stays nil.
+func redactBootstrapSecrets(value map[string]any) map[string]any {
+	if value == nil {
+		return nil
+	}
+	redacted, _ := redactSensitiveTree(value).(map[string]any)
+	return redacted
+}
+
+// redactSensitiveTree returns value with the values of any secret-named keys
+// (see bootstrapSecretKeys) replaced by secretPlaceholder, recursing through
+// nested maps and slices of ANY key/element type. It reflects rather than
+// switching on map[string]any/[]any alone so a caller-built result carrying a
+// typed container (map[string]string, []string, []map[string]string, ...)
+// cannot smuggle a nested secret past the gate. The source is never mutated:
+// each container is rebuilt as a fresh map[string]any / []any.
+func redactSensitiveTree(value any) any {
+	if value == nil {
+		return nil
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.Map:
+		cloned := make(map[string]any, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			key := fmt.Sprint(iter.Key().Interface())
+			if _, secret := bootstrapSecretKeys[strings.ToLower(key)]; secret {
+				cloned[key] = secretPlaceholder
+				continue
+			}
+			cloned[key] = redactSensitiveTree(iter.Value().Interface())
+		}
+		return cloned
+	case reflect.Slice, reflect.Array:
+		if rv.Type().Elem().Kind() == reflect.Uint8 {
+			// A []byte is opaque bytes, not a container of nested values; leave
+			// it intact rather than exploding it into a slice of numbers. A
+			// secret-named []byte is already redacted by the map branch above
+			// before recursion ever reaches it.
+			return value
+		}
+		cloned := make([]any, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			cloned[i] = redactSensitiveTree(rv.Index(i).Interface())
+		}
+		return cloned
+	default:
+		return value
+	}
 }
 
 func (c *ControlPlane) RequireRuntimeProtocol(result BootstrapIdentityResult, protocol HubProtocol) (*SelectedHubEndpoint, error) {
@@ -966,7 +1054,7 @@ func (c *ControlPlane) request(ctx context.Context, method string, path string, 
 		return nil, err
 	}
 	if status < 200 || status > 299 {
-		return nil, fmt.Errorf("%w: HTTP %d: %s", ErrAPI, status, string(raw))
+		return nil, fmt.Errorf("%w: HTTP %d: %s", ErrAPI, status, serverErrorDetail(raw))
 	}
 	return decodeControlJSON(raw)
 }
@@ -1005,6 +1093,56 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, raw, nil
+}
+
+// maxServerErrorDetail bounds how much of a surfaced server message is echoed
+// into an error string.
+const maxServerErrorDetail = 256
+
+// serverErrorOmitted stands in for a body that is not a recognizable JSON error
+// object, so a response that reflects the request cannot launder secrets into an
+// error string.
+const serverErrorOmitted = "(server error response omitted)"
+
+// serverErrorDetailFields is the allowlist of top-level JSON fields a control
+// plane error body may surface. They are the server's own human-readable
+// message, never the echoed request payload, which carries the freshly minted
+// apiKey/password/cryptoKey under other keys such as "spec".
+var serverErrorDetailFields = []string{"detail", "message", "error", "error_description", "code", "title"}
+
+// serverErrorDetail turns a raw non-2xx response body into a short, single-line
+// error detail. It never interpolates arbitrary body text: it decodes the body
+// as a JSON object and surfaces only the allowlisted, non-secret message fields
+// (whitespace-collapsed and length-bounded). A body that is not a JSON object,
+// or that carries none of those fields, is omitted entirely -- a failed
+// POST /v1/clients response can echo the request's apiKey/password/cryptoKey,
+// and truncation alone would not protect a secret near the start of the body.
+func serverErrorDetail(raw []byte) string {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return "(no response body)"
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return serverErrorOmitted
+	}
+	parts := make([]string, 0, len(serverErrorDetailFields))
+	for _, field := range serverErrorDetailFields {
+		text, ok := decoded[field].(string)
+		if !ok {
+			continue
+		}
+		if text = strings.TrimSpace(text); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	if len(parts) == 0 {
+		return serverErrorOmitted
+	}
+	detail := strings.Join(strings.Fields(strings.Join(parts, " ")), " ")
+	if runes := []rune(detail); len(runes) > maxServerErrorDetail {
+		detail = string(runes[:maxServerErrorDetail]) + "…"
+	}
+	return detail
 }
 
 func decodeControlJSON(raw []byte) (map[string]any, error) {
