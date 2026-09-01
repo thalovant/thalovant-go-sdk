@@ -23,6 +23,15 @@
   `MQTT_*` environment variables). `TopicPrefix` is now required:
   `MQTTTopicsForIdentity` errors when it is empty.
 
+### Fixed
+
+- Recognise `ovos.intent.unmatched` as a terminal failure event (#22). OVOS
+  renamed the "no intent matched" bus event from the legacy Mycroft
+  `complete_intent_failure`, which was the only name in the failure-event set, so
+  an utterance matching no intent was never treated as terminal and the
+  interaction/query loop waited out its full timeout instead of failing promptly.
+  Both names are now recognised; the legacy name is retained for older runtimes.
+
 ### Security
 
 - Redact secrets from human-facing formatting. `Identity`,

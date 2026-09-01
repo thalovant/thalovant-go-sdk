@@ -247,7 +247,7 @@ func (c *Client) Ask(ctx context.Context, text string, opts RequestOptions) (Rep
 				if event.Text() != "" {
 					fragments = append(fragments, event.Text())
 				}
-			case EventIntentFailure, EventPolicyDenied, EventQueryTimeout:
+			case EventIntentUnmatched, EventIntentFailure, EventPolicyDenied, EventQueryTimeout:
 				failure = &event
 			case EventUtteranceHandled:
 				if failure != nil && len(fragments) == 0 {
@@ -358,7 +358,7 @@ func (c *Client) Query(ctx context.Context, text string, opts QueryOptions) (Rep
 			switch event.Name {
 			case EventSpeak, EventOvosUtteranceSpeak:
 				appendFragment(&fragments, event.Text())
-			case EventIntentFailure, EventPolicyDenied, EventQueryTimeout:
+			case EventIntentUnmatched, EventIntentFailure, EventPolicyDenied, EventQueryTimeout:
 				failure = &event
 				if len(fragments) == 0 {
 					return Reply{}, fmt.Errorf("%w: %s", ErrRuntime, event.Name)
