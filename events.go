@@ -141,12 +141,22 @@ func ContextWithCorrelation(raw Context, sessionID, siteID, lang, requestID stri
 }
 
 func EventMatchesContext(event Event, expected Context) bool {
+	// The request id decides, when both sides carry one. A hub does not echo a
+	// client-declared session id: it substitutes its own. Observed against a
+	// live hub on 2026-09-03 -- sent "observe-me", every reply came back as
+	// "71048b7f-e7b0-4360-8fb5-a03816f78617" -- so comparing session ids
+	// rejected replies the request id had already identified as ours, and Ask
+	// waited out its whole timeout while the hub had answered and emitted
+	// ovos.utterance.handled.
+	expectedRequest := RequestIDFromContext(expected)
+	if expectedRequest != "" && event.RequestID() != "" {
+		return event.RequestID() == expectedRequest
+	}
+	// No request id on one side or the other: fall back to the session, which
+	// is all a caller had before request ids existed. Deliberately lenient --
+	// a reply carrying no request id is not evidence either way.
 	expectedSession := SessionIDFromContext(expected)
 	if expectedSession != "" && event.SessionID() != "" && event.SessionID() != expectedSession {
-		return false
-	}
-	expectedRequest := RequestIDFromContext(expected)
-	if expectedRequest != "" && event.RequestID() != "" && event.RequestID() != expectedRequest {
 		return false
 	}
 	return true
