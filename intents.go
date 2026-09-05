@@ -47,6 +47,13 @@ const (
 	// DefaultIntentTimeout bounds each intent query when
 	// IntentOptions.Timeout is zero.
 	DefaultIntentTimeout = 5 * time.Second
+	// DescribeBatch is how many describes go out together. A hub with 69
+	// intents in two languages is 138 requests and, with every reply
+	// delivered twice, 276 inbound events -- more than a transport's reply
+	// channel holds, and a burst the hub never asked for. Batching also
+	// bounds the deadline: a hub answering nothing fails after one batch
+	// rather than holding every request open.
+	DescribeBatch = 32
 )
 
 var intentEngineByMethod = map[string]string{
@@ -387,8 +394,9 @@ func (inv HubIntentInventory) HasPhrases() bool {
 //
 // The hub's queries are correlated by request id like Ask; a reply delivered
 // more than once is taken once. Unless the runtime attached definitions to
-// the listing, every template registration is described at once, and one
-// the hub does not describe in time carries no sentences.
+// the listing, every template registration is described, DescribeBatch of
+// them in flight at a time, and one the hub does not describe in time
+// carries no sentences.
 //
 // A hub that refuses ovos.intent.list is asked for the engines' own
 // manifests instead, unless IntentOptions.Fallback is false: the result then
@@ -436,7 +444,7 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 	}
 	described := map[intentKey][]IntentDefinition{}
 	if options.describe() && len(wanted) > 0 {
-		found, err := c.describeMany(ctx, wanted, options.Timeout)
+		found, err := c.describeMany(ctx, wanted, options.Timeout, DescribeBatch)
 		if err != nil {
 			return HubIntentInventory{}, err
 		}
@@ -624,13 +632,17 @@ func (c *Client) requestReply(ctx context.Context, queryType, replyType string, 
 	}
 }
 
-// describeMany describes many registrations with the requests in flight
-// together: one request id per registration, replies matched by that id --
-// or by the definition's own skill, intent and language when a hub does not
-// echo the id -- and repeats dropped. The deadline covers the whole batch,
-// and a partial answer is still an answer: the intents the hub did not
-// describe in time are simply absent from the result.
-func (c *Client) describeMany(ctx context.Context, wanted []intentKey, timeout time.Duration) (map[intentKey][]IntentDefinition, error) {
+// describeMany describes many registrations, at most batch of them in
+// flight: one window per batch, one request id per registration, replies
+// matched by that id -- or by the definition's own skill, intent and
+// language when a hub does not echo the id -- and repeats dropped. A batch
+// of zero or less sends them all at once.
+//
+// The deadline covers each batch, so a hub that answers nothing fails after
+// one batch rather than holding every request open. A partial answer is
+// still an answer: within a batch the hub answered, the registrations it
+// did not describe in time are simply absent from the result.
+func (c *Client) describeMany(ctx context.Context, wanted []intentKey, timeout time.Duration, batch int) (map[intentKey][]IntentDefinition, error) {
 	wanted = uniqueIntentKeys(wanted)
 	found := map[intentKey][]IntentDefinition{}
 	if len(wanted) == 0 {
@@ -639,6 +651,25 @@ func (c *Client) describeMany(ctx context.Context, wanted []intentKey, timeout t
 	if err := c.Connect(ctx); err != nil {
 		return nil, err
 	}
+	if batch <= 0 || batch > len(wanted) {
+		batch = len(wanted)
+	}
+	for start := 0; start < len(wanted); start += batch {
+		end := start + batch
+		if end > len(wanted) {
+			end = len(wanted)
+		}
+		if err := c.describeBatch(ctx, wanted[start:end], timeout, found); err != nil {
+			return nil, err
+		}
+	}
+	return found, nil
+}
+
+// describeBatch sends one batch of describes and collects their replies into
+// found. Whatever is queued when it starts was sent before its requests and
+// cannot answer them -- the previous batch's repeated replies, in practice.
+func (c *Client) describeBatch(ctx context.Context, wanted []intentKey, timeout time.Duration, found map[intentKey][]IntentDefinition) error {
 	events := c.Transport.Events()
 	drainEvents(events)
 	queryCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -649,19 +680,19 @@ func (c *Client) describeMany(ctx context.Context, wanted []intentKey, timeout t
 		byRequest[requestID] = key
 		data := Data{"skill_id": key.skillID, "intent_name": key.intentName, "lang": key.lang}
 		if err := c.Emit(queryCtx, EventIntentDescribe, data, c.intentQueryContext(key.lang, requestID)); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	for len(found) < len(wanted) {
+	for answered := 0; answered < len(wanted); {
 		select {
 		case <-queryCtx.Done():
-			if len(found) == 0 {
-				return nil, fmt.Errorf("%w: hub did not answer %s within %s", ErrTimeout, EventIntentDescribe, timeout)
+			if answered == 0 {
+				return fmt.Errorf("%w: hub did not answer %s within %s", ErrTimeout, EventIntentDescribe, timeout)
 			}
-			return found, nil
+			return nil
 		case event := <-events:
 			if denied := policyDenial(event, EventIntentDescribe); denied != nil {
-				return nil, denied
+				return denied
 			}
 			if event.Name != EventIntentDescribeResponse {
 				continue
@@ -684,9 +715,10 @@ func (c *Client) describeMany(ctx context.Context, wanted []intentKey, timeout t
 			} else {
 				found[key] = definitions
 			}
+			answered++
 		}
 	}
-	return found, nil
+	return nil
 }
 
 func keyForDefinition(wanted []intentKey, definition IntentDefinition) (intentKey, bool) {

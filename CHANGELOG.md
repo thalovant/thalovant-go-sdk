@@ -40,6 +40,15 @@
 - A runtime that attaches each row's `definition` to `ovos.intent.list` when
   asked with `include_definitions` is used as such; one that does not is
   described row by row.
+- Send describes in batches of at most `DescribeBatch` (32), each batch its
+  own window with its own deadline, instead of putting every request in
+  flight at once. A hub with 69 intents in two languages is 138 requests and,
+  with every reply delivered twice, 276 inbound events — more than a
+  transport's reply channel holds (`BusEvents` buffers 32), so replies past
+  its capacity stall the transport's read loop and the inventory comes back
+  missing sentences. Reported by the Rust port's review and settled in the
+  Python reference at 0.4.38. A hub that answers nothing now fails after one
+  batch rather than holding every request open.
 - Four readings settled with the Python reference (0.4.37) so every SDK reads
   the same: `HasPhrases()` is true only when at least one intent carries at
   least one sentence; `Intents` trims each language tag and asks a language

@@ -647,6 +647,12 @@ definitions, err := client.DescribeIntent(ctx, rows[0].SkillID, rows[0].IntentNa
 fmt.Println(definitions[0].Samples)
 ```
 
+When the runtime does not attach definitions to the listing, each intent is
+described individually; those requests go out `thalovant.DescribeBatch` (32)
+at a time so a hub with many intents cannot burst more replies than the
+transport's channel holds. An intent the hub does not describe in time simply
+carries no sentences.
+
 `json.Marshal(inventory)` produces the same snake_case shape as the Python
 SDK's `as_dict()`, so the output can be handed to a satellite, an installer
 or an agent as is.

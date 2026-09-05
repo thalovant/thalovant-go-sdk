@@ -64,8 +64,7 @@ type emittedQuery struct {
 }
 
 // intentHub is a hub session: it answers the manifest, or refuses it, twice
-// over. Replies are delivered from their own goroutine the way a transport's
-// read loop does, so a query never blocks on its own answers.
+// over.
 type intentHub struct {
 	registrations     []intentSample
 	refuse            map[string]bool
@@ -79,16 +78,24 @@ type intentHub struct {
 	mu                sync.Mutex
 	connected         bool
 	emitted           []emittedQuery
+	dropped           int
+	describeQueued    []int
 }
 
 func newIntentHub() *intentHub {
+	return newIntentHubWithCapacity(256)
+}
+
+// newIntentHubWithCapacity gives the hub a reply channel of a chosen size, to
+// stand in for a transport whose reply queue is bounded.
+func newIntentHubWithCapacity(capacity int) *intentHub {
 	return &intentHub{
 		registrations: observedRegistrations,
 		refuse:        map[string]bool{},
 		silent:        map[string]bool{},
 		echoRequestID: true,
 		repeats:       2,
-		events:        make(chan Event, 256),
+		events:        make(chan Event, capacity),
 	}
 }
 
@@ -153,6 +160,7 @@ func (h *intentHub) EmitBus(_ context.Context, eventType string, data Data, even
 		}
 		h.deliver(EventIntentListResponse, Data{"ok": true, "intents": rows}, eventContext)
 	case EventIntentDescribe:
+		h.describeQueued = append(h.describeQueued, len(h.events))
 		definitions := []any{}
 		for _, sample := range h.registrations {
 			if sample.lang != lang || sample.skillID != data["skill_id"] || sample.name != data["intent_name"] {
@@ -199,11 +207,29 @@ func (h *intentHub) deliver(name string, data Data, eventContext Context) {
 		delete(replyContext, "request_id")
 		delete(replyContext, "thalovant_request_id")
 	}
-	go func() {
-		for i := 0; i < h.repeats; i++ {
-			h.events <- Event{Name: name, Data: data, Context: replyContext}
+	// A real transport's read loop blocks when the client's reply channel is
+	// full; the fake drops and counts instead, so a burst that overruns a
+	// bounded queue is a visible failure rather than a hung test.
+	for i := 0; i < h.repeats; i++ {
+		select {
+		case h.events <- Event{Name: name, Data: data, Context: replyContext}:
+		default:
+			h.dropped++
 		}
-	}()
+	}
+}
+
+// describeWindows counts the batches of describes the client sent. The client
+// emits a whole batch before reading any of its replies, so the queue only
+// grows within a batch and is empty again only at the batch's first describe.
+func (h *intentHub) describeWindows() int {
+	windows := 0
+	for _, queued := range h.describeQueued {
+		if queued == 0 {
+			windows++
+		}
+	}
+	return windows
 }
 
 func (h *intentHub) queries(eventType string) []emittedQuery {
@@ -438,6 +464,108 @@ func TestAKeywordRowDoesNotEraseTheTemplateRowsSentences(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestDescribesGoOutInBoundedBatches(t *testing.T) {
+	// A hub with many intents must not put more requests in flight than a
+	// bounded reply queue can hold: 69 intents is 69 describes, and every
+	// reply arrives twice. They go out 32 at a time, each batch its own
+	// window, so 64 events are outstanding rather than 138.
+	if DescribeBatch != 32 {
+		t.Fatalf("DescribeBatch must be 32, got %d", DescribeBatch)
+	}
+	hub := newIntentHubWithCapacity(128)
+	hub.registrations = nil
+	for n := 0; n < 69; n++ {
+		hub.registrations = append(hub.registrations, intentSample{
+			lang:    "en-us",
+			skillID: weatherSkill,
+			name:    fmt.Sprintf("intent.%03d", n),
+			samples: []string{fmt.Sprintf("sentence %d", n)},
+		})
+	}
+
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if windows := hub.describeWindows(); windows != 3 {
+		t.Fatalf("69 describes go out in three batches of at most 32, got %d", windows)
+	}
+	if hub.dropped != 0 {
+		t.Fatalf("a bounded reply queue must not overrun, %d replies were dropped", hub.dropped)
+	}
+	if len(inventory.Intents()) != 69 {
+		t.Fatalf("expected 69 intents, got %d", len(inventory.Intents()))
+	}
+	for _, intent := range inventory.Intents() {
+		if len(intent.PhrasesFor("en-us")) == 0 {
+			t.Fatalf("every intent must come back with its sentences, %s has none", intent.ID())
+		}
+	}
+	if described := hub.queries(EventIntentDescribe); len(described) != 69 {
+		t.Fatalf("expected 69 describes, got %d", len(described))
+	}
+}
+
+func TestDescribeManyBatchSizes(t *testing.T) {
+	// The batch size only changes how many requests are in flight; every
+	// registration is described whatever it is.
+	var wanted []intentKey
+	var registrations []intentSample
+	for n := 0; n < 69; n++ {
+		name := fmt.Sprintf("intent.%03d", n)
+		registrations = append(registrations, intentSample{lang: "en-us", skillID: weatherSkill, name: name, samples: []string{"sentence"}})
+		wanted = append(wanted, intentKey{weatherSkill, name, "en-us"})
+	}
+	cases := []struct {
+		name        string
+		batch       int
+		wantWindows int
+	}{
+		{name: "the default batch", batch: DescribeBatch, wantWindows: 3},
+		{name: "one at a time", batch: 1, wantWindows: 69},
+		{name: "all at once", batch: 0, wantWindows: 1},
+		{name: "a batch larger than the work", batch: 200, wantWindows: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := newIntentHubWithCapacity(512)
+			hub.registrations = registrations
+			found, err := intentClient(hub).describeMany(context.Background(), wanted, DefaultIntentTimeout, tc.batch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(found) != 69 {
+				t.Fatalf("expected 69 definitions, got %d", len(found))
+			}
+			if windows := hub.describeWindows(); windows != tc.wantWindows {
+				t.Fatalf("expected %d batches, got %d", tc.wantWindows, windows)
+			}
+		})
+	}
+}
+
+func TestASilentHubFailsAfterOneDescribeBatch(t *testing.T) {
+	// The deadline covers each batch, so a hub answering nothing fails after
+	// the first batch rather than holding every request open.
+	hub := newIntentHub()
+	hub.silent[EventIntentDescribe] = true
+	var registrations []intentSample
+	for n := 0; n < 69; n++ {
+		registrations = append(registrations, intentSample{lang: "en-us", skillID: weatherSkill, name: fmt.Sprintf("intent.%03d", n), samples: []string{"sentence"}})
+	}
+	hub.registrations = registrations
+
+	_, err := intentClient(hub).Intents(context.Background(), []string{"en-us"}, IntentOptions{Timeout: 200 * time.Millisecond})
+
+	if !errors.Is(err, ErrTimeout) || !strings.Contains(err.Error(), EventIntentDescribe) {
+		t.Fatalf("expected a describe timeout, got %v", err)
+	}
+	if described := hub.queries(EventIntentDescribe); len(described) != DescribeBatch {
+		t.Fatalf("only the first batch goes out before the deadline, got %d requests", len(described))
 	}
 }
 
