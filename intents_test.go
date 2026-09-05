@@ -74,6 +74,7 @@ type intentHub struct {
 	echoRequestID     bool
 	repeats           int
 	deaf              func(eventType string, data Data) bool
+	adaptNames        []string
 	events            chan Event
 	mu                sync.Mutex
 	connected         bool
@@ -169,7 +170,7 @@ func (h *intentHub) EmitBus(_ context.Context, eventType string, data Data, even
 		}
 		h.deliver(EventIntentDescribeResponse, Data{"ok": true, "definitions": definitions}, eventContext)
 	case EventAdaptManifestGet:
-		h.deliver(EventAdaptManifest, Data{"intents": []any{}}, eventContext)
+		h.deliver(EventAdaptManifest, Data{"intents": anySlice(h.adaptNames)}, eventContext)
 	case EventPadatiousManifestGet:
 		seen := map[string]struct{}{}
 		names := []any{}
@@ -486,6 +487,29 @@ func TestTheFallbackListsNamesAndSaysWhatWasRefused(t *testing.T) {
 		if asked := hub.queries(eventType); len(asked) != 1 {
 			t.Fatalf("expected %s to be asked once, got %d", eventType, len(asked))
 		}
+	}
+}
+
+func TestTheFallbackKeepsTheLaterManifestsEngineLikeTheReference(t *testing.T) {
+	// A name both engines list is reported as padatious, the later manifest,
+	// as the Python SDK reports it; a bare name is an intent with no skill.
+	hub := newIntentHub()
+	hub.refuse[EventIntentList] = true
+	hub.adaptNames = []string{weatherSkill + ":current.weather", "orphan.intent"}
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if engine := intentByID(t, inventory, weatherSkill+":current.weather").Engine; engine != "padatious" {
+		t.Fatalf("the later manifest names the engine, got %q", engine)
+	}
+	orphan := intentByID(t, inventory, ":orphan.intent")
+	if orphan.SkillID != "" || orphan.Name != "orphan.intent" || orphan.Engine != "adapt" || !orphan.Enabled {
+		t.Fatalf("unexpected orphan intent: %+v", orphan)
+	}
+	if inventory.Skills[0].SkillID != "" || len(inventory.Skills) != 3 {
+		t.Fatalf("the skill-less intent sorts first, got %+v", inventory.Skills)
 	}
 }
 

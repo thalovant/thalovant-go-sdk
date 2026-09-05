@@ -394,6 +394,9 @@ func (inv HubIntentInventory) HasPhrases() bool {
 // the refused query. A hub refusing those too, or any refusal with the
 // fallback off, returns a *PolicyDeniedError; a hub that stays silent returns
 // an error wrapping ErrTimeout.
+//
+// Like Ask, it reads the transport's event channel, so it must not run
+// concurrently with Ask or another intent call on the same client.
 func (c *Client) Intents(ctx context.Context, languages []string, opts ...IntentOptions) (HubIntentInventory, error) {
 	options := intentOptions(opts)
 	asked, err := askedLanguages(languages)
@@ -492,6 +495,8 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 // per registration. An empty lang asks for "en-us". With
 // IntentOptions.IncludeDefinitions the runtime is asked to attach each row's
 // definition; a runtime that honours it fills IntentRegistration.Definition.
+// Like Ask, it reads the transport's event channel, so it must not run
+// concurrently with Ask or another intent call on the same client.
 func (c *Client) ListIntents(ctx context.Context, lang string, opts ...IntentOptions) ([]IntentRegistration, error) {
 	options := intentOptions(opts)
 	if strings.TrimSpace(lang) == "" {
@@ -511,7 +516,9 @@ func (c *Client) ListIntents(ctx context.Context, lang string, opts ...IntentOpt
 // DescribeIntent returns every registration behind one intent in one
 // language, keyword ones first, sentences included for a template intent. An
 // empty lang asks for "en-us". A registration the hub does not know yields an
-// empty list, not an error.
+// empty list, not an error. Like Ask, it reads the transport's event channel,
+// so it must not run concurrently with Ask or another intent call on the
+// same client.
 func (c *Client) DescribeIntent(ctx context.Context, skillID, intentName, lang string, opts ...IntentOptions) ([]IntentDefinition, error) {
 	options := intentOptions(opts)
 	skillID = strings.TrimSpace(skillID)
@@ -739,6 +746,8 @@ func inventoryFromNames(manifests []engineNames, languages []string, denied stri
 			if _, ok := byName[id]; !ok {
 				order = append(order, id)
 			}
+			// A name both engines list keeps the later manifest's engine, as
+			// the Python SDK has it, so every SDK reports the same engine.
 			byName[id] = HubIntent{
 				SkillID:   skillID,
 				Name:      intentName,

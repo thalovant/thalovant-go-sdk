@@ -632,8 +632,9 @@ inventory, err := client.Intents(ctx, nil, thalovant.IntentOptions{
 })
 ```
 
-A nil or empty language list asks for `en-us`. The two underlying queries are
-exposed too:
+A nil or empty language list asks for `en-us`. Like `Ask`, these calls read
+the transport's event channel, so run them one at a time on a client. The two
+underlying queries are exposed too:
 
 ```go
 // ovos.intent.list: one row per registration in one language.
