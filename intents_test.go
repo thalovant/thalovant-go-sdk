@@ -401,27 +401,43 @@ func TestDefinitionsAttachedToTheListingSkipTheDescribes(t *testing.T) {
 	}
 }
 
-func TestADualRegistrationKeepsItsSentencesWhicheverRowCarriesThem(t *testing.T) {
-	hub := newIntentHub()
-	hub.definitionsInList = true
-	hub.registrations = []intentSample{
-		{lang: "en-us", skillID: weatherSkill, name: "current.weather", samples: []string{"what is the weather"}},
-		{lang: "en-us", skillID: weatherSkill, name: "current.weather", method: "keyword", samples: []string{"weather"}},
+func TestAKeywordRowDoesNotEraseTheTemplateRowsSentences(t *testing.T) {
+	// One intent, two registrations in one language: the keyword row carries
+	// no samples, and must not erase the template row's whichever order they
+	// arrive in. The first row seen names the engine.
+	template := intentSample{lang: "en-us", skillID: weatherSkill, name: "current.weather", samples: []string{"what is the weather"}}
+	keyword := intentSample{lang: "en-us", skillID: weatherSkill, name: "current.weather", method: "keyword", samples: []string{"weather"}}
+	cases := []struct {
+		name       string
+		rows       []intentSample
+		wantEngine string
+	}{
+		{name: "keyword row after the template row", rows: []intentSample{template, keyword}, wantEngine: "padatious"},
+		{name: "keyword row before the template row", rows: []intentSample{keyword, template}, wantEngine: "adapt"},
 	}
-	inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-us"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	for _, tc := range cases {
+		for _, definitionsInList := range []bool{true, false} {
+			t.Run(fmt.Sprintf("%s, definitions in list %v", tc.name, definitionsInList), func(t *testing.T) {
+				hub := newIntentHub()
+				hub.definitionsInList = definitionsInList
+				hub.registrations = tc.rows
+				inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-us"})
+				if err != nil {
+					t.Fatal(err)
+				}
 
-	if len(inventory.Intents()) != 1 {
-		t.Fatalf("two registrations of one intent are one intent, got %v", intentIDs(inventory))
-	}
-	weather := inventory.Intents()[0]
-	if !reflect.DeepEqual(weather.PhrasesFor("en-us"), []string{"what is the weather"}) {
-		t.Fatalf("the keyword row must not erase the template's sentences, got %v", weather.PhrasesFor("en-us"))
-	}
-	if weather.Engine != "padatious" {
-		t.Fatalf("the first row listed names the engine, got %q", weather.Engine)
+				if len(inventory.Intents()) != 1 {
+					t.Fatalf("two registrations of one intent are one intent, got %v", intentIDs(inventory))
+				}
+				weather := inventory.Intents()[0]
+				if !reflect.DeepEqual(weather.PhrasesFor("en-us"), []string{"what is the weather"}) {
+					t.Fatalf("the keyword row must not erase the template's sentences, got %v", weather.PhrasesFor("en-us"))
+				}
+				if weather.Engine != tc.wantEngine {
+					t.Fatalf("the first row listed names the engine: want %q, got %q", tc.wantEngine, weather.Engine)
+				}
+			})
+		}
 	}
 }
 
@@ -490,9 +506,9 @@ func TestTheFallbackListsNamesAndSaysWhatWasRefused(t *testing.T) {
 	}
 }
 
-func TestTheFallbackKeepsTheLaterManifestsEngineLikeTheReference(t *testing.T) {
-	// A name both engines list is reported as padatious, the later manifest,
-	// as the Python SDK reports it; a bare name is an intent with no skill.
+func TestTheFallbackKeepsTheFirstEngineThatNamesAnIntent(t *testing.T) {
+	// adapt is asked before padatious, so a name both list is adapt; a bare
+	// name is an intent with no skill.
 	hub := newIntentHub()
 	hub.refuse[EventIntentList] = true
 	hub.adaptNames = []string{weatherSkill + ":current.weather", "orphan.intent"}
@@ -501,8 +517,11 @@ func TestTheFallbackKeepsTheLaterManifestsEngineLikeTheReference(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if engine := intentByID(t, inventory, weatherSkill+":current.weather").Engine; engine != "padatious" {
-		t.Fatalf("the later manifest names the engine, got %q", engine)
+	if engine := intentByID(t, inventory, weatherSkill+":current.weather").Engine; engine != "adapt" {
+		t.Fatalf("the first engine to name an intent decides its engine, got %q", engine)
+	}
+	if engine := intentByID(t, inventory, shadowSkill+":custos.incidents").Engine; engine != "padatious" {
+		t.Fatalf("a name only padatious lists is padatious, got %q", engine)
 	}
 	orphan := intentByID(t, inventory, ":orphan.intent")
 	if orphan.SkillID != "" || orphan.Name != "orphan.intent" || orphan.Engine != "adapt" || !orphan.Enabled {
@@ -663,6 +682,44 @@ func TestListIntentsHonoursIncludeDefinitions(t *testing.T) {
 		if row.Definition == nil || len(samplesFromDefinition(row.Definition)) == 0 {
 			t.Fatalf("expected the definition on the row, got %+v", row)
 		}
+	}
+}
+
+func TestHasPhrasesMeansAtLeastOneSentence(t *testing.T) {
+	hub := newIntentHub()
+	hub.registrations = []intentSample{{lang: "en-us", skillID: shadowSkill, name: "custos.incidents"}}
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if len(inventory.Intents()) != 1 {
+		t.Fatalf("expected the intent, got %v", intentIDs(inventory))
+	}
+	if inventory.HasPhrases() {
+		t.Fatal("an inventory whose describes all came back empty does not have phrases")
+	}
+	if !reflect.DeepEqual(inventory.Intents()[0].Languages, []string{"en-us"}) {
+		t.Fatalf("the language was still listed, got %v", inventory.Intents()[0].Languages)
+	}
+}
+
+func TestLanguagesAreFoldedAndDeduplicatedBeforeAsking(t *testing.T) {
+	hub := newIntentHub()
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{" en-us ", "en-US", "en_us", "fr-fr"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(inventory.Languages, []string{"en-us", "fr-fr"}) {
+		t.Fatalf("the first spelling is kept, in the order given, got %v", inventory.Languages)
+	}
+	var asked []string
+	for _, query := range hub.queries(EventIntentList) {
+		asked = append(asked, stringValue(query.data["lang"]))
+	}
+	if !reflect.DeepEqual(asked, []string{"en-us", "fr-fr"}) {
+		t.Fatalf("each language is asked once, got %v", asked)
 	}
 }
 

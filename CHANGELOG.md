@@ -40,6 +40,15 @@
 - A runtime that attaches each row's `definition` to `ovos.intent.list` when
   asked with `include_definitions` is used as such; one that does not is
   described row by row.
+- Four readings settled with the Python reference (0.4.37) so every SDK reads
+  the same: `HasPhrases()` is true only when at least one intent carries at
+  least one sentence; `Intents` trims each language tag and asks a language
+  repeated under another spelling (`en-us`, `en-US`, `en_us`) once, keeping
+  the first spelling given; an intent registered under both engines in one
+  language keeps the template row's sentences whichever order the rows
+  arrive in, and the first row names its engine; on the names-only fallback
+  the first engine to name an intent decides its engine (adapt is asked
+  before padatious).
 - Add the event-name constants `EventIntentList`, `EventIntentListResponse`,
   `EventIntentDescribe`, `EventIntentDescribeResponse`,
   `EventAdaptManifestGet`, `EventAdaptManifest`, `EventPadatiousManifestGet`

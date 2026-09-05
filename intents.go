@@ -381,7 +381,9 @@ func (inv HubIntentInventory) HasPhrases() bool {
 // It reads the runtime's intent manifest over this session, so no
 // control-plane credential is involved. Each intent carries the sentences a
 // person says to reach it, as the skill wrote them, "{slot}" placeholders
-// included. A nil or empty languages asks for "en-us".
+// included. A nil or empty languages asks for "en-us"; tags are trimmed and a
+// language repeated under another spelling ("en-US", "en_us") is asked once,
+// under the first spelling given.
 //
 // The hub's queries are correlated by request id like Ask; a reply delivered
 // more than once is taken once. Unless the runtime attached definitions to
@@ -469,12 +471,13 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 					}
 				}
 			}
-			// An intent registered twice in one language (a keyword set next
-			// to its template) keeps the sentences whichever row carried them.
-			if existing, ok := intent.Phrases[lang]; !ok {
+			// An intent registered under both engines has two rows for the
+			// language; the keyword row carries no sentences and must not
+			// erase the template row's, whichever order they arrive in.
+			if _, ok := intent.Phrases[lang]; !ok {
 				intent.Languages = append(intent.Languages, lang)
 				intent.Phrases[lang] = sentences
-			} else if len(existing) == 0 {
+			} else if len(sentences) > 0 {
 				intent.Phrases[lang] = sentences
 			}
 		}
@@ -540,26 +543,34 @@ func (c *Client) DescribeIntent(ctx context.Context, skillID, intentName, lang s
 	return definitionsFromEvent(event), nil
 }
 
+// askedLanguages trims the tags and asks each language once: "en-us",
+// "en-US" and "en_us" are one language, kept under the first spelling seen,
+// in the order given. Nothing given means "en-us".
 func askedLanguages(languages []string) ([]string, error) {
 	if len(languages) == 0 {
 		return []string{"en-us"}, nil
 	}
-	seen := map[string]struct{}{}
 	asked := make([]string, 0, len(languages))
 	for _, lang := range languages {
-		if strings.TrimSpace(lang) == "" {
+		tag := strings.TrimSpace(lang)
+		if tag == "" || containsLanguage(asked, tag) {
 			continue
 		}
-		if _, ok := seen[lang]; ok {
-			continue
-		}
-		seen[lang] = struct{}{}
-		asked = append(asked, lang)
+		asked = append(asked, tag)
 	}
 	if len(asked) == 0 {
 		return nil, fmt.Errorf("intents requires at least one language")
 	}
 	return asked, nil
+}
+
+func containsLanguage(tags []string, lang string) bool {
+	for _, tag := range tags {
+		if SameLanguage(tag, lang) {
+			return true
+		}
+	}
+	return false
 }
 
 // ----------------------------------------------------------------------------
@@ -709,7 +720,8 @@ type engineNames struct {
 // intentNames reads the engines' own manifests, adapt then padatious: names
 // only, and the same names whatever the language asked, because an intent's
 // name is the same in every language. The fallback for a hub allowed for
-// these queries but not the intent manifest.
+// these queries but not the intent manifest. The order matters: the first
+// engine to name an intent decides its engine.
 func (c *Client) intentNames(ctx context.Context, lang string, timeout time.Duration) ([]engineNames, error) {
 	manifests := []struct {
 		engine    string
@@ -743,11 +755,12 @@ func inventoryFromNames(manifests []engineNames, languages []string, denied stri
 		for _, raw := range manifest.names {
 			skillID, intentName := splitIntentName(raw)
 			id := skillID + ":" + intentName
-			if _, ok := byName[id]; !ok {
-				order = append(order, id)
+			// The first engine to name an intent decides its engine, as on the
+			// manifest path; adapt is asked before padatious.
+			if _, ok := byName[id]; ok {
+				continue
 			}
-			// A name both engines list keeps the later manifest's engine, as
-			// the Python SDK has it, so every SDK reports the same engine.
+			order = append(order, id)
 			byName[id] = HubIntent{
 				SkillID:   skillID,
 				Name:      intentName,
