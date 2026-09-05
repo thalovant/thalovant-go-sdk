@@ -49,6 +49,15 @@
   missing sentences. Reported by the Rust port's review and settled in the
   Python reference at 0.4.38. A hub that answers nothing now fails after one
   batch rather than holding every request open.
+- Keep partial results across describe batches: a batch that received no
+  reply contributes nothing, and the call fails only when no batch produced a
+  definition. Batches are contiguous slices of the work, so one unresponsive
+  skill can own a whole batch — a skill with more than 32 intents would
+  otherwise turn the entire inventory into a timeout, while the same skill
+  with fewer only lost its sentences. A hub silent from the start still fails
+  at the first batch, and a refusal still stops the call whenever it arrives.
+  Reported by the Rust port's review and settled in the Python reference at
+  0.4.39.
 - Four readings settled with the Python reference (0.4.37) so every SDK reads
   the same: `HasPhrases()` is true only when at least one intent carries at
   least one sentence; `Intents` trims each language tag and asks a language

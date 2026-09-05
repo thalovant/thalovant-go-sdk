@@ -640,8 +640,9 @@ func (c *Client) requestReply(ctx context.Context, queryType, replyType string, 
 //
 // The deadline covers each batch, so a hub that answers nothing fails after
 // one batch rather than holding every request open. A partial answer is
-// still an answer: within a batch the hub answered, the registrations it
-// did not describe in time are simply absent from the result.
+// still an answer, across batches as within one: a batch that received
+// nothing contributes nothing, and the call fails only when no batch
+// produced a definition.
 func (c *Client) describeMany(ctx context.Context, wanted []intentKey, timeout time.Duration, batch int) (map[intentKey][]IntentDefinition, error) {
 	wanted = uniqueIntentKeys(wanted)
 	found := map[intentKey][]IntentDefinition{}
@@ -660,7 +661,16 @@ func (c *Client) describeMany(ctx context.Context, wanted []intentKey, timeout t
 			end = len(wanted)
 		}
 		if err := c.describeBatch(ctx, wanted[start:end], timeout, found); err != nil {
-			return nil, err
+			// Batches are contiguous slices of the work, so one unresponsive
+			// skill can own a whole batch: failing here would turn a skill
+			// with more than DescribeBatch intents into a failed inventory,
+			// while the same skill with fewer only loses its sentences. A hub
+			// silent from the start still fails at the first batch, since
+			// nothing has been found. A refusal is not a silence: it stops
+			// the call whenever it arrives.
+			if !errors.Is(err, ErrTimeout) || len(found) == 0 {
+				return nil, err
+			}
 		}
 	}
 	return found, nil

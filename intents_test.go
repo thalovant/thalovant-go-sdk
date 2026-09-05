@@ -548,6 +548,90 @@ func TestDescribeManyBatchSizes(t *testing.T) {
 	}
 }
 
+func TestABatchThatGoesQuietKeepsTheOtherBatchesSentences(t *testing.T) {
+	// Batches are contiguous slices of the work, so one skill that stops
+	// answering can own a whole batch. That batch contributes nothing; it
+	// must not discard what the others found.
+	hub := newIntentHubWithCapacity(128)
+	hub.registrations = nil
+	for n := 0; n < 69; n++ {
+		hub.registrations = append(hub.registrations, intentSample{
+			lang:    "en-us",
+			skillID: weatherSkill,
+			name:    fmt.Sprintf("intent.%03d", n),
+			samples: []string{fmt.Sprintf("sentence %d", n)},
+		})
+	}
+	asked := 0
+	hub.deaf = func(eventType string, _ Data) bool {
+		if eventType != EventIntentDescribe {
+			return false
+		}
+		asked++
+		// The first batch is answered; the hub goes quiet after it.
+		return asked > DescribeBatch
+	}
+
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-us"}, IntentOptions{Timeout: 200 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("a batch that received nothing must not fail the inventory: %v", err)
+	}
+
+	if len(inventory.Intents()) != 69 {
+		t.Fatalf("every intent stays listed, got %d", len(inventory.Intents()))
+	}
+	if described := hub.queries(EventIntentDescribe); len(described) != 69 {
+		t.Fatalf("the later batches still go out, got %d requests", len(described))
+	}
+	var described []string
+	for _, intent := range inventory.Intents() {
+		if len(intent.PhrasesFor("en-us")) > 0 {
+			described = append(described, intent.Name)
+		}
+	}
+	if len(described) != DescribeBatch {
+		t.Fatalf("the answered batch keeps its sentences: want %d intents with phrases, got %d", DescribeBatch, len(described))
+	}
+	if described[0] != "intent.000" || described[len(described)-1] != fmt.Sprintf("intent.%03d", DescribeBatch-1) {
+		t.Fatalf("the answered batch is the first one, got %v", described)
+	}
+	if !inventory.HasPhrases() {
+		t.Fatal("an inventory with an answered batch has phrases")
+	}
+}
+
+func TestARefusalInALaterBatchIsNotSwallowedAsAPartialAnswer(t *testing.T) {
+	// Silence in one batch is tolerated; a refusal is not, whenever it comes.
+	hub := newIntentHubWithCapacity(128)
+	hub.registrations = nil
+	for n := 0; n < 69; n++ {
+		hub.registrations = append(hub.registrations, intentSample{
+			lang:    "en-us",
+			skillID: weatherSkill,
+			name:    fmt.Sprintf("intent.%03d", n),
+			samples: []string{fmt.Sprintf("sentence %d", n)},
+		})
+	}
+	asked := 0
+	hub.deaf = func(eventType string, _ Data) bool {
+		if eventType != EventIntentDescribe {
+			return false
+		}
+		asked++
+		if asked > DescribeBatch {
+			hub.refuse[EventIntentDescribe] = true
+		}
+		return false
+	}
+
+	_, err := intentClient(hub).Intents(context.Background(), []string{"en-us"}, IntentOptions{Timeout: 200 * time.Millisecond})
+
+	var denied *PolicyDeniedError
+	if !errors.As(err, &denied) || denied.DeniedType != EventIntentDescribe {
+		t.Fatalf("expected the refusal from the second batch, got %v", err)
+	}
+}
+
 func TestASilentHubFailsAfterOneDescribeBatch(t *testing.T) {
 	// The deadline covers each batch, so a hub answering nothing fails after
 	// the first batch rather than holding every request open.
