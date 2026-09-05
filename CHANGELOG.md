@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.3.13
+
+- Add the intent inventory: `client.Intents(ctx, languages)` reads the hub
+  runtime's intent manifest (OVOS-INTENT-4 §10) over the client's own session
+  and returns a `HubIntentInventory` — every intent each skill registered, per
+  language, with the sentences a person says to reach it as the skill's locale
+  files wrote them, `{slot}` placeholders included. No control-plane credential
+  is involved. `client.ListIntents(ctx, lang)` and
+  `client.DescribeIntent(ctx, skillID, intentName, lang)` expose the two
+  underlying queries (`ovos.intent.list` / `ovos.intent.describe`) as
+  `[]IntentRegistration` and `[]IntentDefinition`. All three take optional
+  `IntentOptions{Timeout, Describe, Fallback, IncludeDefinitions}`; `Describe`
+  and `Fallback` are `*bool` that default to true when nil, like
+  `DeviceLoginOptions.OpenBrowser`.
+- Export the result model: `HubIntentInventory` (`Languages`, `Skills`,
+  `Source`, `Denied`, `Intents()`, `HasPhrases()`), `HubSkillIntents`
+  (`SkillID`, `Intents`, `Languages()`) and `HubIntent` (`SkillID`, `Name`,
+  `Engine`, `Enabled`, `Languages`, `Phrases`, `ID()`, `PhrasesFor(lang)`,
+  `Examples(lang, limit)`), with snake_case JSON tags so `json.Marshal` matches
+  the Python SDK's `as_dict()`. `Examples` prefers whole sentences to ones with
+  a slot, shorter first. `SameLanguage` compares tags case-insensitively with
+  `_` and `-` folded, and `IntentSourceManifest` / `IntentSourceEngines` name
+  the two sources.
+- Queries are correlated by `context.request_id` like `Ask`, and a reply
+  delivered more than once is taken once. Describes are sent together and
+  matched by request id, or by the definition's own `skill_id`/`intent_name`/
+  `lang` for a hub that does not echo the id; a describe the hub does not
+  answer in time leaves that intent without sentences rather than failing the
+  inventory.
+- Add `PolicyDeniedError` (wrapping `ErrRuntime`, retrieved with `errors.As`),
+  returned at once from the hub's `hive.policy.denied` with `DeniedType`,
+  `Code`, `Reason` and the `Allowed` list, instead of waiting for a timeout.
+  `Intents` falls back to the engines' own manifests
+  (`intent.service.adapt.manifest.get` / `intent.service.padatious.manifest.get`)
+  when `ovos.intent.list` is refused, unless `IntentOptions.Fallback` is false;
+  the result then carries names only, `Source` set to `engine-manifests` and
+  `Denied` naming the refused query.
+- A runtime that attaches each row's `definition` to `ovos.intent.list` when
+  asked with `include_definitions` is used as such; one that does not is
+  described row by row.
+- Add the event-name constants `EventIntentList`, `EventIntentListResponse`,
+  `EventIntentDescribe`, `EventIntentDescribeResponse`,
+  `EventAdaptManifestGet`, `EventAdaptManifest`, `EventPadatiousManifestGet`
+  and `EventPadatiousManifest`.
+- No existing signature changed.
+
 ## Unreleased
 
 ### Breaking

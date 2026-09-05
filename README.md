@@ -583,6 +583,71 @@ for _, item := range items {
 }
 ```
 
+## What A Hub Can Be Asked
+
+A connected client can ask its hub what can be said, over its own session and
+with no control-plane token. The hub runtime keeps an intent manifest: every
+intent each skill registered, per language, and for template intents the
+sentences the skill's locale files wrote, `{slot}` placeholders included.
+
+```go
+inventory, err := client.Intents(ctx, []string{"en-us", "fr-fr"})
+if err != nil {
+	var denied *thalovant.PolicyDeniedError
+	if errors.As(err, &denied) {
+		// This connection may not publish denied.DeniedType; denied.Allowed
+		// lists what it may.
+	}
+	panic(err)
+}
+for _, skill := range inventory.Skills {
+	fmt.Println(skill.SkillID, skill.Languages())
+	for _, intent := range skill.Intents {
+		fmt.Println("  ", intent.ID(), intent.Engine, intent.Examples("en-us", 2))
+	}
+}
+```
+
+Each `HubIntent` carries `Phrases` keyed by language, `PhrasesFor(lang)` —
+tags compare case-insensitively with `_` and `-` folded, so `fr_FR` finds
+`fr-fr` — and `Examples(lang, limit)`, which prefers whole sentences to ones
+with a slot, shorter first. `Engine` is `padatious` for a template intent and
+`adapt` for a keyword one.
+
+`inventory.Source` is `intent-manifest` when the sentences came from the
+manifest. A hub whose connection may not publish `ovos.intent.list` is asked
+for the engines' own manifests instead: the result then carries names only,
+`Source` is `engine-manifests`, `Denied` names the refused query and
+`HasPhrases()` is false. `IntentOptions` tunes the call — `Timeout` bounds each
+query the hub is sent (5 seconds when zero), `Fallback` set to a false pointer
+returns the `*PolicyDeniedError` instead of falling back, and `Describe` set to
+a false pointer skips the per-intent describes and returns names and engines
+only:
+
+```go
+no := false
+inventory, err := client.Intents(ctx, nil, thalovant.IntentOptions{
+	Timeout:  3 * time.Second,
+	Fallback: &no,
+})
+```
+
+A nil or empty language list asks for `en-us`. The two underlying queries are
+exposed too:
+
+```go
+// ovos.intent.list: one row per registration in one language.
+rows, err := client.ListIntents(ctx, "en-us")
+
+// ovos.intent.describe: the registrations behind one intent, sentences included.
+definitions, err := client.DescribeIntent(ctx, rows[0].SkillID, rows[0].IntentName, "en-us")
+fmt.Println(definitions[0].Samples)
+```
+
+`json.Marshal(inventory)` produces the same snake_case shape as the Python
+SDK's `as_dict()`, so the output can be handed to a satellite, an installer
+or an agent as is.
+
 ## Common Issues
 
 - `missing access token`: call `control.Login(...)` or
@@ -603,6 +668,14 @@ for _, item := range items {
   identity was created before that protocol was enabled.
 - MQTT fails immediately: create or download a fresh client identity after MQTT
   is enabled. MQTT needs the per-client `Identity.MQTT` credentials.
+- `the hub refused "ovos.intent.list"`: the connection's allow-list does not
+  include the intent manifest queries. Connections the control plane
+  provisions for SDK clients allow `ovos.intent.list`, `ovos.intent.describe`
+  and the two engine manifest reads by default; for an older client identity,
+  allow them in the dashboard's connection settings or create a fresh
+  identity. The error is a `*thalovant.PolicyDeniedError` (`errors.As`) that
+  carries the refused type and the allowed list; by default `client.Intents`
+  falls back to the engines' manifests and returns names only.
 - A request times out: set `RequestOptions{Timeout: ...}`.
 - `HTTP 429` with `"code": "token_rate_limited"`: the API token exceeded its
   plan's per-minute request rate (60 requests per minute on the free plan).
@@ -673,6 +746,9 @@ it before resending. Per-plan limits are listed in the dashboard and at
 - `client.SendAction(ctx, payload, options)`
 - `client.SendCode(ctx, value, options)`
 - `client.Conversation(options)`
+- `client.Intents(ctx, languages, IntentOptions{Timeout: ..., Describe: ..., Fallback: ...})`
+- `client.ListIntents(ctx, lang, IntentOptions{Timeout: ..., IncludeDefinitions: ...})`
+- `client.DescribeIntent(ctx, skillID, intentName, lang, IntentOptions{Timeout: ...})`
 
 ## Development
 
