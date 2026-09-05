@@ -16,10 +16,14 @@ package thalovant
 //     session_id}]}. method is "template" (sample sentences) or "keyword"
 //     (keyword sets). A runtime may attach each entry's "definition" when
 //     asked with "include_definitions"; when it does not, the client
-//     describes each intent individually.
+//     describes each intent individually. {"ok": false, "error"} here is a
+//     query that failed, and is returned as an error: a hub that could not
+//     answer is not a hub with no intents.
 //   - ovos.intent.describe {"skill_id", "intent_name", "lang"} ->
 //     ovos.intent.describe.response {"ok", "definitions": [{method,
-//     definition}]} or {"ok": false, "error"}.
+//     definition}]} or {"ok": false, "error"}. That negative is a real
+//     answer -- the hub does not know that registration -- so it yields no
+//     definitions rather than an error.
 //
 // A hub whose connection may not publish a type answers hive.policy.denied
 // naming it; that becomes a *PolicyDeniedError at once rather than a timeout.
@@ -403,7 +407,9 @@ func (inv HubIntentInventory) HasPhrases() bool {
 // carries names only, Source set to IntentSourceEngines and Denied naming
 // the refused query. A hub refusing those too, or any refusal with the
 // fallback off, returns a *PolicyDeniedError; a hub that stays silent returns
-// an error wrapping ErrTimeout.
+// an error wrapping ErrTimeout. A hub that answers the listing ok: false has
+// failed the query rather than refused the type: that returns an error
+// wrapping ErrRuntime, and the engines are not asked instead.
 //
 // Like Ask, it reads the transport's event channel, so it must not run
 // concurrently with Ask or another intent call on the same client.
@@ -506,6 +512,8 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 // per registration. An empty lang asks for "en-us". With
 // IntentOptions.IncludeDefinitions the runtime is asked to attach each row's
 // definition; a runtime that honours it fills IntentRegistration.Definition.
+// A hub that answers ok: false returns an error wrapping ErrRuntime carrying
+// the hub's own text: a listing that failed is not a hub with no intents.
 // Like Ask, it reads the transport's event channel, so it must not run
 // concurrently with Ask or another intent call on the same client.
 func (c *Client) ListIntents(ctx context.Context, lang string, opts ...IntentOptions) ([]IntentRegistration, error) {
@@ -521,13 +529,26 @@ func (c *Client) ListIntents(ctx context.Context, lang string, opts ...IntentOpt
 	if err != nil {
 		return nil, err
 	}
+	if event.Data["ok"] == false {
+		// A refused listing is not an empty hub. Describe answers ok: false
+		// for a registration it does not know, which is a real answer; a
+		// listing that failed has told us nothing, and reading its missing
+		// "intents" key as no intents would show a person a device that can
+		// do nothing.
+		detail := strings.TrimSpace(stringValue(event.Data["error"]))
+		if detail == "" {
+			detail = "the hub refused the listing"
+		}
+		return nil, fmt.Errorf("%w: %s failed: %s", ErrRuntime, EventIntentList, detail)
+	}
 	return registrationsFromEvent(event), nil
 }
 
 // DescribeIntent returns every registration behind one intent in one
 // language, keyword ones first, sentences included for a template intent. An
 // empty lang asks for "en-us". A registration the hub does not know yields an
-// empty list, not an error. Like Ask, it reads the transport's event channel,
+// empty list, not an error: ok: false is a real answer here, unlike on the
+// listing, and means the intent has no sentences. Like Ask, it reads the transport's event channel,
 // so it must not run concurrently with Ask or another intent call on the
 // same client.
 func (c *Client) DescribeIntent(ctx context.Context, skillID, intentName, lang string, opts ...IntentOptions) ([]IntentDefinition, error) {
