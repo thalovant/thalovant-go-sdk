@@ -647,6 +647,16 @@ definitions, err := client.DescribeIntent(ctx, rows[0].SkillID, rows[0].IntentNa
 fmt.Println(definitions[0].Samples)
 ```
 
+The connection must be allowed to publish `ovos.intent.list`;
+`ovos.intent.describe` is needed only when the sentences are asked for, which
+is the default, so `Describe` set to a false pointer needs the listing alone.
+A hub that answers a listing `{"ok": false}` has failed the query rather than
+refused the type: `Intents` and `ListIntents` return an error wrapping
+`ErrRuntime` carrying the hub's own text, and the engines' manifests are not
+asked instead — a listing that failed is not a hub with no intents. The same
+answer to a describe is a real one, meaning the hub does not know that
+registration, so that intent simply carries no sentences.
+
 When the runtime does not attach definitions to the listing, each intent is
 described individually; those requests go out `thalovant.DescribeBatch` (32)
 at a time so a hub with many intents cannot burst more replies than the
@@ -680,11 +690,17 @@ or an agent as is.
 - `the hub refused "ovos.intent.list"`: the connection's allow-list does not
   include the intent manifest queries. Connections the control plane
   provisions for SDK clients allow `ovos.intent.list`, `ovos.intent.describe`
+  (needed only when definitions are asked for)
   and the two engine manifest reads by default; for an older client identity,
   allow them in the dashboard's connection settings or create a fresh
   identity. The error is a `*thalovant.PolicyDeniedError` (`errors.As`) that
   carries the refused type and the allowed list; by default `client.Intents`
   falls back to the engines' manifests and returns names only.
+- `ovos.intent.list failed: ...`: the hub accepted the query and could not
+  answer it — the text after the colon is the hub's own. This is an error
+  wrapping `ErrRuntime`, not a `*PolicyDeniedError`, and no fallback is
+  attempted: the hub's intents are unknown, not absent. Retry, or check the
+  runtime's logs.
 - A request times out: set `RequestOptions{Timeout: ...}`.
 - `HTTP 429` with `"code": "token_rate_limited"`: the API token exceeded its
   plan's per-minute request rate (60 requests per minute on the free plan).

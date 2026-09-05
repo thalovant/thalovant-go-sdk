@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.3.14
+
+- `ListIntents` returns an error wrapping `ErrRuntime` when the hub answers
+  `ovos.intent.list` with `ok: false`, instead of reading the missing
+  `intents` key as an empty list. A refused listing is not an empty hub, and
+  reporting it as no intents showed a person a device that can do nothing;
+  the error carries the hub's own `error` text. `Intents` fails the same way
+  and does not fall back to the engines' manifests, which answer a policy
+  denial rather than a query the hub could not produce. `DescribeIntent`
+  keeps returning an empty list for `ok: false`, which is a real answer: the
+  hub does not know that registration. Reported by the Kotlin port's review.
+- Say in the README that a connection needs `ovos.intent.describe` only when
+  definitions are asked for (the default); listing alone needs
+  `ovos.intent.list`.
+
 ## 0.3.13
 
 - Add the intent inventory: `client.Intents(ctx, languages)` reads the hub

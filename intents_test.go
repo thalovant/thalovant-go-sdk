@@ -66,9 +66,15 @@ type emittedQuery struct {
 // intentHub is a hub session: it answers the manifest, or refuses it, twice
 // over.
 type intentHub struct {
-	registrations     []intentSample
-	refuse            map[string]bool
-	silent            map[string]bool
+	registrations []intentSample
+	refuse        map[string]bool
+	silent        map[string]bool
+	// listError makes the hub answer the listing {"ok": false, "error": ...},
+	// the shape a runtime uses when the query itself failed.
+	listError string
+	// describeUnknown names the intents the hub describes as {"ok": false},
+	// the shape it uses for a registration it does not know.
+	describeUnknown   map[string]bool
 	definitionsInList bool
 	echoRequestID     bool
 	repeats           int
@@ -140,6 +146,10 @@ func (h *intentHub) EmitBus(_ context.Context, eventType string, data Data, even
 	lang := stringValue(data["lang"])
 	switch eventType {
 	case EventIntentList:
+		if h.listError != "" {
+			h.deliver(EventIntentListResponse, Data{"ok": false, "error": h.listError}, eventContext)
+			return nil
+		}
 		rows := []any{}
 		for _, sample := range h.registrations {
 			if sample.lang != lang {
@@ -161,6 +171,10 @@ func (h *intentHub) EmitBus(_ context.Context, eventType string, data Data, even
 		h.deliver(EventIntentListResponse, Data{"ok": true, "intents": rows}, eventContext)
 	case EventIntentDescribe:
 		h.describeQueued = append(h.describeQueued, len(h.events))
+		if h.describeUnknown[stringValue(data["intent_name"])] {
+			h.deliver(EventIntentDescribeResponse, Data{"ok": false, "error": "unknown intent"}, eventContext)
+			return nil
+		}
 		definitions := []any{}
 		for _, sample := range h.registrations {
 			if sample.lang != lang || sample.skillID != data["skill_id"] || sample.name != data["intent_name"] {
@@ -767,6 +781,70 @@ func TestARefusedDescribeIsReportedNotSwallowed(t *testing.T) {
 	}
 }
 
+func TestARefusedListingIsAnErrorNotAnEmptyHub(t *testing.T) {
+	hub := newIntentHub()
+	hub.listError = "manifest unavailable"
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-us"})
+
+	if !errors.Is(err, ErrRuntime) {
+		t.Fatalf("a refused listing is a runtime error, got %v", err)
+	}
+	for _, want := range []string{EventIntentList, "manifest unavailable"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the message must carry %q, got %q", want, err)
+		}
+	}
+	if inventory.HasPhrases() || len(inventory.Intents()) != 0 {
+		t.Fatalf("a failed listing returns nothing, got %+v", inventory)
+	}
+	var denied *PolicyDeniedError
+	if errors.As(err, &denied) {
+		t.Fatalf("a hub answering ok: false has not refused the type, got %+v", denied)
+	}
+	// The engines' manifests are the fallback for a policy denial, not for a
+	// listing the hub failed to produce.
+	if asked := hub.queries(EventPadatiousManifestGet); len(asked) != 0 {
+		t.Fatalf("a failed listing must not fall back to the engines, got %+v", asked)
+	}
+
+	rows, err := intentClient(hub).ListIntents(context.Background(), "en-us")
+	if !errors.Is(err, ErrRuntime) || len(rows) != 0 {
+		t.Fatalf("ListIntents must fail too, got %+v / %v", rows, err)
+	}
+}
+
+func TestARefusedListingWithoutAReasonStillNamesTheQuery(t *testing.T) {
+	hub := newIntentHub()
+	hub.listError = "   "
+	_, err := intentClient(hub).ListIntents(context.Background(), "en-us")
+
+	if !errors.Is(err, ErrRuntime) {
+		t.Fatalf("a refused listing is a runtime error, got %v", err)
+	}
+	if !strings.Contains(err.Error(), EventIntentList) || !strings.Contains(err.Error(), "refused the listing") {
+		t.Fatalf("the message must name the query and say it was refused, got %q", err)
+	}
+}
+
+func TestADescribeTheHubDoesNotKnowStaysAnEmptyAnswer(t *testing.T) {
+	// The other half of the rule: ok: false on a describe is a real answer,
+	// the hub does not know that registration, so the intent simply has no
+	// sentences and the inventory still stands.
+	hub := newIntentHub()
+	hub.registrations = append([]intentSample{{lang: "en-us", skillID: shadowSkill, name: "custos.unknown"}}, observedRegistrations...)
+	hub.describeUnknown = map[string]bool{"custos.unknown": true}
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-us"})
+	if err != nil {
+		t.Fatalf("a describe the hub does not know is not an error, got %v", err)
+	}
+	if got := intentByID(t, inventory, shadowSkill+":custos.unknown").PhrasesFor("en-us"); len(got) != 0 {
+		t.Fatalf("the unknown registration carries no sentences, got %v", got)
+	}
+	if len(intentByID(t, inventory, weatherSkill+":current.weather").PhrasesFor("en-us")) == 0 {
+		t.Fatal("the intents the hub does know keep their sentences")
+	}
+}
+
 func TestASilentHubTimesOutOnTheListing(t *testing.T) {
 	hub := newIntentHub()
 	hub.silent[EventIntentList] = true
@@ -1161,7 +1239,7 @@ func TestPolicyDeniedFromEventReadsTheObservedShape(t *testing.T) {
 		"denied_type": EventIntentList,
 		"code":        "acl_disallowed_type",
 		"reason":      "ovos.intent.list not in allowed_types",
-		"data":        map[string]any{"msg_type": EventIntentList, "allowed": []any{"speak", 42}},
+		"data":        map[string]any{"msg_type": EventIntentList, "allowed": []any{"speak", 42, nil}},
 	}}
 	denied := policyDeniedFromEvent(event)
 	want := &PolicyDeniedError{DeniedType: EventIntentList, Code: "acl_disallowed_type", Reason: "ovos.intent.list not in allowed_types", Allowed: []string{"speak"}}
