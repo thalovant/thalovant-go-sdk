@@ -39,6 +39,7 @@ jobs:
             events.go
             identity.go
             errors.go
+            intents.go
             mqtt_topics.go
             protocols.go
             transport.go
