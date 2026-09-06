@@ -423,7 +423,9 @@ func TestNewClientWithOptionsFallsBackToHTTPSWhenWSSIsMissing(t *testing.T) {
 
 func TestClientConnectWithInfoReturnsConnectionSnapshot(t *testing.T) {
 	var sawHello bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// TLS: the HTTP transport refuses a cleartext hub, because removing the
+	// crypto key left TLS as the only confidentiality on this path.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("content-type", "application/json")
 		switch r.URL.Path {
 		case "/connect":
@@ -442,11 +444,10 @@ func TestClientConnectWithInfoReturnsConnectionSnapshot(t *testing.T) {
 	defer server.Close()
 
 	identity, err := IdentityFromMap(map[string]any{
-		"key":        "access",
-		"password":   "secret",
-		"crypto_key": "0123456789abcdef",
-		"site":       "site",
-		"host":       server.URL,
+		"key":      "access",
+		"password": "secret",
+		"site":     "site",
+		"host":     server.URL,
 		"data_plane_endpoints": map[string]any{
 			"https": server.URL,
 		},
@@ -460,6 +461,10 @@ func TestClientConnectWithInfoReturnsConnectionSnapshot(t *testing.T) {
 	client, err := NewClientWithOptions(identity, ClientOptions{Protocol: ProtocolHTTPS})
 	if err != nil {
 		t.Fatal(err)
+	}
+	// httptest's TLS certificate is self-signed, so trust this server's own.
+	if transport, ok := client.Transport.(*HTTPTransport); ok {
+		transport.HTTPClient = server.Client()
 	}
 	info, err := client.ConnectWithInfo(context.Background())
 	defer client.Close(context.Background())
@@ -2043,5 +2048,77 @@ func TestMQTTConnectRefusesACleartextBroker(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "mqtts://") {
 		t.Fatalf("the refusal does not tell the caller how to proceed: %v", err)
+	}
+}
+
+// TestHTTPConnectRefusesACleartextEndpoint pins the one thing standing between
+// an HTTPS-transport message and the wire now that v3 removed the payload
+// cipher. The access key also travels in the authorization query.
+func TestHTTPConnectRefusesACleartextEndpoint(t *testing.T) {
+	identity := Identity{
+		AccessKey:     "access",
+		Password:      "secret",
+		SiteID:        "site",
+		DefaultMaster: "http://hub.example.com",
+		DefaultPort:   80,
+	}
+	transport := NewHTTPTransport(identity)
+
+	err := transport.Connect(context.Background())
+	if err == nil {
+		t.Fatal("connected over cleartext http; every message and the access key would go out in the clear")
+	}
+	if !errors.Is(err, ErrConnection) {
+		t.Fatalf("expected an ErrConnection, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "https://") {
+		t.Fatalf("the refusal does not tell the caller how to proceed: %v", err)
+	}
+}
+
+// TestCreateClientIdentityDropsACallerSuppliedCryptoKey: opts.Spec is
+// caller-supplied and merged into the request, and the redaction list covers
+// only the secrets minted here -- so a legacy value passed in could be echoed
+// back inside an ApiError.
+func TestCreateClientIdentityDropsACallerSuppliedCryptoKey(t *testing.T) {
+	var sentSpec map[string]any
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/v1/hubs/hub-1"):
+			_, _ = w.Write([]byte(`{"id":"hub-1","name":"hub","spec":{"protocols":{"wss":{"enabled":true}}},"data_plane_endpoints":{"wss":"wss://hub.example.com"}}`))
+		case strings.HasSuffix(r.URL.Path, "/v1/clients"):
+			var payload map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			sentSpec = mapValue(payload["spec"])
+			_, _ = w.Write([]byte(`{"id":"client-1","name":"kiosk","hub_id":"hub-1","spec":{"version":"1"}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	control := NewControlPlane(server.URL, "token")
+	if _, err := control.CreateClientIdentityForHubID(context.Background(), "hub-1", BootstrapIdentityOptions{
+		Name: "kiosk",
+		Spec: map[string]any{
+			"cryptoKey":  "caller-supplied-SECRET",
+			"crypto_key": "caller-supplied-SECRET-2",
+			"label":      "keep-me",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, found := sentSpec["cryptoKey"]; found {
+		t.Fatalf("a caller-supplied cryptoKey reached /v1/clients: %+v", sentSpec)
+	}
+	if _, found := sentSpec["crypto_key"]; found {
+		t.Fatalf("a caller-supplied crypto_key reached /v1/clients: %+v", sentSpec)
+	}
+	if sentSpec["label"] != "keep-me" {
+		t.Fatalf("the rest of the caller's spec did not survive: %+v", sentSpec)
 	}
 }

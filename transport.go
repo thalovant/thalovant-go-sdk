@@ -94,12 +94,32 @@ func (t *HTTPTransport) BaseURL() string {
 	return t.Identity.EndpointBase()
 }
 
+// requireTLSEndpoint refuses a hub endpoint that is not https.
+func requireTLSEndpoint(endpoint string) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("%w: the HTTP transport needs a valid https:// endpoint; got %q", ErrConnection, endpoint)
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("%w: refusing to use the HTTP transport over %s://. It needs an https:// endpoint: without TLS every message and the access key travel in the clear", ErrConnection, parsed.Scheme)
+	}
+	return nil
+}
+
 func (t *HTTPTransport) Authorization() string {
 	return base64.StdEncoding.EncodeToString([]byte(t.UserAgent + ":" + t.Identity.AccessKey))
 }
 
 func (t *HTTPTransport) Connect(ctx context.Context) error {
 	t.beginConnection()
+	// TLS is the only confidentiality on this path. The identity crypto key
+	// that once sealed HTTP payloads separately is gone with v3, so a plain
+	// http:// hub would put every message, and the access key in the
+	// authorization query, on the wire in the clear.
+	if err := requireTLSEndpoint(t.BaseURL()); err != nil {
+		t.failConnection(err)
+		return err
+	}
 	endpoint := t.BaseURL() + "/connect?authorization=" + url.QueryEscape(t.Authorization())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {

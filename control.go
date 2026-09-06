@@ -857,6 +857,13 @@ func (c *ControlPlane) CreateClientIdentity(ctx context.Context, hub map[string]
 	}
 	spec := map[string]any{"version": "1"}
 	for key, val := range opts.Spec {
+		// opts.Spec is caller-supplied, and a legacy crypto key in it would be
+		// sent to /v1/clients and could come back inside an ApiError -- the
+		// redaction list covers only the secrets minted here. v3 issues no
+		// crypto key, so drop both spellings.
+		if key == "cryptoKey" || key == "crypto_key" {
+			continue
+		}
 		spec[key] = val
 	}
 	spec["apiKey"] = apiKey

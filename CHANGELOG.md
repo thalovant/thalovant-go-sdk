@@ -36,6 +36,14 @@
 - A `wss` connection that the hub refuses now fails with the close reason
   instead of running out the handshake clock: a wrong password reported as a
   twenty second timeout hid what had actually happened.
+- **Breaking.** `HTTPTransport.Connect` now refuses a hub endpoint that is not
+  `https://`, for the same reason as the MQTT change below: TLS is the only
+  confidentiality left on that hop, and the access key travels in the
+  `authorization` query.
+- `CreateClientIdentity` drops `cryptoKey` and `crypto_key` from a
+  caller-supplied `opts.Spec` rather than merging them into the request. The
+  generated-secret redaction covers only what the SDK mints, so a legacy value
+  passed in by a caller could otherwise be echoed back inside an `ApiError`.
 - **Breaking.** `MQTTTransport.Connect` now refuses a broker whose identity does
   not enable TLS. Removing the crypto key took the separate payload cipher with
   it, so TLS is the only confidentiality left on that hop; without it every

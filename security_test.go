@@ -307,7 +307,9 @@ func TestStripURLQueryRemovesQueryAndFragment(t *testing.T) {
 }
 
 func TestHTTPTransportConnectDoesNotLeakAccessKeyInLastError(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	// TLS, because the transport now refuses a cleartext endpoint before it
+	// dials -- and this test is about what a *dial failure* records.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	serverURL := server.URL
 	server.Close() // force a connection-refused dial on the next request
 
