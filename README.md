@@ -168,7 +168,7 @@ Keep `result.Identity` secret: it holds the client's data-plane credentials.
 `result.Summary(false)` — the default — is safe to log: it redacts the secret
 fields of the identity **and** of the raw `hub`/`client` maps (the
 `initial_identify` access key/password/crypto key/MQTT password, the
-`initial_identify_token`, and the echoed spec `apiKey`/`password`/`cryptoKey`).
+`initial_identify_token`, and the echoed spec `apiKey`/`password`).
 `result.Summary(true)` returns every one of those secrets in the clear and must
 never be logged or written to an untrusted sink. The redaction covers
 human-facing formatting only; `json.Marshal` of the identity itself (for the
@@ -459,6 +459,45 @@ Hubs may expose one or more public data-plane protocols:
 - `wss`: secure realtime WebSocket, the default public path and SDK preference.
 - `https`: request/response HTTP protocol exposed as HTTPS.
 - `mqtt`: broker-mediated MQTT over TLS. Requires per-client broker credentials.
+
+### Transport Security
+
+`wss` connections perform the HiveMind **v3 Noise handshake**
+(`Noise_XXpsk2_25519_ChaChaPoly_SHA256`, or `KKpsk0` once the hub's static key
+is pinned). It is the only key exchange a HiveMind-core 5.x hub accepts: there
+is no pre-shared `crypto_key` any more, no cleartext path, and a connection that
+cannot complete the handshake is closed with WebSocket `1008`.
+
+Nothing extra has to be provisioned. The Noise pre-shared key is derived from
+the identity `password` with argon2id, salted with the hub's node id, so an
+identity that can authenticate can already handshake.
+
+Two files persist beside the SDK config file (`~/.config/thalovant` unless
+`XDG_CONFIG_HOME` or `%APPDATA%` says otherwise), both `0600`:
+
+- `noise_key` — this client's static X25519 key. It has to persist: a hub pins
+  it on first contact, so regenerating it makes the client look like a
+  different peer and the hub refuses it.
+- `noise_pins.json` — the hub static keys this client has pinned.
+
+Point both somewhere else with `WSSTransport.NoiseStateDir`.
+
+The first connection to a hub trusts the key it presents and records it. A
+later connection presenting a different key is **refused**, because the SDK
+cannot tell a reinstalled hub from another machine answering at the same
+address. If the hub really was replaced, clear the pin deliberately:
+
+```go
+if err := thalovant.ForgetNoisePin("", nodeID); err != nil {
+	panic(err)
+}
+```
+
+The derivation costs 64 MiB and a few hundred milliseconds. A transport caches
+the result per hub, so reconnects pay it once.
+
+`https` and `mqtt` do not run a Noise handshake. They authenticate with the
+identity credentials and take their confidentiality from TLS.
 
 Inspect what an identity supports:
 

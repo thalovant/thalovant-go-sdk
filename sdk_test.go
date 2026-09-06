@@ -669,7 +669,7 @@ func TestControlPlaneBootstrapKeepsGeneratedSecretsLocal(t *testing.T) {
 	if !sawAuthorization {
 		t.Fatal("expected authenticated hub request")
 	}
-	if result.Identity.AccessKey == "" || result.Identity.Password == "" || result.Identity.CryptoKey == "" {
+	if result.Identity.AccessKey == "" || result.Identity.Password == "" {
 		t.Fatalf("expected local identity secrets: %+v", result.Identity)
 	}
 	if result.Identity.EndpointFor(ProtocolHTTPS) != "https://jokes.thalovant.io:443" {
@@ -1905,13 +1905,6 @@ func TestControlPlaneBootstrapPreservesAPIReturnedMQTTCredentials(t *testing.T) 
 	}
 }
 
-func TestRuntimeCryptoKeyTruncates(t *testing.T) {
-	got := string(RuntimeCryptoKey("0123456789abcdef-extra"))
-	if got != "0123456789abcdef" {
-		t.Fatalf("unexpected runtime key %q", got)
-	}
-}
-
 func TestBuildClientContext(t *testing.T) {
 	context := BuildClientContext(nil, ClientContextOptions{
 		UserID:       "u-1",
@@ -1955,35 +1948,6 @@ func TestDisplayItemsFromEventData(t *testing.T) {
 	choices, ok := items[3].Data.([]map[string]any)
 	if !ok || choices[0]["payload"] != "/continue" {
 		t.Fatalf("unexpected choices: %+v", items[3].Data)
-	}
-}
-
-func TestEncryptAsJSONRoundTrips(t *testing.T) {
-	encrypted, err := EncryptAsJSON("0123456789abcdef-extra", "hello")
-	if err != nil {
-		t.Fatal(err)
-	}
-	decrypted, err := DecryptFromJSON("0123456789abcdef-extra", encrypted)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if decrypted != "hello" {
-		t.Fatalf("unexpected plaintext %q", decrypted)
-	}
-}
-
-func TestEncryptAsBinaryRoundTrips(t *testing.T) {
-	plaintext := []byte("hello")
-	encrypted, err := EncryptAsBinary("0123456789abcdef-extra", plaintext)
-	if err != nil {
-		t.Fatal(err)
-	}
-	decrypted, err := DecryptBinary("0123456789abcdef-extra", encrypted)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(decrypted) != string(plaintext) {
-		t.Fatalf("unexpected plaintext %q", string(decrypted))
 	}
 }
 

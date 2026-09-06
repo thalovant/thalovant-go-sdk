@@ -21,7 +21,6 @@ func TestIdentityStringRedactsSecretsButJSONRetainsThem(t *testing.T) {
 	identity := Identity{
 		AccessKey:     "ak-SECRET-1111",
 		Password:      "pw-SECRET-2222",
-		CryptoKey:     "ck-SECRET-3333",
 		SiteID:        "site-1",
 		DefaultMaster: "https://hub.example.com",
 		DefaultPort:   443,
@@ -38,7 +37,7 @@ func TestIdentityStringRedactsSecretsButJSONRetainsThem(t *testing.T) {
 		},
 	}
 	secrets := []string{
-		identity.AccessKey, identity.Password, identity.CryptoKey,
+		identity.AccessKey, identity.Password,
 		identity.MQTT.Username, identity.MQTT.Password,
 		"ep-pass-SECRET-6666", // userinfo embedded in a data-plane endpoint URL
 	}
@@ -81,7 +80,7 @@ func TestIdentityStringRedactsSecretsButJSONRetainsThem(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if back.AccessKey != identity.AccessKey || back.Password != identity.Password || back.CryptoKey != identity.CryptoKey {
+	if back.AccessKey != identity.AccessKey || back.Password != identity.Password {
 		t.Fatalf("identity secrets did not survive json round-trip: %+v", back)
 	}
 	if back.MQTT == nil || back.MQTT.Password != identity.MQTT.Password || back.MQTT.Username != identity.MQTT.Username {
@@ -217,7 +216,7 @@ func TestBootstrapSummaryRedactsHubAndClientSecretsByDefault(t *testing.T) {
 	}
 	result := BootstrapIdentityResult{
 		Identity: Identity{
-			AccessKey: "id-ak-SECRET", Password: "id-pw-SECRET", CryptoKey: "id-ck-SECRET",
+			AccessKey: "id-ak-SECRET", Password: "id-pw-SECRET",
 			SiteID: "site-1", DefaultMaster: "https://hub.example.com", DefaultPort: 443,
 		},
 		Hub:    hub,

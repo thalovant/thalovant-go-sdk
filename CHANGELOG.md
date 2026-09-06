@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.4.0
+
+- **Breaking.** `wss` connections now perform the HiveMind v3 Noise handshake,
+  and only that. A HiveMind-core 5.x hub accepts no other key exchange, so this
+  release requires one; against an older hub the connection is refused rather
+  than downgraded. `Noise_XXpsk2_25519_ChaChaPoly_SHA256` on first contact and
+  `Noise_KKpsk0_...` once the hub's static key is pinned, with
+  `25519_AESGCM_SHA256` supported where a hub prefers it.
+- **Breaking.** `Identity.CryptoKey` is gone, along with the AES helpers
+  (`EncryptAsJSON`, `DecryptFromJSON`, `EncryptAsBinary`, `DecryptBinary`,
+  `RuntimeCryptoKey`) and the pre-shared handshake on all three transports.
+  Hubs no longer issue a crypto key and v3 derives its pre-shared key from the
+  `password`, so the field named a credential that no longer exists.
+  `crypto_key` is still read from an existing identity file and ignored, and it
+  stays in the bootstrap redaction list so an older payload carrying one does
+  not leak it. `https` and `mqtt` now rely on TLS for confidentiality, as they
+  already did for everything the crypto key did not cover.
+- The Noise pre-shared key is derived from `password` with argon2id
+  (`time_cost=3`, 64 MiB, `parallelism=1`), salted with SHA-256 of the hub's
+  node id. A transport caches it per hub, so only the first connection pays the
+  few hundred milliseconds.
+- Two files persist beside the SDK config file, both `0600`: `noise_key` (this
+  client's static X25519 key) and `noise_pins.json` (the hub keys it has
+  pinned). `WSSTransport.NoiseStateDir` overrides the location, and
+  `LoadOrCreateNoiseKey`, `LoadNoisePin`, `SaveNoisePin` and `ForgetNoisePin`
+  are exported for callers that manage the state themselves.
+- Trust on first use: the first hub key seen for a node id is pinned, and a
+  later connection presenting a different key is refused with an error naming
+  `ForgetNoisePin`, rather than silently re-pinned. A failed `KKpsk0` handshake
+  drops the stale pin, because `KK` needs each side to hold the other's key and
+  the failure is as likely to mean the hub no longer has this client's.
+- `WSSTransport.RemoteStaticKey()` reports the hub's static key for the current
+  session.
+- A `wss` connection that the hub refuses now fails with the close reason
+  instead of running out the handshake clock: a wrong password reported as a
+  twenty second timeout hid what had actually happened.
+- Messages larger than one Noise transport message are chunked at 65000 bytes
+  and reassembled by the peer, with reassembly capped at 32 MiB. Any transport
+  message that fails to decrypt, and any malformed chunk sequence, drops the
+  session rather than the frame.
+
 ## 0.3.14
 
 - `ListIntents` returns an error wrapping `ErrRuntime` when the hub answers
