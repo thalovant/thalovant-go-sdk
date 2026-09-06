@@ -168,7 +168,9 @@ Keep `result.Identity` secret: it holds the client's data-plane credentials.
 `result.Summary(false)` — the default — is safe to log: it redacts the secret
 fields of the identity **and** of the raw `hub`/`client` maps (the
 `initial_identify` access key/password/crypto key/MQTT password, the
-`initial_identify_token`, and the echoed spec `apiKey`/`password`).
+`initial_identify_token`, and the echoed spec `apiKey`/`password`/`cryptoKey`).
+The crypto key is no longer issued, but the redaction still names it so an
+older stored payload that carries one cannot be logged.
 `result.Summary(true)` returns every one of those secrets in the clear and must
 never be logged or written to an untrusted sink. The redaction covers
 human-facing formatting only; `json.Marshal` of the identity itself (for the

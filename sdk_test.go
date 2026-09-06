@@ -648,8 +648,13 @@ func TestControlPlaneBootstrapKeepsGeneratedSecretsLocal(t *testing.T) {
 				t.Fatal(err)
 			}
 			spec := mapValue(payload["spec"])
-			if spec["apiKey"] == "" || spec["password"] == "" || spec["cryptoKey"] == "" {
-				t.Fatalf("missing generated credentials in payload: %+v", spec)
+			// Compare against the zero value for the concrete type: a missing
+			// key decodes to nil, and `nil == ""` is false, so a guard written
+			// against "" alone would pass for a credential that never arrived.
+			for _, field := range []string{"apiKey", "password", "siteId"} {
+				if value, _ := spec[field].(string); value == "" {
+					t.Fatalf("missing generated %s in payload: %+v", field, spec)
+				}
 			}
 			_, _ = w.Write([]byte(`{"id":"client-1","name":"kiosk","hub_id":"hub-1","spec":{"version":"1","apiKeyRef":{"name":"secret","key":"apiKey"}}}`))
 		default:
@@ -2006,5 +2011,37 @@ func TestEventContextMatching(t *testing.T) {
 	}
 	if EventMatchesContext(event, ContextWithCorrelation(nil, "other", "", "", "")) {
 		t.Fatal("expected event not to match different session")
+	}
+}
+
+// TestMQTTConnectRefusesACleartextBroker pins the one thing standing between an
+// MQTT message and the wire now that v3 removed the separate payload cipher.
+func TestMQTTConnectRefusesACleartextBroker(t *testing.T) {
+	identity := Identity{
+		AccessKey: "access",
+		Password:  "secret",
+		SiteID:    "site",
+		MQTT: &MqttBrokerCredentials{
+			Endpoint:    "mqtt://broker.example.com:1883",
+			Username:    "access",
+			Password:    "broker-secret",
+			TopicPrefix: "hubs/hub-1/client-1",
+			TLS:         false,
+		},
+	}
+	transport, err := NewMQTTTransport(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = transport.Connect(context.Background())
+	if err == nil {
+		t.Fatal("connected to a cleartext MQTT broker; every message and the broker password would go out in the clear")
+	}
+	if !errors.Is(err, ErrConnection) {
+		t.Fatalf("expected an ErrConnection, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "mqtts://") {
+		t.Fatalf("the refusal does not tell the caller how to proceed: %v", err)
 	}
 }

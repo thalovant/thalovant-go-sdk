@@ -50,6 +50,15 @@ func (t *MQTTTransport) Connect(ctx context.Context) error {
 		t.failConnection(err)
 		return err
 	}
+	// TLS is the only confidentiality on this path. The identity crypto key
+	// that once sealed MQTT payloads separately is gone with v3, so a broker
+	// hop without TLS would put every message, and the broker password with
+	// them, on the wire in the clear.
+	if !t.Identity.MQTT.TLS {
+		err := fmt.Errorf("%w: refusing to connect to an MQTT broker without TLS. Use an mqtts:// endpoint, or set tls: true on the identity's mqtt block", ErrConnection)
+		t.failConnection(err)
+		return err
+	}
 	brokerURL, err := pahoBrokerURL(t.Identity.MQTT.Endpoint, t.Identity.MQTT.TLS)
 	if err != nil {
 		t.failConnection(err)
@@ -68,9 +77,7 @@ func (t *MQTTTransport) Connect(ctx context.Context) error {
 	opts.SetCleanSession(true)
 	opts.SetKeepAlive(60 * time.Second)
 	opts.SetAutoReconnect(true)
-	if t.Identity.MQTT.TLS {
-		opts.SetTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12})
-	}
+	opts.SetTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12})
 	opts.SetWill(t.Topics.Status, "offline", 1, true)
 	opts.SetDefaultPublishHandler(func(_ mqtt.Client, message mqtt.Message) {
 		if err := t.handleRawMessage(context.Background(), message.Payload()); err != nil {
