@@ -34,6 +34,12 @@ type WSSTransport struct {
 	writeMu        sync.Mutex
 	mu             sync.RWMutex
 
+	// generation identifies one connection attempt. Disconnect does not wait
+	// for readLoop to exit, so a loop from a previous attempt can still be
+	// running when a reconnect begins; everything it writes back is gated on
+	// its generation still being current.
+	generation uint64
+
 	// v3 Noise state, all guarded by mu
 	serverHello    map[string]any
 	noiseHandshake *noiseHandshake
@@ -78,18 +84,25 @@ func (t *WSSTransport) Connect(ctx context.Context) error {
 	}
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, nil)
 	if err != nil {
-		wrapped := fmt.Errorf("%w: %v", ErrConnection, err)
+		// The dial URL carries the access key in its ?authorization= query.
+		// gorilla does not put the URL in its dial errors today -- refused,
+		// DNS, bad-scheme and TLS failures all come back as a plain net error
+		// -- so this is defence rather than a fix: scrubTransportError is a
+		// no-op unless the error is a *url.Error, and it costs nothing to keep
+		// the guarantee independent of the library's error shape.
+		wrapped := fmt.Errorf("%w: %v", ErrConnection, scrubTransportError(err))
 		t.failConnection(wrapped)
 		return wrapped
 	}
-	t.conn = conn
 	t.mu.Lock()
+	t.conn = conn
 	t.connected = true
 	t.connection.markOpen(time.Now(), true)
 	ready := t.handshakeReady
 	closed := t.readDone
+	generation := t.generation
 	t.mu.Unlock()
-	go t.readLoop(context.Background(), conn)
+	go t.readLoop(context.Background(), conn, generation)
 
 	// The handshake runs argon2id at 64 MiB on first contact with a hub, which
 	// takes a few hundred milliseconds on top of the round trips.
@@ -127,19 +140,21 @@ func (t *WSSTransport) Connect(ctx context.Context) error {
 }
 
 func (t *WSSTransport) Disconnect(_ context.Context) error {
-	if t.conn != nil {
-		_ = t.conn.Close()
-	}
+	// Capture and clear under one lock, then close outside it: reading t.conn
+	// unlocked races a concurrent Connect or Disconnect.
 	t.mu.Lock()
-	t.connected = false
-	t.handshake = false
+	conn := t.conn
 	t.conn = nil
+	t.handshake = false
 	t.session = nil
 	t.noiseHandshake = nil
 	t.serverHello = nil
 	t.nodeID = ""
 	t.connection.close()
 	t.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
 	return nil
 }
 
@@ -201,8 +216,8 @@ func (t *WSSTransport) IsHandshakeComplete() bool {
 	return t.handshake
 }
 
-func (t *WSSTransport) readLoop(ctx context.Context, conn *websocket.Conn) {
-	defer t.signalReadDone()
+func (t *WSSTransport) readLoop(ctx context.Context, conn *websocket.Conn, generation uint64) {
+	defer t.signalReadDone(generation)
 	for {
 		select {
 		case <-ctx.Done():
@@ -211,23 +226,11 @@ func (t *WSSTransport) readLoop(ctx context.Context, conn *websocket.Conn) {
 		}
 		_, payload, err := conn.ReadMessage()
 		if err != nil {
-			t.mu.Lock()
-			if t.connected {
-				t.lastError = err
-				t.connected = false
-				t.connection.fail(time.Now(), err)
-			}
-			t.mu.Unlock()
+			t.recordReadFailure(generation, err)
 			return
 		}
 		if err := t.handleRawMessage(ctx, payload); err != nil {
-			t.mu.Lock()
-			if t.connected {
-				t.lastError = err
-				t.connected = false
-				t.connection.fail(time.Now(), err)
-			}
-			t.mu.Unlock()
+			t.recordReadFailure(generation, err)
 			// Every v3 transport failure is fatal for the session: a frame
 			// that does not decrypt at the current counter means tampering,
 			// replay or reordering, so the socket goes rather than the frame.
@@ -504,7 +507,13 @@ func (t *WSSTransport) pskFor(nodeID string) []byte {
 // handshake exchange itself travels this way; everything after Split() goes
 // through the Noise session.
 func (t *WSSTransport) sendCleartext(_ context.Context, message HiveMessage) error {
-	if t.conn == nil {
+	// One snapshot under the lock: readLoop calls this during the handshake
+	// while Connect's timeout branch can be running Disconnect, which sets
+	// t.conn to nil.
+	t.mu.RLock()
+	conn := t.conn
+	t.mu.RUnlock()
+	if conn == nil {
 		return fmt.Errorf("%w: HiveMind WSS transport is not connected", ErrConnection)
 	}
 	raw, err := json.Marshal(message)
@@ -513,7 +522,7 @@ func (t *WSSTransport) sendCleartext(_ context.Context, message HiveMessage) err
 	}
 	t.writeMu.Lock()
 	defer t.writeMu.Unlock()
-	return t.conn.WriteMessage(websocket.TextMessage, raw)
+	return conn.WriteMessage(websocket.TextMessage, raw)
 }
 
 func (t *WSSTransport) sendHiveMessage(_ context.Context, message HiveMessage, _ bool) error {
@@ -595,6 +604,7 @@ func helloHiveMessage(identity Identity, prefix string) HiveMessage {
 
 func (t *WSSTransport) beginConnection() {
 	t.mu.Lock()
+	t.generation++
 	t.lastError = nil
 	t.connected = false
 	t.handshake = false
@@ -608,11 +618,33 @@ func (t *WSSTransport) beginConnection() {
 	t.mu.Unlock()
 }
 
+// recordReadFailure stores why the read loop stopped, but only while its
+// connection is still the current one. A loop left over from a previous attempt
+// would otherwise overwrite lastError and mark a fresh connection failed.
+func (t *WSSTransport) recordReadFailure(generation uint64, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.generation != generation || !t.connected {
+		return
+	}
+	t.lastError = err
+	t.connected = false
+	t.connection.fail(time.Now(), err)
+}
+
 // signalReadDone unblocks a Connect still waiting on the handshake once the
 // read loop has stopped, so a refused connection reports its cause instead of
 // running out the clock.
-func (t *WSSTransport) signalReadDone() {
+//
+// Disconnect does not wait for readLoop to exit, so a loop from a previous
+// attempt can outlive it. Closing the current readDone from that loop would
+// abort the new handshake, so it only fires for its own generation.
+func (t *WSSTransport) signalReadDone(generation uint64) {
 	t.mu.Lock()
+	if t.generation != generation {
+		t.mu.Unlock()
+		return
+	}
 	done := t.readDone
 	t.readDone = nil
 	t.mu.Unlock()

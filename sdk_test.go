@@ -11,8 +11,11 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 type hangingTransport struct {
@@ -2121,4 +2124,110 @@ func TestCreateClientIdentityDropsACallerSuppliedCryptoKey(t *testing.T) {
 	if sentSpec["label"] != "keep-me" {
 		t.Fatalf("the rest of the caller's spec did not survive: %+v", sentSpec)
 	}
+}
+
+// TestWSSDialErrorDoesNotLeakTheAccessKey pins the invariant, not the scrub:
+// the dial URL carries the access key in its ?authorization= query, and nothing
+// derived from a dial failure may reach Healthcheck().LastError with it. Today
+// gorilla's dial errors carry no URL at all, so the scrub in Connect is a
+// no-op -- this test would still catch a future change that formatted the URL
+// into the recorded error.
+func TestWSSDialErrorDoesNotLeakTheAccessKey(t *testing.T) {
+	identity := Identity{
+		AccessKey: "ak-LEAKME-abcdef0123456789",
+		Password:  "secret",
+		SiteID:    "site",
+		// Nothing listens on port 1, so the dial fails and the error carries
+		// the URL.
+		DataPlaneEndpoints: HubDataPlaneEndpoints{WSS: "ws://127.0.0.1:1"},
+	}
+	transport := NewWSSTransport(identity)
+	authorization := transport.Authorization()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := transport.Connect(ctx); err == nil {
+		t.Fatal("expected the dial to fail")
+	}
+
+	health := transport.Healthcheck()
+	info := transport.ConnectionInfo()
+	rawInfo, err := json.Marshal(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for label, text := range map[string]string{
+		"Healthcheck.LastError":    health.LastError,
+		"ConnectionInfo.LastError": info.LastError,
+		"json(ConnectionInfo)":     string(rawInfo),
+	} {
+		if text == "" {
+			t.Fatalf("%s was empty; expected a recorded connection error", label)
+		}
+		if strings.Contains(text, identity.AccessKey) {
+			t.Fatalf("%s leaks the raw access key: %q", label, text)
+		}
+		if strings.Contains(text, authorization) {
+			t.Fatalf("%s leaks the authorization token: %q", label, text)
+		}
+		if strings.Contains(text, "authorization") {
+			t.Fatalf("%s leaks the authorization query: %q", label, text)
+		}
+	}
+	// The host still has to survive, or the error is useless for debugging.
+	if !strings.Contains(info.LastError, "127.0.0.1") {
+		t.Fatalf("scrubbed LastError dropped the host context: %q", info.LastError)
+	}
+}
+
+// TestWSSSendCleartextSurvivesAConcurrentDisconnect: readLoop calls
+// sendCleartext during the handshake while Connect's timeout branch can be
+// running Disconnect. Reading t.conn unlocked raced that and could panic.
+func TestWSSSendCleartextSurvivesAConcurrentDisconnect(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+
+	identity := Identity{
+		AccessKey:          "access",
+		Password:           "secret",
+		SiteID:             "site",
+		DataPlaneEndpoints: HubDataPlaneEndpoints{WSS: "ws" + strings.TrimPrefix(server.URL, "http")},
+	}
+	transport := NewWSSTransport(identity)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	// The hub never sends a HELLO, so Connect times out; meanwhile hammer
+	// sendCleartext from other goroutines. Under -race this is what catches an
+	// unsynchronized t.conn.
+	var group sync.WaitGroup
+	for range 8 {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for range 40 {
+				_ = transport.sendCleartext(ctx, HiveMessage{MsgType: "shake", Payload: map[string]any{}})
+			}
+		}()
+	}
+	go func() {
+		for range 40 {
+			_ = transport.Disconnect(ctx)
+		}
+	}()
+	_ = transport.Connect(ctx)
+	group.Wait()
+	// Reaching here without a panic or a race report is the assertion.
 }

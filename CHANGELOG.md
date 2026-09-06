@@ -36,6 +36,15 @@
 - A `wss` connection that the hub refuses now fails with the close reason
   instead of running out the handshake clock: a wrong password reported as a
   twenty second timeout hid what had actually happened.
+- `WSSTransport.sendCleartext` reads the connection once under the lock.
+  `readLoop` calls it during the handshake while `Connect`'s timeout branch can
+  be running `Disconnect`, which clears it -- an unsynchronized read raced that
+  and could dereference nil. `Disconnect` now captures and clears under one
+  lock and closes outside it, and `Connect` sets it under the lock.
+- A read loop is bound to the connection attempt that started it. `Disconnect`
+  does not wait for it to exit, so a loop from a previous attempt could
+  overwrite `lastError` and close the *new* `readDone`, aborting a fresh
+  handshake with a stale error.
 - **Breaking.** `HTTPTransport.Connect` now refuses a hub endpoint that is not
   `https://`, for the same reason as the MQTT change below: TLS is the only
   confidentiality left on that hop, and the access key travels in the
