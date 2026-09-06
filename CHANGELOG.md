@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.1
+
+- **Security.** Move `golang.org/x/crypto` from `v0.44.0` to `v0.55.0`, which
+  also lifts `golang.org/x/net` to `v0.57.0`. `v0.44.0` carries
+  CVE-2026-56854 (critical) and nine highs, and the `x/net` it pulled carried
+  five more. `0.4.0` shipped with all fifteen.
+
+  The pin came from adding the Noise dependencies for v3: `go get
+  golang.org/x/crypto@latest` wanted `v0.56.0`, which raises the `go`
+  directive to `1.26`, so I pinned back to keep `go 1.25.0` — and pinned far
+  further back than that needed. `v0.55.0` builds on `go 1.25.0` unchanged, so
+  the module's stated Go floor is untouched.
+
 ## 0.4.0
 
 - **Breaking.** `wss` connections now perform the HiveMind v3 Noise handshake,
