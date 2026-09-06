@@ -50,6 +50,15 @@ func (t *MQTTTransport) Connect(ctx context.Context) error {
 		t.failConnection(err)
 		return err
 	}
+	// TLS is the only confidentiality on this path. The identity crypto key
+	// that once sealed MQTT payloads separately is gone with v3, so a broker
+	// hop without TLS would put every message, and the broker password with
+	// them, on the wire in the clear.
+	if !t.Identity.MQTT.TLS {
+		err := fmt.Errorf("%w: refusing to connect to an MQTT broker without TLS. Use an mqtts:// endpoint, or set tls: true on the identity's mqtt block", ErrConnection)
+		t.failConnection(err)
+		return err
+	}
 	brokerURL, err := pahoBrokerURL(t.Identity.MQTT.Endpoint, t.Identity.MQTT.TLS)
 	if err != nil {
 		t.failConnection(err)
@@ -68,9 +77,7 @@ func (t *MQTTTransport) Connect(ctx context.Context) error {
 	opts.SetCleanSession(true)
 	opts.SetKeepAlive(60 * time.Second)
 	opts.SetAutoReconnect(true)
-	if t.Identity.MQTT.TLS {
-		opts.SetTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12})
-	}
+	opts.SetTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12})
 	opts.SetWill(t.Topics.Status, "offline", 1, true)
 	opts.SetDefaultPublishHandler(func(_ mqtt.Client, message mqtt.Message) {
 		if err := t.handleRawMessage(context.Background(), message.Payload()); err != nil {
@@ -204,20 +211,19 @@ func (t *MQTTTransport) handleRawMessage(ctx context.Context, raw []byte) error 
 	return nil
 }
 
-func (t *MQTTTransport) handleHandshake(ctx context.Context, payload map[string]any) error {
-	if truthy(payload["preshared_key"]) && !truthy(payload["handshake"]) && payload["envelope"] == nil {
-		if RuntimeCryptoKey(t.Identity.CryptoKey) == nil {
-			return fmt.Errorf("%w: HiveMind requested preshared key but identity crypto_key is missing", ErrConnection)
-		}
-		t.mu.Lock()
-		if !t.handshake {
-			t.handshake = true
-			close(t.handshakeReady)
-		}
-		t.mu.Unlock()
-		return nil
+// handleHandshake completes the MQTT handshake.
+//
+// MQTT has no Noise session: the broker connection is authenticated with the
+// per-client broker credentials and confidentiality comes from TLS, so there is
+// no key exchange to run here.
+func (t *MQTTTransport) handleHandshake(_ context.Context, _ map[string]any) error {
+	t.mu.Lock()
+	if !t.handshake {
+		t.handshake = true
+		close(t.handshakeReady)
 	}
-	return fmt.Errorf("%w: only preshared-key HiveMind MQTT handshakes are supported", ErrConnection)
+	t.mu.Unlock()
+	return nil
 }
 
 func (t *MQTTTransport) sendHiveMessage(ctx context.Context, message HiveMessage, _ bool) error {
@@ -228,12 +234,6 @@ func (t *MQTTTransport) sendHiveMessage(ctx context.Context, message HiveMessage
 	if err != nil {
 		return err
 	}
-	if strings.TrimSpace(t.Identity.CryptoKey) != "" {
-		payload, err = EncryptAsBinary(t.Identity.CryptoKey, payload)
-		if err != nil {
-			return err
-		}
-	}
 	qos := byte(1)
 	if t.Identity.MQTT != nil {
 		qos = t.Identity.MQTT.QOS
@@ -241,31 +241,15 @@ func (t *MQTTTransport) sendHiveMessage(ctx context.Context, message HiveMessage
 	return waitMQTTToken(ctx, t.client.Publish(t.Topics.Inbound, qos, false, payload), "MQTT publish")
 }
 
-func decodeMQTTHiveMessage(identity Identity, raw []byte) (HiveMessage, error) {
+func decodeMQTTHiveMessage(_ Identity, raw []byte) (HiveMessage, error) {
 	var message HiveMessage
 	var parsed map[string]any
 	if err := json.Unmarshal(raw, &parsed); err == nil {
-		if _, ok := parsed["ciphertext"]; ok && strings.TrimSpace(identity.CryptoKey) != "" {
-			decrypted, err := DecryptFromJSON(identity.CryptoKey, string(raw))
-			if err != nil {
-				return HiveMessage{}, err
-			}
-			if err := json.Unmarshal([]byte(decrypted), &message); err != nil {
-				return HiveMessage{}, err
-			}
-			return message, nil
-		}
 		if _, ok := parsed["msg_type"]; ok {
 			if err := json.Unmarshal(raw, &message); err != nil {
 				return HiveMessage{}, err
 			}
 			return message, nil
-		}
-	}
-	if strings.TrimSpace(identity.CryptoKey) != "" {
-		decrypted, err := DecryptBinary(identity.CryptoKey, raw)
-		if err == nil {
-			return DecodeHiveBinaryFrame(decrypted)
 		}
 	}
 	return DecodeHiveBinaryFrame(raw)

@@ -17,7 +17,6 @@ const DefaultConfigFilename = "config.yaml"
 type Identity struct {
 	AccessKey          string                 `json:"access_key"`
 	Password           string                 `json:"password"`
-	CryptoKey          string                 `json:"crypto_key,omitempty"`
 	SiteID             string                 `json:"site_id"`
 	DefaultMaster      string                 `json:"default_master"`
 	DefaultPort        int                    `json:"default_port"`
@@ -55,7 +54,7 @@ func redactSecret(value string) string {
 }
 
 // String implements fmt.Stringer so the %v, %s, and %+v verbs render an Identity
-// with its AccessKey, Password, and CryptoKey (and the nested MQTT credentials)
+// with its AccessKey and Password (and the nested MQTT credentials)
 // redacted. Without it, %+v would print the client's data-plane secrets into any
 // log line or error string. This affects human-facing formatting ONLY:
 // json.Marshal does not consult String(), so the wire protocol and the identity
@@ -69,8 +68,8 @@ func (i Identity) String() string {
 	// data-plane endpoint like https://user:pass@host cannot leak its
 	// credentials through %v/%s/%+v.
 	return fmt.Sprintf(
-		"Identity{AccessKey:%s Password:%s CryptoKey:%s SiteID:%q DefaultMaster:%q DefaultPort:%d DefaultPath:%q PublicKey:%q DataPlaneEndpoints:%+v Protocols:%+v MQTT:%s}",
-		redactSecret(i.AccessKey), redactSecret(i.Password), redactSecret(i.CryptoKey),
+		"Identity{AccessKey:%s Password:%s SiteID:%q DefaultMaster:%q DefaultPort:%d DefaultPath:%q PublicKey:%q DataPlaneEndpoints:%+v Protocols:%+v MQTT:%s}",
+		redactSecret(i.AccessKey), redactSecret(i.Password),
 		i.SiteID, i.DefaultMaster, i.DefaultPort, i.DefaultPath, i.PublicKey,
 		i.DataPlaneEndpoints.Map(true), i.Protocols, mqtt,
 	)
@@ -228,7 +227,6 @@ func IdentityFromMap(values map[string]any) (Identity, error) {
 	identity := Identity{
 		AccessKey:          required(value(values, "access_key", "key", "api_key"), "access_key"),
 		Password:           required(value(values, "password"), "password"),
-		CryptoKey:          optional(value(values, "crypto_key", "cryptoKey")),
 		SiteID:             required(value(values, "site_id", "siteId", "site"), "site_id"),
 		DefaultMaster:      strings.TrimRight(required(value(values, "default_master", "host", "hub_http_host", "master"), "default_master"), "/"),
 		DefaultPort:        port,

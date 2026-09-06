@@ -855,18 +855,19 @@ func (c *ControlPlane) CreateClientIdentity(ctx context.Context, hub map[string]
 	if err != nil {
 		return BootstrapIdentityResult{}, err
 	}
-	cryptoKey, err := newControlSecret()
-	if err != nil {
-		return BootstrapIdentityResult{}, err
-	}
-
 	spec := map[string]any{"version": "1"}
 	for key, val := range opts.Spec {
+		// opts.Spec is caller-supplied, and a legacy crypto key in it would be
+		// sent to /v1/clients and could come back inside an ApiError -- the
+		// redaction list covers only the secrets minted here. v3 issues no
+		// crypto key, so drop both spellings.
+		if key == "cryptoKey" || key == "crypto_key" {
+			continue
+		}
 		spec[key] = val
 	}
 	spec["apiKey"] = apiKey
 	spec["password"] = password
-	spec["cryptoKey"] = cryptoKey
 	spec["siteId"] = siteID
 
 	active := true
@@ -906,7 +907,6 @@ func (c *ControlPlane) CreateClientIdentity(ctx context.Context, hub map[string]
 		identity = Identity{
 			AccessKey:          apiKey,
 			Password:           password,
-			CryptoKey:          cryptoKey,
 			SiteID:             siteID,
 			DefaultMaster:      defaultMaster,
 			DefaultPort:        443,
@@ -931,7 +931,6 @@ func (r BootstrapIdentityResult) Summary(includeSecrets bool) map[string]any {
 	if includeSecrets {
 		identity["access_key"] = r.Identity.AccessKey
 		identity["password"] = r.Identity.Password
-		identity["crypto_key"] = r.Identity.CryptoKey
 		if r.Identity.MQTT != nil {
 			identity["mqtt"] = r.Identity.MQTT.Map(true)
 		}

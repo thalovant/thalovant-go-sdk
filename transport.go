@@ -94,12 +94,32 @@ func (t *HTTPTransport) BaseURL() string {
 	return t.Identity.EndpointBase()
 }
 
+// requireTLSEndpoint refuses a hub endpoint that is not https.
+func requireTLSEndpoint(endpoint string) error {
+	parsed, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("%w: the HTTP transport needs a valid https:// endpoint; got %q", ErrConnection, endpoint)
+	}
+	if parsed.Scheme != "https" {
+		return fmt.Errorf("%w: refusing to use the HTTP transport over %s://. It needs an https:// endpoint: without TLS every message and the access key travel in the clear", ErrConnection, parsed.Scheme)
+	}
+	return nil
+}
+
 func (t *HTTPTransport) Authorization() string {
 	return base64.StdEncoding.EncodeToString([]byte(t.UserAgent + ":" + t.Identity.AccessKey))
 }
 
 func (t *HTTPTransport) Connect(ctx context.Context) error {
 	t.beginConnection()
+	// TLS is the only confidentiality on this path. The identity crypto key
+	// that once sealed HTTP payloads separately is gone with v3, so a plain
+	// http:// hub would put every message, and the access key in the
+	// authorization query, on the wire in the clear.
+	if err := requireTLSEndpoint(t.BaseURL()); err != nil {
+		t.failConnection(err)
+		return err
+	}
 	endpoint := t.BaseURL() + "/connect?authorization=" + url.QueryEscape(t.Authorization())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
 	if err != nil {
@@ -260,16 +280,7 @@ func (t *HTTPTransport) handleRawMessage(ctx context.Context, raw any) error {
 	case string:
 		rawBytes = []byte(value)
 	case map[string]any:
-		if _, ok := value["ciphertext"]; ok && t.Identity.CryptoKey != "" {
-			encoded, _ := json.Marshal(value)
-			decrypted, err := DecryptFromJSON(t.Identity.CryptoKey, string(encoded))
-			if err != nil {
-				return err
-			}
-			rawBytes = []byte(decrypted)
-		} else {
-			rawBytes, _ = json.Marshal(value)
-		}
+		rawBytes, _ = json.Marshal(value)
 	default:
 		rawBytes, _ = json.Marshal(value)
 	}
@@ -297,10 +308,7 @@ func (t *HTTPTransport) handleRawMessage(ctx context.Context, raw any) error {
 }
 
 func (t *HTTPTransport) handleHandshake(ctx context.Context, payload map[string]any) error {
-	if truthy(payload["preshared_key"]) && !truthy(payload["handshake"]) && payload["envelope"] == nil {
-		if RuntimeCryptoKey(t.Identity.CryptoKey) == nil {
-			return fmt.Errorf("%w: HiveMind requested preshared key but identity crypto_key is missing", ErrConnection)
-		}
+	if !truthy(payload["handshake"]) && payload["envelope"] == nil {
 		if err := t.sendHiveMessage(ctx, HiveMessage{
 			MsgType: "hello",
 			Payload: map[string]any{
@@ -425,18 +433,12 @@ func elapsedMS(start time.Time, end time.Time) float64 {
 	return float64(end.Sub(start).Microseconds()) / 1000
 }
 
-func (t *HTTPTransport) sendHiveMessage(ctx context.Context, message HiveMessage, encrypt bool) error {
+func (t *HTTPTransport) sendHiveMessage(ctx context.Context, message HiveMessage, _ bool) error {
 	raw, err := json.Marshal(message)
 	if err != nil {
 		return err
 	}
 	payload := string(raw)
-	if encrypt && t.IsHandshakeComplete() && t.Identity.CryptoKey != "" {
-		payload, err = EncryptAsJSON(t.Identity.CryptoKey, payload)
-		if err != nil {
-			return err
-		}
-	}
 	form := url.Values{"message": []string{payload}}
 	endpoint := t.BaseURL() + "/send_message?authorization=" + url.QueryEscape(t.Authorization())
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBufferString(form.Encode()))
