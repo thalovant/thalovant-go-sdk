@@ -48,13 +48,14 @@ type WSSTransport struct {
 
 	// derivePSK costs 64 MiB and roughly 200ms and its result is fixed for a
 	// (password, node id) pair, so a reconnect to the same hub reuses it
-	// instead of paying for it again. The verifier is part of the key: a caller
+	// instead of paying for it again. The password is part of the key: a caller
 	// that swaps Identity.Password and reconnects on this same transport would
-	// otherwise be handed the previous password's PSK, which the hub refuses
-	// exactly as it refuses a wrong password.
+	// otherwise be handed the previous password's key, which the hub refuses
+	// exactly as it refuses a wrong password. It is held in memory only --
+	// Identity already carries it there -- and never written beside the key.
 	cachedPSK         []byte
 	cachedPSKNodeID   string
-	cachedPSKVerifier string
+	cachedPSKPassword string
 }
 
 func NewWSSTransport(identity Identity) *WSSTransport {
@@ -419,6 +420,10 @@ func (t *WSSTransport) continueNoiseHandshake(ctx context.Context, noiseParams m
 		if handshake.pattern == noisePatternKK {
 			_ = ForgetNoisePin(t.NoiseStateDir, nodeID)
 		}
+		// The PSK is the other thing this message authenticates, so a rejection
+		// may mean the stored key was derived from a password that has since
+		// been rotated. Drop it; the next attempt derives from the current one.
+		t.forgetPSK(nodeID)
 		return err
 	}
 	if !handshake.complete {
@@ -491,30 +496,51 @@ func (t *WSSTransport) pinServerKey(nodeID, remoteStaticKey string) error {
 
 // pskFor derives (or reuses) the pre-shared key for a hub.
 func (t *WSSTransport) pskFor(nodeID string) []byte {
-	verifier := PskPasswordVerifier(t.Identity.Password)
+	password := t.Identity.Password
 
 	t.mu.Lock()
-	if t.cachedPSK != nil && t.cachedPSKNodeID == nodeID && t.cachedPSKVerifier == verifier {
-		psk := t.cachedPSK
-		t.mu.Unlock()
-		return psk
-	}
+	cached, sameHub := t.cachedPSK, t.cachedPSKNodeID == nodeID
+	samePassword := t.cachedPSKPassword == password
 	stateDir := t.NoiseStateDir
 	t.mu.Unlock()
 
-	// On disk before deriving: the answer never changes for a password and hub,
-	// so a restart should not pay argon2id again.
-	psk := LoadCachedPSK(stateDir, nodeID, verifier)
+	if cached != nil && sameHub && samePassword {
+		return cached
+	}
+
+	// Having already derived for this hub under a different password means the
+	// stored key belongs to that one, so the disk read would only return
+	// something known to be stale.
+	psk := []byte(nil)
+	if !(cached != nil && sameHub) {
+		// On disk before deriving: the answer never changes for a password and
+		// hub, so a restart should not pay argon2id again. A key left from a
+		// password rotated elsewhere is caught by the handshake, which
+		// forgets it.
+		psk = LoadCachedPSK(stateDir, nodeID)
+	}
 	if psk == nil {
-		psk = derivePSK(t.Identity.Password, nodeID)
+		psk = derivePSK(password, nodeID)
 		// Persisting is an optimisation, never a reason to fail the connection.
-		_ = SaveCachedPSK(stateDir, nodeID, psk, verifier)
+		_ = SaveCachedPSK(stateDir, nodeID, psk)
 	}
 
 	t.mu.Lock()
-	t.cachedPSK, t.cachedPSKNodeID, t.cachedPSKVerifier = psk, nodeID, verifier
+	t.cachedPSK, t.cachedPSKNodeID, t.cachedPSKPassword = psk, nodeID, password
 	t.mu.Unlock()
 	return psk
+}
+
+// forgetPSK drops the cached key for a hub, in memory and on disk. The
+// handshake calls it when the hub rejects the key we offered.
+func (t *WSSTransport) forgetPSK(nodeID string) {
+	t.mu.Lock()
+	if t.cachedPSKNodeID == nodeID {
+		t.cachedPSK, t.cachedPSKNodeID, t.cachedPSKPassword = nil, "", ""
+	}
+	stateDir := t.NoiseStateDir
+	t.mu.Unlock()
+	_ = ForgetCachedPSK(stateDir, nodeID)
 }
 
 // sendCleartext writes a handshake message as a JSON text frame. Only the
