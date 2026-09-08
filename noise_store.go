@@ -181,3 +181,121 @@ func writeNoisePinsLocked(path string, pins map[string]string) error {
 	}
 	return os.WriteFile(path, append(encoded, '\n'), 0o600)
 }
+
+// NoisePskFilename caches derived pre-shared keys, as a JSON object keyed by
+// the server node id.
+//
+// The derivation is argon2id at 64 MiB and depends only on the password and the
+// hub's node id, both constant for the life of the pairing, so it is the same
+// answer every time. The in-memory cache on a transport only helps that one
+// object; this survives reconnects, other transports in the same process, and
+// restarts.
+//
+// Only the key is stored. A fingerprint of the password would make rotation
+// cheap to detect, but it would also put a fast hash of the password in the
+// same file as the key it protects -- and a fast hash is exactly the offline
+// oracle argon2id exists to deny. A rotated password is noticed when the
+// handshake rejects the stale key, and ForgetCachedPSK drops it.
+const NoisePskFilename = "noise_psks.json"
+
+func pskCachePathLocked(dir string) (string, error) {
+	if strings.TrimSpace(dir) == "" {
+		resolved, err := NoiseStateDir()
+		if err != nil {
+			return "", err
+		}
+		dir = resolved
+	}
+	return filepath.Join(dir, NoisePskFilename), nil
+}
+
+func readPskCacheLocked(path string) map[string]string {
+	cache := map[string]string{}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return cache
+	}
+	if err := assertSecureSecretFile(path, "Noise PSK cache"); err != nil {
+		return cache
+	}
+	// A corrupt cache is derivable state, not a reason to fail a connection.
+	if err := json.Unmarshal(raw, &cache); err != nil {
+		return map[string]string{}
+	}
+	return cache
+}
+
+func writePskCacheLocked(path string, cache map[string]string) error {
+	payload, err := json.MarshalIndent(cache, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("%w: unable to create %s: %v", ErrIdentity, filepath.Dir(path), err)
+	}
+	return os.WriteFile(path, append(payload, '\n'), 0o600)
+}
+
+// LoadCachedPSK returns the stored pre-shared key for a hub, or nil when there
+// is none.
+func LoadCachedPSK(dir, nodeID string) []byte {
+	if strings.TrimSpace(nodeID) == "" {
+		return nil
+	}
+
+	noiseStoreMu.Lock()
+	defer noiseStoreMu.Unlock()
+
+	path, err := pskCachePathLocked(dir)
+	if err != nil {
+		return nil
+	}
+	psk, err := hex.DecodeString(strings.TrimSpace(readPskCacheLocked(path)[nodeID]))
+	if err != nil || len(psk) != pskLengthByte {
+		return nil
+	}
+	return psk
+}
+
+// SaveCachedPSK records a derived key so the next connection to this hub skips
+// argon2id. The cache is an optimisation, so callers treat a failure here as
+// non-fatal.
+func SaveCachedPSK(dir, nodeID string, psk []byte) error {
+	if strings.TrimSpace(nodeID) == "" || len(psk) != pskLengthByte {
+		return nil
+	}
+
+	noiseStoreMu.Lock()
+	defer noiseStoreMu.Unlock()
+
+	path, err := pskCachePathLocked(dir)
+	if err != nil {
+		return err
+	}
+	cache := readPskCacheLocked(path)
+	encoded := hex.EncodeToString(psk)
+	if cache[nodeID] == encoded {
+		return nil
+	}
+	cache[nodeID] = encoded
+	return writePskCacheLocked(path, cache)
+}
+
+// ForgetCachedPSK drops a stored key. The handshake calls this when the hub
+// rejects one, which is how a rotated password is noticed: the next attempt
+// derives again from the current one.
+func ForgetCachedPSK(dir, nodeID string) error {
+	noiseStoreMu.Lock()
+	defer noiseStoreMu.Unlock()
+
+	path, err := pskCachePathLocked(dir)
+	if err != nil {
+		return err
+	}
+	cache := readPskCacheLocked(path)
+	if _, found := cache[nodeID]; !found {
+		return nil
+	}
+	delete(cache, nodeID)
+	return writePskCacheLocked(path, cache)
+}
