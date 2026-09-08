@@ -1176,16 +1176,34 @@ func normalizeControlAPIURL(apiURL string) string {
 // the API takes as snake_case. Renaming rather than duplicating keeps an
 // unknown camelCase key from being silently dropped by the API's request
 // model.
+// snakeCaseRequestPayload rewrites camelCase caller keys to the snake_case
+// spelling the API expects.
+//
+// A caller that passes BOTH spellings of one field -- ownerId and owner_id --
+// used to get whichever the map happened to yield last, and Go randomizes map
+// iteration order, so the same call could send either value from one run to
+// the next. The already-correct spelling wins instead: it is what the API
+// documents, and it makes the outcome the same every time.
 func snakeCaseRequestPayload(payload map[string]any, renames map[string]string) map[string]any {
 	if payload == nil {
 		return nil
 	}
 	data := make(map[string]any, len(payload))
+	// Canonical keys first, so a rename can never displace one.
 	for key, val := range payload {
-		if target, ok := renames[key]; ok {
-			key = target
+		if _, renamed := renames[key]; !renamed {
+			data[key] = val
 		}
-		data[key] = val
+	}
+	for key, val := range payload {
+		target, renamed := renames[key]
+		if !renamed {
+			continue
+		}
+		if _, taken := data[target]; taken {
+			continue
+		}
+		data[target] = val
 	}
 	return data
 }
