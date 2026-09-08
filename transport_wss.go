@@ -48,9 +48,13 @@ type WSSTransport struct {
 
 	// derivePSK costs 64 MiB and roughly 200ms and its result is fixed for a
 	// (password, node id) pair, so a reconnect to the same hub reuses it
-	// instead of paying for it again.
-	cachedPSK       []byte
-	cachedPSKNodeID string
+	// instead of paying for it again. The verifier is part of the key: a caller
+	// that swaps Identity.Password and reconnects on this same transport would
+	// otherwise be handed the previous password's PSK, which the hub refuses
+	// exactly as it refuses a wrong password.
+	cachedPSK         []byte
+	cachedPSKNodeID   string
+	cachedPSKVerifier string
 }
 
 func NewWSSTransport(identity Identity) *WSSTransport {
@@ -487,18 +491,28 @@ func (t *WSSTransport) pinServerKey(nodeID, remoteStaticKey string) error {
 
 // pskFor derives (or reuses) the pre-shared key for a hub.
 func (t *WSSTransport) pskFor(nodeID string) []byte {
+	verifier := PskPasswordVerifier(t.Identity.Password)
+
 	t.mu.Lock()
-	if t.cachedPSK != nil && t.cachedPSKNodeID == nodeID {
+	if t.cachedPSK != nil && t.cachedPSKNodeID == nodeID && t.cachedPSKVerifier == verifier {
 		psk := t.cachedPSK
 		t.mu.Unlock()
 		return psk
 	}
+	stateDir := t.NoiseStateDir
 	t.mu.Unlock()
 
-	psk := derivePSK(t.Identity.Password, nodeID)
+	// On disk before deriving: the answer never changes for a password and hub,
+	// so a restart should not pay argon2id again.
+	psk := LoadCachedPSK(stateDir, nodeID, verifier)
+	if psk == nil {
+		psk = derivePSK(t.Identity.Password, nodeID)
+		// Persisting is an optimisation, never a reason to fail the connection.
+		_ = SaveCachedPSK(stateDir, nodeID, psk, verifier)
+	}
 
 	t.mu.Lock()
-	t.cachedPSK, t.cachedPSKNodeID = psk, nodeID
+	t.cachedPSK, t.cachedPSKNodeID, t.cachedPSKVerifier = psk, nodeID, verifier
 	t.mu.Unlock()
 	return psk
 }

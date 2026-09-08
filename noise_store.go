@@ -2,6 +2,7 @@ package thalovant
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -180,4 +181,114 @@ func writeNoisePinsLocked(path string, pins map[string]string) error {
 		return fmt.Errorf("%w: unable to encode Noise pins: %v", ErrIdentity, err)
 	}
 	return os.WriteFile(path, append(encoded, '\n'), 0o600)
+}
+
+// NoisePskFilename caches password-to-PSK derivations, as a JSON object keyed
+// by the server node id.
+//
+// The derivation is argon2id at 64 MiB and depends only on the password and the
+// hub's node id, both constant for the life of the pairing, so it is the same
+// answer every time. The in-memory cache on a transport only helps that one
+// object; this survives reconnects, other transports in the same process, and
+// restarts.
+const NoisePskFilename = "noise_psks.json"
+
+type cachedPskEntry struct {
+	PSK      string `json:"psk"`
+	Verifier string `json:"verifier"`
+}
+
+// PskPasswordVerifier fingerprints the password a cached PSK came from, so a
+// rotated password is noticed and re-derived rather than offered to the hub --
+// which would refuse it exactly as it refuses a wrong password.
+//
+// It is a hash, never the password, and it never leaves the machine. The
+// identity file on the same host already holds the password itself, so this
+// adds no exposure that was not already there.
+func PskPasswordVerifier(password string) string {
+	sum := sha256.Sum256([]byte("thalovant-psk-verifier:" + password))
+	return hex.EncodeToString(sum[:])
+}
+
+func pskCachePathLocked(dir string) (string, error) {
+	if strings.TrimSpace(dir) == "" {
+		resolved, err := NoiseStateDir()
+		if err != nil {
+			return "", err
+		}
+		dir = resolved
+	}
+	return filepath.Join(dir, NoisePskFilename), nil
+}
+
+func readPskCacheLocked(path string) map[string]cachedPskEntry {
+	cache := map[string]cachedPskEntry{}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return cache
+	}
+	if err := assertSecureSecretFile(path, "Noise PSK cache"); err != nil {
+		return cache
+	}
+	// A corrupt cache is derivable state, not a reason to fail a connection.
+	if err := json.Unmarshal(raw, &cache); err != nil {
+		return map[string]cachedPskEntry{}
+	}
+	return cache
+}
+
+// LoadCachedPSK returns the stored PSK for a hub, or nil when there is none or
+// it was derived from a different password.
+func LoadCachedPSK(dir, nodeID, verifier string) []byte {
+	if strings.TrimSpace(nodeID) == "" {
+		return nil
+	}
+
+	noiseStoreMu.Lock()
+	defer noiseStoreMu.Unlock()
+
+	path, err := pskCachePathLocked(dir)
+	if err != nil {
+		return nil
+	}
+	entry, found := readPskCacheLocked(path)[nodeID]
+	if !found || entry.Verifier != verifier {
+		return nil
+	}
+	psk, err := hex.DecodeString(strings.TrimSpace(entry.PSK))
+	if err != nil || len(psk) != pskLengthByte {
+		return nil
+	}
+	return psk
+}
+
+// SaveCachedPSK records a derived PSK so the next connection to this hub skips
+// argon2id. The cache is an optimisation, so callers treat a failure here as
+// non-fatal.
+func SaveCachedPSK(dir, nodeID string, psk []byte, verifier string) error {
+	if strings.TrimSpace(nodeID) == "" || len(psk) != pskLengthByte {
+		return nil
+	}
+
+	noiseStoreMu.Lock()
+	defer noiseStoreMu.Unlock()
+
+	path, err := pskCachePathLocked(dir)
+	if err != nil {
+		return err
+	}
+	cache := readPskCacheLocked(path)
+	encoded := hex.EncodeToString(psk)
+	if existing, found := cache[nodeID]; found && existing.PSK == encoded && existing.Verifier == verifier {
+		return nil
+	}
+	cache[nodeID] = cachedPskEntry{PSK: encoded, Verifier: verifier}
+	payload, err := json.MarshalIndent(cache, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("%w: unable to create %s: %v", ErrIdentity, filepath.Dir(path), err)
+	}
+	return os.WriteFile(path, append(payload, '\n'), 0o600)
 }
