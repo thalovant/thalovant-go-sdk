@@ -4,9 +4,8 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: Published Go module version to verify
-        required: true
-        default: v0.3.0
+        description: Published module version, with or without v; blank uses VERSION
+        required: false
 
 permissions:
   contents: read
@@ -21,6 +20,25 @@ jobs:
       GONOSUMDB: ""
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Select and validate the published version
+        id: version
+        shell: bash
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          version="${REQUESTED_VERSION:-$(<VERSION)}"
+          version="${version#v}"
+          number='(0|[1-9][0-9]*)'
+          prerelease="($number|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
+          build='[0-9A-Za-z-]+'
+          semver="^${number}[.]${number}[.]${number}(-${prerelease}([.]${prerelease})*)?([+]${build}([.]${build})*)?$"
+          if [[ ! $version =~ $semver ]]; then
+            printf 'Invalid semantic version input\n' >&2
+            exit 1
+          fi
+          printf 'version=v%s\n' "$version" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
         with:
           go-version: "1.25"
@@ -28,7 +46,7 @@ jobs:
       - name: Resolve the public immutable module tag and compile a clean consumer
         working-directory: smoke/published
         env:
-          PACKAGE_VERSION: ${{ inputs.version }}
+          PACKAGE_VERSION: ${{ steps.version.outputs.version }}
         run: |
           test "$(go env GOPROXY)" = "https://proxy.golang.org"
           test -z "$(go env GOPRIVATE)"
