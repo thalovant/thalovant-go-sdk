@@ -17,7 +17,6 @@ import (
 )
 
 // HiveMind protocol version that switches the handshake to Noise.
-const protocolV3 = 3
 
 // Registered handshake patterns, preference ordered.
 const (

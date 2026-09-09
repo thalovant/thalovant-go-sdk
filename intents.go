@@ -698,12 +698,23 @@ func (c *Client) describeMany(ctx context.Context, wanted []intentKey, timeout t
 			// silent from the start still fails at the first batch, since
 			// nothing has been found. A refusal is not a silence: it stops
 			// the call whenever it arrives.
-			if !errors.Is(err, ErrTimeout) || len(found) == 0 {
+			if !errors.Is(err, ErrTimeout) || !hasDescribeDefinitions(found) {
 				return nil, err
 			}
 		}
 	}
 	return found, nil
+}
+
+// hasDescribeDefinitions excludes explicit empty/unknown answers from partial
+// success when another registration remains unanswered.
+func hasDescribeDefinitions(found map[intentKey][]IntentDefinition) bool {
+	for _, definitions := range found {
+		if len(definitions) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // describeBatch sends one batch of describes and collects their replies into
@@ -733,7 +744,7 @@ func (c *Client) describeBatch(ctx context.Context, wanted []intentKey, timeout 
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			if answered == 0 {
+			if !hasDescribeDefinitions(found) {
 				return fmt.Errorf("%w: hub did not answer %s within %s", ErrTimeout, EventIntentDescribe, timeout)
 			}
 			return nil

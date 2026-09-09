@@ -249,24 +249,45 @@ if _, err := control.InstallRuntimeGroupSkill(ctx, groupID, "skill-weather", tha
 }
 
 // 5. Release: roll the runtime and the hub onto a release channel.
-_, err = control.ReleaseRuntimeGroup(ctx, groupID, thalovant.ReleaseOptions{Channel: "stable"})
-_, err = control.ReleaseHub(ctx, hubID, thalovant.ReleaseOptions{Channel: "stable"})
+if _, err := control.ReleaseRuntimeGroup(ctx, groupID, thalovant.ReleaseOptions{Channel: "stable"}); err != nil {
+	panic(err)
+}
+if _, err := control.ReleaseHub(ctx, hubID, thalovant.ReleaseOptions{Channel: "stable"}); err != nil {
+	panic(err)
+}
 ```
 
-Creating a hub is idempotent. `CreateHub` always sends an `Idempotency-Key`
-header, so a call retried after a timeout returns the hub that was already
-created instead of making a second one. Set `HubCreateOptions.IdempotencyKey`
-to control the key; leave it empty and the SDK generates one.
+`CreateHub` always sends an `Idempotency-Key`. For safe caller retries, choose
+one `HubCreateOptions.IdempotencyKey` before the first attempt and reuse it
+after a timeout. Leaving it empty generates a fresh key for each call; retrying
+with empty options can create a second hub.
 
 Updating and deleting a hub use optimistic locking, so `etag` is a required
 argument rather than an option. Pass the `etag` from the hub resource you read;
-the SDK sends it as `If-Match`, and the API rejects a stale or missing value
-with `HTTP 412` without changing anything:
+the SDK sends it as `If-Match`, and the API rejects a stale value with
+`HTTP 412` without changing anything. Empty or whitespace-only values fail
+locally with `ErrAPI` before a request is sent:
 
 ```go
 hub, err := control.GetHub(ctx, hubID)
-hub, err = control.UpdateHub(ctx, hubID, map[string]any{"active": false}, hub["etag"].(string))
-err = control.DeleteHub(ctx, hubID, hub["etag"].(string))
+if err != nil {
+	panic(err)
+}
+etag, ok := hub["etag"].(string)
+if !ok || etag == "" {
+	panic("hub response has no etag")
+}
+hub, err = control.UpdateHub(ctx, hubID, map[string]any{"active": false}, etag)
+if err != nil {
+	panic(err)
+}
+etag, ok = hub["etag"].(string)
+if !ok || etag == "" {
+	panic("updated hub response has no etag")
+}
+if err := control.DeleteHub(ctx, hubID, etag); err != nil {
+	panic(err)
+}
 ```
 
 Deleting a hub also deletes its clients and ACLs. Runtime groups have no
@@ -893,13 +914,16 @@ or an agent as is.
   `retry_after_seconds`; wait that long and resend.
 - `HTTP 429` with `"code": "token_quota_exceeded"`: the API token exhausted
   its plan's daily or monthly call quota. The body names which in `quota`
-  (`daily` or `monthly`) alongside `limit` and `used`, and `Retry-After`
+  (`daily` or `monthly`) alongside `limit`, `used`, and `retry_after_seconds`;
+  `Retry-After`
   points at the next UTC day or month boundary.
 
 Both 429s apply to token-authenticated control-plane calls and are returned as
-errors wrapping `ErrAPI`, with the status and response body in the message.
-The SDK does not retry automatically: `Retry-After` is authoritative, so honor
-it before resending. Per-plan limits are listed in the dashboard and at
+errors wrapping `ErrAPI`, with the status and selected error message fields.
+The SDK does not retry automatically and does not expose the HTTP headers or
+`retry_after_seconds` as structured metadata. When inspecting a direct API
+response, honor its authoritative `Retry-After` value before resending. Check
+the dashboard for per-plan limits and reset times. See also
 <https://docs.thalovant.com/developers/sdks/go/>.
 
 ## API Shape
@@ -965,3 +989,9 @@ it before resending. Per-plan limits are listed in the dashboard and at
 ```bash
 go test ./...
 ```
+
+Concurrent `Ask` calls on one client must use distinct request IDs; concurrent
+`Query` calls must use distinct query IDs. An active duplicate fails locally
+with `ErrRuntime` before publication. Ask and Query use separate namespaces.
+Reservations end when their collectors are disposed; existing transport
+ownership still prevents reuse while an admitted write retires.

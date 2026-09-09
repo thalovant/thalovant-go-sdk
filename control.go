@@ -568,10 +568,10 @@ func (c *ControlPlane) GetPublicHub(ctx context.Context, hubRef string) (map[str
 // "visibility", "capacity_profile", and "owner_id" are optional. camelCase
 // keys are accepted and sent as snake_case.
 //
-// The request is idempotent: an Idempotency-Key header is always sent, using
-// HubCreateOptions.IdempotencyKey when set and a generated key otherwise, so a
-// create retried after a timeout returns the first hub instead of making a
-// second one.
+// An Idempotency-Key header is always sent. To retry safely after a timeout,
+// reuse the same explicit HubCreateOptions.IdempotencyKey for every attempt.
+// An empty option generates a new key for this call only; repeating such a
+// call can create another hub.
 //
 // Requires a paid plan and a token with the hubs:write scope. A free-plan
 // token fails with HTTP 402.
@@ -588,11 +588,15 @@ func (c *ControlPlane) CreateHub(ctx context.Context, payload map[string]any, op
 //
 // The API enforces optimistic locking on this route, so etag is required: pass
 // the "etag" of the hub resource you read and the SDK sends it as If-Match. A
-// stale or empty value fails with HTTP 412 and changes nothing; re-read the
-// hub with GetHub and retry with the new etag.
+// stale value fails with HTTP 412 and changes nothing; re-read the
+// hub with GetHub and retry with the new etag. Empty or whitespace-only etags
+// fail locally with ErrAPI before sending a request.
 //
 // Requires a paid plan and a token with the hubs:write scope.
 func (c *ControlPlane) UpdateHub(ctx context.Context, hubID string, payload map[string]any, etag string) (map[string]any, error) {
+	if strings.TrimSpace(etag) == "" {
+		return nil, fmt.Errorf("%w: etag is required for hub updates and deletions", ErrAPI)
+	}
 	headers := map[string]string{"If-Match": etag}
 	return c.request(ctx, http.MethodPatch, "/v1/hubs/"+url.PathEscape(hubID), hubRequestPayload(payload), headers, true)
 }
@@ -600,10 +604,14 @@ func (c *ControlPlane) UpdateHub(ctx context.Context, hubID string, payload map[
 // DeleteHub deletes a hub and its dependent clients and ACLs.
 //
 // Like UpdateHub this route requires the hub's current etag, sent as If-Match;
-// a stale or empty value fails with HTTP 412.
+// a stale value fails with HTTP 412. Empty or whitespace-only etags fail
+// locally with ErrAPI before sending a request.
 //
 // Requires a paid plan and a token with the hubs:write scope.
 func (c *ControlPlane) DeleteHub(ctx context.Context, hubID string, etag string) error {
+	if strings.TrimSpace(etag) == "" {
+		return fmt.Errorf("%w: etag is required for hub updates and deletions", ErrAPI)
+	}
 	headers := map[string]string{"If-Match": etag}
 	_, err := c.request(ctx, http.MethodDelete, "/v1/hubs/"+url.PathEscape(hubID), nil, headers, true)
 	return err
