@@ -608,8 +608,8 @@ An initial connection does not disconnect a peer admitted by another process.
 
 HTTP preserves the hub's replica affinity cookie and posts encrypted frames as
 Base64 form data with `binary=1`; encrypted replies arrive through
-`/get_binary_messages`. Both non-success HTTP status codes and JSON `error`
-responses invalidate the connection. MQTT carries the same Noise frames as raw
+`/get_binary_messages`. Non-success HTTP status codes and JSON `error` responses other than the exact
+idempotent disconnect acknowledgment invalidate the connection. MQTT carries the same Noise frames as raw
 binary payloads after its initial cleartext HELLO and Noise exchange. TLS remains
 required on HTTP and MQTT because the access key and broker credentials also
 need protection. `MQTTTransport.TLSConfig` can supply private CA roots.
