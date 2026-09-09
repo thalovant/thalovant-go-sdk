@@ -25,7 +25,15 @@ type MQTTTransport struct {
 	lastError      error
 	connection     connectionTelemetry
 	handshakeReady chan struct{}
-	mu             sync.RWMutex
+	// NoiseStateDir selects the persistent client key and hub pin directory.
+	NoiseStateDir string
+	// TLSConfig optionally supplies broker trust roots or a client certificate.
+	TLSConfig    *tls.Config
+	noise        *noiseChannel
+	lifecycleMu  sync.Mutex
+	failureReady chan struct{}
+	generation   uint64
+	mu           sync.RWMutex
 }
 
 func NewMQTTTransport(identity Identity) (*MQTTTransport, error) {
@@ -43,17 +51,26 @@ func NewMQTTTransport(identity Identity) (*MQTTTransport, error) {
 	}, nil
 }
 
-func (t *MQTTTransport) Connect(ctx context.Context) error {
+func (t *MQTTTransport) Connect(ctx context.Context) (err error) {
+	t.lifecycleMu.Lock()
+	defer t.lifecycleMu.Unlock()
+	t.closeClient()
 	t.beginConnection()
+	defer func() {
+		if err != nil {
+			t.closeClient()
+			t.failConnection(err)
+		}
+	}()
 	if t.Identity.MQTT == nil {
 		err := fmt.Errorf("%w: identity does not include MQTT broker credentials", ErrProtocol)
 		t.failConnection(err)
 		return err
 	}
-	// TLS is the only confidentiality on this path. The identity crypto key
-	// that once sealed MQTT payloads separately is gone with v3, so a broker
-	// hop without TLS would put every message, and the broker password with
-	// them, on the wire in the clear.
+	if t.Identity.Password == "" {
+		return fmt.Errorf("%w: v3 Noise requires the identity password", ErrIdentity)
+	}
+	// TLS protects broker credentials; Noise protects the end-to-end hub session.
 	if !t.Identity.MQTT.TLS {
 		err := fmt.Errorf("%w: refusing to connect to an MQTT broker without TLS. Use an mqtts:// endpoint, or set tls: true on the identity's mqtt block", ErrConnection)
 		t.failConnection(err)
@@ -76,20 +93,47 @@ func (t *MQTTTransport) Connect(ctx context.Context) error {
 	opts.SetPassword(t.Identity.MQTT.Password)
 	opts.SetCleanSession(true)
 	opts.SetKeepAlive(60 * time.Second)
-	opts.SetAutoReconnect(true)
-	opts.SetTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12})
+	// A broker reconnect has lost its subscription and its Noise session. Do
+	// not let Paho resume publishing with stale counters; callers reconnect the
+	// transport explicitly, which resubscribes and performs a fresh exchange.
+	opts.SetAutoReconnect(false)
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	if t.TLSConfig != nil {
+		tlsConfig = t.TLSConfig.Clone()
+		if tlsConfig.MinVersion < tls.VersionTLS12 {
+			tlsConfig.MinVersion = tls.VersionTLS12
+		}
+	}
+	opts.SetTLSConfig(tlsConfig)
 	opts.SetWill(t.Topics.Status, "offline", 1, true)
+	t.mu.RLock()
+	generation := t.generation
+	t.mu.RUnlock()
+	opts.SetConnectionLostHandler(func(_ mqtt.Client, _ error) {
+		t.failGeneration(generation, fmt.Errorf("%w: MQTT broker disconnected; reconnect required", ErrConnection))
+	})
 	opts.SetDefaultPublishHandler(func(_ mqtt.Client, message mqtt.Message) {
-		if err := t.handleRawMessage(context.Background(), message.Payload()); err != nil {
-			t.mu.Lock()
-			t.lastError = err
-			t.connected = false
-			t.connection.fail(time.Now(), err)
-			t.mu.Unlock()
+		t.mu.RLock()
+		current := t.generation == generation && t.connected
+		channel := t.noise
+		t.mu.RUnlock()
+		if !current || channel == nil {
+			return
+		}
+		messageCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		if err := t.receive(messageCtx, channel, message.Payload()); err != nil {
+			t.failGeneration(generation, err)
 		}
 	})
 	client := mqtt.NewClient(opts)
+	channel := &noiseChannel{identity: t.Identity, stateDir: t.NoiseStateDir, write: func(ctx context.Context, raw []byte, _ bool) error {
+		return waitMQTTToken(ctx, client.Publish(t.Topics.Inbound, t.Identity.MQTT.QOS, false, raw), "MQTT publish")
+	}}
+	t.mu.Lock()
 	t.client = client
+	t.noise = channel
+	t.mu.Unlock()
 	if err := waitMQTTToken(ctx, client.Connect(), "MQTT connect"); err != nil {
 		t.failConnection(err)
 		return err
@@ -98,6 +142,7 @@ func (t *MQTTTransport) Connect(ctx context.Context) error {
 	t.connected = true
 	t.connection.markOpen(time.Now(), false)
 	ready := t.handshakeReady
+	failed := t.failureReady
 	t.mu.Unlock()
 	if err := waitMQTTToken(ctx, client.Subscribe(t.Topics.Outbound, t.Identity.MQTT.QOS, nil), "MQTT subscribe"); err != nil {
 		t.failConnection(err)
@@ -107,23 +152,32 @@ func (t *MQTTTransport) Connect(ctx context.Context) error {
 		t.failConnection(err)
 		return err
 	}
-	if err := t.sendHiveMessage(ctx, helloHiveMessage(t.Identity, "thalovant-go-mqtt-"), true); err != nil {
+	// A cleartext HELLO creates the server-side MQTT peer and triggers its
+	// HELLO/offer. Application messages remain blocked until Noise is complete.
+	initial, err := json.Marshal(helloHiveMessage(t.Identity, "thalovant-go-mqtt-"))
+	if err != nil {
+		return err
+	}
+	if err := channel.write(ctx, initial, false); err != nil {
 		t.failConnection(err)
 		return err
 	}
-	timer := time.NewTimer(6 * time.Second)
+	timer := time.NewTimer(20 * time.Second)
 	defer timer.Stop()
 	select {
 	case <-ready:
 		t.completeConnection()
 		return nil
+	case <-failed:
+		t.mu.RLock()
+		err := t.lastError
+		t.mu.RUnlock()
+		return err
 	case <-ctx.Done():
-		_ = t.Disconnect(ctx)
 		err := fmt.Errorf("%w: %v", ErrTimeout, ctx.Err())
 		t.failConnection(err)
 		return err
 	case <-timer.C:
-		_ = t.Disconnect(ctx)
 		err := fmt.Errorf("%w: HiveMind MQTT handshake timed out", ErrTimeout)
 		t.failConnection(err)
 		return err
@@ -131,17 +185,48 @@ func (t *MQTTTransport) Connect(ctx context.Context) error {
 }
 
 func (t *MQTTTransport) Disconnect(ctx context.Context) error {
-	if t.client != nil && t.client.IsConnected() {
-		_ = waitMQTTToken(ctx, t.client.Publish(t.Topics.Status, 1, true, "offline"), "MQTT status publish")
-		t.client.Disconnect(250)
+	t.lifecycleMu.Lock()
+	defer t.lifecycleMu.Unlock()
+	t.mu.RLock()
+	client := t.client
+	t.mu.RUnlock()
+	if client != nil && client.IsConnected() {
+		_ = waitMQTTToken(ctx, client.Publish(t.Topics.Status, 1, true, "offline"), "MQTT status publish")
 	}
+	t.closeClient()
 	t.mu.Lock()
-	t.connected = false
-	t.handshake = false
-	t.client = nil
 	t.connection.close()
 	t.mu.Unlock()
 	return nil
+}
+
+func (t *MQTTTransport) closeClient() {
+	t.mu.Lock()
+	client, channel := t.client, t.noise
+	t.generation++
+	t.client, t.noise = nil, nil
+	t.connected, t.handshake = false, false
+	t.mu.Unlock()
+	// Disconnect first to unblock any publish waiting for the broker.
+	if client != nil {
+		client.Disconnect(0)
+	}
+	if channel != nil {
+		channel.mu.Lock()
+		channel.failed = true
+		channel.mu.Unlock()
+	}
+}
+
+// RemoteStaticKey returns the authenticated hub key, empty outside a session.
+func (t *MQTTTransport) RemoteStaticKey() string {
+	t.mu.RLock()
+	channel, connected := t.noise, t.connected
+	t.mu.RUnlock()
+	if channel == nil || !connected {
+		return ""
+	}
+	return channel.remoteKey()
 }
 
 func (t *MQTTTransport) Healthcheck() TransportHealth {
@@ -188,57 +273,67 @@ func (t *MQTTTransport) IsHandshakeComplete() bool {
 }
 
 func (t *MQTTTransport) handleRawMessage(ctx context.Context, raw []byte) error {
-	message, err := decodeMQTTHiveMessage(t.Identity, raw)
+	t.mu.RLock()
+	channel := t.noise
+	t.mu.RUnlock()
+	if channel == nil {
+		return fmt.Errorf("%w: MQTT transport is not connected", ErrConnection)
+	}
+	err := t.receive(ctx, channel, raw)
+	if err != nil {
+		t.mu.RLock()
+		generation := t.generation
+		t.mu.RUnlock()
+		t.failGeneration(generation, err)
+	}
+	return err
+}
+
+func (t *MQTTTransport) receive(ctx context.Context, channel *noiseChannel, raw []byte) error {
+	message, err := channel.receive(ctx, raw, channel.ready())
 	if err != nil {
 		return err
 	}
-	switch message.MsgType {
-	case "handshake", "shake":
-		return t.handleHandshake(ctx, message.Payload)
-	case "bus":
-		t.BusEvents <- Event{
-			Name:    fmt.Sprint(message.Payload["type"]),
-			Data:    mapValue(message.Payload["data"]),
-			Context: mapValue(message.Payload["context"]),
-			Raw:     message,
-		}
-	case "query", "cascade":
-		select {
-		case t.HiveEvents <- message:
-		default:
-		}
+	if message != nil {
+		dispatchNoiseMessage(t.BusEvents, t.HiveEvents, *message)
 	}
-	return nil
-}
-
-// handleHandshake completes the MQTT handshake.
-//
-// MQTT has no Noise session: the broker connection is authenticated with the
-// per-client broker credentials and confidentiality comes from TLS, so there is
-// no key exchange to run here.
-func (t *MQTTTransport) handleHandshake(_ context.Context, _ map[string]any) error {
-	t.mu.Lock()
-	if !t.handshake {
-		t.handshake = true
-		close(t.handshakeReady)
+	if channel.ready() {
+		t.mu.Lock()
+		if t.noise == channel && t.connected && !t.handshake {
+			t.handshake = true
+			close(t.handshakeReady)
+		}
+		t.mu.Unlock()
 	}
-	t.mu.Unlock()
 	return nil
 }
 
 func (t *MQTTTransport) sendHiveMessage(ctx context.Context, message HiveMessage, _ bool) error {
-	if t.client == nil || !t.client.IsConnected() {
-		return fmt.Errorf("%w: HiveMind MQTT transport is not connected", ErrConnection)
+	t.mu.RLock()
+	channel, connected, generation := t.noise, t.connected, t.generation
+	t.mu.RUnlock()
+	if channel == nil || !connected {
+		return fmt.Errorf("%w: MQTT transport is not connected", ErrConnection)
 	}
-	payload, err := EncodeHiveBinaryFrame(message)
-	if err != nil {
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if err := channel.send(sendCtx, message); err != nil {
+		t.failGeneration(generation, err)
 		return err
 	}
-	qos := byte(1)
-	if t.Identity.MQTT != nil {
-		qos = t.Identity.MQTT.QOS
+	return nil
+}
+
+func (t *MQTTTransport) failGeneration(generation uint64, err error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.generation != generation || !t.connected {
+		return
 	}
-	return waitMQTTToken(ctx, t.client.Publish(t.Topics.Inbound, qos, false, payload), "MQTT publish")
+	t.connected, t.handshake = false, false
+	t.lastError = err
+	t.connection.fail(time.Now(), err)
+	close(t.failureReady)
 }
 
 func decodeMQTTHiveMessage(_ Identity, raw []byte) (HiveMessage, error) {
@@ -307,6 +402,7 @@ func (t *MQTTTransport) beginConnection() {
 	t.connected = false
 	t.handshake = false
 	t.handshakeReady = make(chan struct{})
+	t.failureReady = make(chan struct{})
 	t.connection.begin(time.Now())
 	t.mu.Unlock()
 }
@@ -319,6 +415,7 @@ func (t *MQTTTransport) completeConnection() {
 
 func (t *MQTTTransport) failConnection(err error) {
 	t.mu.Lock()
+	t.connected, t.handshake = false, false
 	t.lastError = err
 	t.connection.fail(time.Now(), err)
 	t.mu.Unlock()

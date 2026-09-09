@@ -425,64 +425,20 @@ func TestNewClientWithOptionsFallsBackToHTTPSWhenWSSIsMissing(t *testing.T) {
 }
 
 func TestClientConnectWithInfoReturnsConnectionSnapshot(t *testing.T) {
-	var sawHello bool
-	// TLS: the HTTP transport refuses a cleartext hub, because removing the
-	// crypto key left TLS as the only confidentiality on this path.
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("content-type", "application/json")
-		switch r.URL.Path {
-		case "/connect":
-			_, _ = w.Write([]byte(`{}`))
-		case "/get_messages":
-			_, _ = w.Write([]byte(`{"messages":[{"msg_type":"handshake","payload":{"preshared_key":true},"metadata":{},"route":[]}]}`))
-		case "/send_message":
-			sawHello = true
-			_, _ = w.Write([]byte(`{}`))
-		case "/disconnect":
-			_, _ = w.Write([]byte(`{}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-
-	identity, err := IdentityFromMap(map[string]any{
-		"key":      "access",
-		"password": "secret",
-		"site":     "site",
-		"host":     server.URL,
-		"data_plane_endpoints": map[string]any{
-			"https": server.URL,
-		},
-		"protocols": map[string]any{
-			"http": map[string]any{"enabled": true},
-		},
-	})
+	fixture := newHTTPNoiseFixture(t)
+	transport := fixture.transport(t)
+	client, err := NewClientWithOptions(transport.Identity, ClientOptions{Protocol: ProtocolHTTPS})
 	if err != nil {
 		t.Fatal(err)
 	}
-	client, err := NewClientWithOptions(identity, ClientOptions{Protocol: ProtocolHTTPS})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// httptest's TLS certificate is self-signed, so trust this server's own.
-	if transport, ok := client.Transport.(*HTTPTransport); ok {
-		transport.HTTPClient = server.Client()
-	}
+	client.Transport = transport
 	info, err := client.ConnectWithInfo(context.Background())
 	defer client.Close(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	if !sawHello {
-		t.Fatal("expected SDK to answer handshake with hello")
-	}
-	if info.Phase != ConnectionReady || info.ConnectMS < 0 || info.HandshakeMS < 0 {
+	if info.Phase != ConnectionReady || info.ConnectMS < 0 || info.HandshakeMS < 0 || !transport.IsHandshakeComplete() {
 		t.Fatalf("unexpected connection info: %+v", info)
-	}
-	if health := client.Healthcheck(); health.Connection.Phase != ConnectionReady {
-		t.Fatalf("unexpected health connection: %+v", health.Connection)
 	}
 }
 

@@ -124,6 +124,28 @@ func SaveNoisePin(dir, nodeID, publicKey string) error {
 	return writeNoisePinsLocked(path, pins)
 }
 
+// pinNoisePeer checks and records trust under one lock, so simultaneous first
+// connections cannot replace one another's authenticated hub key.
+func pinNoisePeer(dir, nodeID, key string) error {
+	if nodeID == "" || key == "" {
+		return fmt.Errorf("%w: Noise peer supplied no static identity", ErrConnection)
+	}
+	noiseStoreMu.Lock()
+	defer noiseStoreMu.Unlock()
+	pins, path, err := readNoisePinsLocked(dir)
+	if err != nil {
+		return err
+	}
+	if pinned := pins[nodeID]; pinned != "" && pinned != key {
+		return fmt.Errorf("%w: the hub's Noise static key changed; verify its identity before explicitly calling ForgetNoisePin", ErrConnection)
+	}
+	if pins[nodeID] == key {
+		return nil
+	}
+	pins[nodeID] = key
+	return writeNoisePinsLocked(path, pins)
+}
+
 // ForgetNoisePin drops a pinned server key. Use it when a server was
 // deliberately reinstalled or replaced; a pin that stops matching on its own is
 // a failure to investigate, not one to clear.

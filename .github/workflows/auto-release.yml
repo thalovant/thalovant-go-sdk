@@ -59,6 +59,7 @@ jobs:
               "transport.go",
               "transport_mqtt.go",
               "transport_wss.go",
+              "transport_noise.go",
               "wire.go",
               "client.go",
               "README.md",
