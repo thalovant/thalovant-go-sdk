@@ -1106,7 +1106,7 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.APIURL+strings.TrimLeft(path, "/"), body)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("%w: invalid control request", ErrAPI)
 	}
 	req.Header.Set("accept", "application/json")
 	req.Header.Set("user-agent", c.UserAgent)
@@ -1141,7 +1141,13 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 	scopedClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	resp, err := scopedClient.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("%w: %v", ErrAPI, err)
+		// url.Error includes the complete request URL, and an injected transport
+		// may return arbitrary credential-bearing text. Preserve only known,
+		// safe context errors; never retain the transport cause in the chain.
+		if cause := ctx.Err(); cause == context.Canceled || cause == context.DeadlineExceeded {
+			return 0, nil, fmt.Errorf("%w: %w", ErrAPI, cause)
+		}
+		return 0, nil, fmt.Errorf("%w: control request failed", ErrAPI)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
