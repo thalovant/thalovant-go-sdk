@@ -3,6 +3,8 @@
 ## 0.5.0
 
 - Require Go 1.26 or newer and use patched `golang.org/x/crypto` 0.56.0.
+- Refuse control-plane redirects and require HTTPS for credential-bearing requests except literal local development endpoints, including injected HTTP clients.
+- Include connection diagnostics in caller deadlines, preserve SDK timeout classification, drain queued reply fragments at settlement, and retain HTTP teardown ownership after caller cancellation.
 - Add `IntentsWithCapabilities`, `ListFallbacks`, and `HubIntentCapabilities.MayAnswer`: optional fallback discovery distinguishes unknown from known-empty and shares one bounded connect/send/reply budget. Silent unified listings use engine manifests by default.
 - Add independent bounded subscriptions on all built-in transports so concurrent Ask, Query and inventory calls retain their own replies. Slow observers fail explicitly with `ErrEventOverflow`.
 - Add `AskWithOptions` for delayed speech and fragment settlement, preserving existing request option literals. Soft intent misses can recover with later speech; hard denials retain partial-reply failure information.

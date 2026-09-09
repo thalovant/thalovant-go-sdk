@@ -123,12 +123,12 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 	ctx, cancelConnect := context.WithTimeout(ctx, 20*time.Second)
 	defer cancelConnect()
 	if err := t.lifecycleMu.Lock(ctx); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	defer t.lifecycleMu.Unlock()
 	// Join any manually driven poll before deciding this session is reusable.
 	if err := t.pollMu.Lock(ctx); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	health := t.Healthcheck()
 	t.pollMu.Unlock()
@@ -139,7 +139,7 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 		return err
 	}
 	if err := t.pollMu.Lock(ctx); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	defer t.pollMu.Unlock()
 	t.mu.Lock()
@@ -247,46 +247,62 @@ func (t *HTTPTransport) stopPolling(ctx context.Context) error {
 		case <-t.pollDone:
 			t.pollDone = nil
 		case <-ctx.Done():
-			return ctx.Err()
+			return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
 		}
 	}
 	return nil
 }
 
+// Disconnect bounds the caller while retaining teardown ownership until old
+// readers retire. Only an acknowledged remote reset clears admission.
 func (t *HTTPTransport) Disconnect(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	if err := t.lifecycleMu.Lock(ctx); err != nil {
-		return err
-	}
-	defer t.lifecycleMu.Unlock()
-	t.mu.Lock()
-	t.connected, t.handshake = false, false
-	t.mu.Unlock()
-	if err := t.stopPolling(ctx); err != nil {
-		return err
-	}
-	if err := t.pollMu.Lock(ctx); err != nil {
-		return err
-	}
-	defer t.pollMu.Unlock()
-	t.invalidateNoise()
-	t.mu.Lock()
-	admitted := t.admitted
-	t.mu.Unlock()
-	var err error
-	if admitted {
-		_, err = t.request(ctx, http.MethodPost, "/disconnect", nil)
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	t.mu.Lock()
 	t.connected, t.handshake = false, false
-	if err == nil {
-		t.admitted = false
-	}
-	t.noise = nil
 	t.connection.close()
 	t.mu.Unlock()
-	return err
+	result := make(chan error, 1)
+	go func() {
+		defer t.lifecycleMu.Unlock()
+		// The caller may leave, but a replacement connection must not race a
+		// stale poll. A custom HTTP client that ignores cancellation keeps this
+		// worker's ownership until its actual operation returns.
+		_ = t.stopPolling(context.Background())
+		_ = t.pollMu.Lock(context.Background())
+		defer t.pollMu.Unlock()
+		t.invalidateNoise()
+		t.mu.RLock()
+		admitted := t.admitted
+		t.mu.RUnlock()
+		var err error
+		if admitted {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_, err = t.request(cleanupCtx, http.MethodPost, "/disconnect", nil)
+			cleanupCancel()
+		}
+		t.mu.Lock()
+		t.connected, t.handshake = false, false
+		if err == nil {
+			t.admitted = false
+		}
+		t.noise = nil
+		t.connection.close()
+		t.mu.Unlock()
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+		}
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+	}
 }
 
 func (t *HTTPTransport) invalidateNoise() {
@@ -382,7 +398,7 @@ func (t *HTTPTransport) PollOnce(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	if err := t.pollMu.Lock(ctx); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	defer t.pollMu.Unlock()
 	return t.pollOnceLocked(ctx)
@@ -606,7 +622,7 @@ func (t *HTTPTransport) sendHiveMessage(ctx context.Context, message HiveMessage
 	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	if err := t.lifecycleMu.Lock(ctx); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	defer t.lifecycleMu.Unlock()
 	t.mu.RLock()

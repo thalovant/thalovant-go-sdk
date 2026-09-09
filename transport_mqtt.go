@@ -55,7 +55,7 @@ func (t *MQTTTransport) Connect(ctx context.Context) (err error) {
 	ctx, cancelConnect := context.WithTimeout(ctx, 20*time.Second)
 	defer cancelConnect()
 	if err := t.lifecycleMu.Lock(ctx); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	defer t.lifecycleMu.Unlock()
 	health := t.Healthcheck()
@@ -193,7 +193,7 @@ func (t *MQTTTransport) Disconnect(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 	if err := t.lifecycleMu.Lock(ctx); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	defer t.lifecycleMu.Unlock()
 	t.mu.RLock()
@@ -322,7 +322,7 @@ func (t *MQTTTransport) sendHiveMessage(ctx context.Context, message HiveMessage
 	defer cancel()
 	ctx = sendCtx
 	if err := t.lifecycleMu.Lock(ctx); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	defer t.lifecycleMu.Unlock()
 	t.mu.RLock()

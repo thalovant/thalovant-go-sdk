@@ -85,6 +85,10 @@ func main() {
 
 `NewDefaultControlPlane` uses `https://api.thalovant.com`. Use
 `NewControlPlane` only for local development or a self-hosted control plane.
+Credential-bearing control requests require HTTPS; HTTP is supported only for
+literal `localhost`, `127.0.0.1`, and `[::1]` development endpoints. Control
+requests do not follow redirects, including when using an injected `http.Client`,
+so login passwords and bearer credentials remain bound to the chosen endpoint.
 
 ### Login With MFA
 
@@ -491,6 +495,9 @@ policy denials remain failures even when a partial reply is available. Existing
 Connection callers share authenticated readiness. A canceled or timed-out caller
 cannot race a later connection against its unfinished cleanup. `Close` uses the
 client connection timeout by default (6s) and honors an earlier context deadline;
+`ConnectWithInfo` includes diagnostic collection in that same deadline, even for
+custom transports. HTTP cleanup continues after a timed-out caller until its old
+poll retires, and reconnect waits for that owned cleanup;
 a timeout means cleanup has not completed, so do not reuse that identity in a
 separate client. Do not copy a `Client` or built-in transport after first use.
 

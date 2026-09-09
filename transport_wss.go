@@ -368,13 +368,9 @@ func (t *WSSTransport) handleRawMessage(ctx context.Context, raw []byte) error {
 	return nil
 }
 
-// handleHello records the server's cleartext HELLO. Both its payload and the
-// parameter HANDSHAKE payload are bound into the Noise prologue, so it has to
-// be kept verbatim rather than read for the node id alone.
-func (t *WSSTransport) handleHello(payload map[string]any) error {
-	return t.handleHelloGeneration(context.Background(), payload)
-}
-
+// handleHelloGeneration records the server's cleartext HELLO. Both its payload
+// and the parameter HANDSHAKE payload are bound into the Noise prologue, so it
+// has to be kept verbatim rather than read for the node id alone.
 func (t *WSSTransport) handleHelloGeneration(ctx context.Context, payload map[string]any) error {
 	nodeID, _ := payload["node_id"].(string)
 	t.mu.Lock()

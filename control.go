@@ -1085,13 +1085,47 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 		}
 		req.Header.Set("authorization", "Bearer "+c.AccessToken)
 	}
-	resp, err := c.HTTPClient.Do(req)
+	// Bind passwords, device codes and bearer credentials to a secure endpoint.
+	// Literal loopback development endpoints remain supported without DNS
+	// resolution; a remote name resolving to loopback is not an exception.
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	sendsCookies := client.Jar != nil && len(client.Jar.Cookies(req.URL)) != 0
+	if auth || payload != nil || req.URL.User != nil || sendsCookies || req.Header.Get("authorization") != "" || req.Header.Get("cookie") != "" || req.Header.Get("proxy-authorization") != "" {
+		if err := requireControlCredentialEndpoint(req.URL); err != nil {
+			return 0, nil, err
+		}
+	}
+	scopedClient := *client
+	// 307/308 redirects can forward the original JSON password body. Keep the
+	// injected client's transport/jar while preventing all redirect hops.
+	scopedClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := scopedClient.Do(req)
 	if err != nil {
 		return 0, nil, fmt.Errorf("%w: %v", ErrAPI, err)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, raw, nil
+}
+
+// requireControlCredentialEndpoint permits HTTP only for literal local development.
+func requireControlCredentialEndpoint(endpoint *url.URL) error {
+	if endpoint.User != nil {
+		return fmt.Errorf("%w: control API URL must not contain credentials", ErrAPI)
+	}
+	if endpoint.Scheme == "https" && endpoint.Hostname() != "" {
+		return nil
+	}
+	if endpoint.Scheme == "http" {
+		switch strings.ToLower(endpoint.Hostname()) {
+		case "localhost", "127.0.0.1", "::1":
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: credential-bearing control requests require HTTPS; HTTP is allowed only for localhost, 127.0.0.1 or [::1] development", ErrAPI)
 }
 
 // maxServerErrorDetail bounds how much of a surfaced server message is echoed

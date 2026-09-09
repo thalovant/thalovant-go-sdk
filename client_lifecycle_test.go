@@ -132,7 +132,7 @@ func TestClientSendDeadlineRetainsOwnershipUntilActualCompletion(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- client.Emit(ctx, "test", Data{}, Context{}) }()
 	awaitSignal(t, transport.sendStarted)
-	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+	if err := <-done; !errors.Is(err, ErrTimeout) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
 	}
 	if err := client.Connect(context.Background()); !errors.Is(err, ErrTimeout) {
@@ -151,7 +151,7 @@ func TestClientCloseBoundsCustomTransportAndRetainsOwnership(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- client.Close(context.Background()) }()
 	awaitSignal(t, transport.closeStarted)
-	if err := <-done; !errors.Is(err, context.DeadlineExceeded) {
+	if err := <-done; !errors.Is(err, ErrTimeout) || !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatal(err)
 	}
 	if err := client.Connect(context.Background()); !errors.Is(err, ErrTimeout) {

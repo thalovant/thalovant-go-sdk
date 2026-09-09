@@ -3,6 +3,7 @@ package thalovant
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -145,9 +146,23 @@ func (c *Client) Connect(ctx context.Context) error {
 	}
 }
 
+// ConnectWithInfo includes diagnostic collection in the connection deadline.
+// A timed-out custom getter retains operation ownership until it returns.
 func (c *Client) ConnectWithInfo(ctx context.Context) (TransportConnectionInfo, error) {
-	err := c.Connect(ctx)
-	return c.ConnectionInfo(), err
+	ctx, cancel := context.WithTimeout(ctx, c.connectTimeout())
+	defer cancel()
+	connectErr := c.Connect(ctx)
+	if ctx.Err() != nil {
+		return TransportConnectionInfo{}, errors.Join(connectErr, fmt.Errorf("%w: %w", ErrTimeout, ctx.Err()))
+	}
+	information := make(chan TransportConnectionInfo, 1)
+	if err := c.runOwned(ctx, false, func() error {
+		information <- c.Transport.ConnectionInfo()
+		return nil
+	}); err != nil {
+		return TransportConnectionInfo{}, errors.Join(connectErr, err)
+	}
+	return <-information, connectErr
 }
 
 func (c *Client) ConnectionInfo() TransportConnectionInfo {
@@ -164,14 +179,14 @@ func (c *Client) Close(ctx context.Context) error {
 // implementation has actually stopped. A queued caller never owns cleanup.
 func (c *Client) runOwned(ctx context.Context, cleanupOnError bool, operation func() error) error {
 	if err := c.connectionGate.Lock(ctx); err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	result := make(chan error, 1)
 	go func() {
 		defer c.connectionGate.Unlock()
 		err := operation()
 		if ctx.Err() != nil {
-			err = ctx.Err()
+			err = fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
 		}
 		if err != nil && cleanupOnError {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
@@ -182,9 +197,12 @@ func (c *Client) runOwned(ctx context.Context, cleanupOnError bool, operation fu
 	}()
 	select {
 	case err := <-result:
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+		}
 		return err
 	case <-ctx.Done():
-		return ctx.Err()
+		return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
 	}
 }
 
@@ -346,6 +364,42 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 		}
 		return Reply{Text: strings.Join(fragments, " "), Utterances: fragments, Handled: failure == nil, OK: failure == nil, SessionID: SessionIDFromContext(eventContext), RequestID: requestID, Events: events, FailureEvent: failure}, nil
 	}
+	accept := func(event Event) bool {
+		if !EventMatchesContext(event, eventContext) {
+			return false
+		}
+		events = append(events, event)
+		switch event.Name {
+		case EventSpeak, EventOvosUtteranceSpeak:
+			appendFragment(&fragments, event.Text())
+			if phaseComplete && len(fragments) > 0 {
+				schedule(settleWait)
+			}
+		case EventPolicyDenied, EventQueryTimeout:
+			hardFailure = &event
+			return true
+		case EventIntentUnmatched, EventIntentFailure:
+			softFailure = &event
+			if !phaseComplete {
+				phaseComplete = true
+				if len(fragments) > 0 {
+					schedule(settleWait)
+				} else {
+					schedule(emptyWait)
+				}
+			}
+		case EventUtteranceHandled:
+			if !phaseComplete {
+				phaseComplete = true
+				if len(fragments) > 0 {
+					schedule(settleWait)
+				} else {
+					schedule(emptyWait)
+				}
+			}
+		}
+		return false
+	}
 	if err := c.Emit(ctx, EventRecognizerLoopUtterance, UtterancePayload(prompt, lang), eventContext); err != nil {
 		return Reply{}, err
 	}
@@ -354,43 +408,28 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 		case <-ctx.Done():
 			return Reply{}, fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
 		case <-settled:
+			// Consume the backlog observed at settlement. Snapshot its size so
+			// an ongoing producer cannot keep the deadline branch busy forever.
+			for queued := len(sub.C); queued > 0; queued-- {
+				select {
+				case event, open := <-sub.C:
+					if !open {
+						return Reply{}, subscriptionError(sub.Err())
+					}
+					if accept(event) {
+						return finish()
+					}
+				default:
+					queued = 0
+				}
+			}
 			return finish()
 		case event, open := <-sub.C:
 			if !open {
 				return Reply{}, subscriptionError(sub.Err())
 			}
-			if !EventMatchesContext(event, eventContext) {
-				continue
-			}
-			events = append(events, event)
-			switch event.Name {
-			case EventSpeak, EventOvosUtteranceSpeak:
-				appendFragment(&fragments, event.Text())
-				if phaseComplete && len(fragments) > 0 {
-					schedule(settleWait)
-				}
-			case EventPolicyDenied, EventQueryTimeout:
-				hardFailure = &event
+			if accept(event) {
 				return finish()
-			case EventIntentUnmatched, EventIntentFailure:
-				softFailure = &event
-				if !phaseComplete {
-					phaseComplete = true
-					if len(fragments) > 0 {
-						schedule(settleWait)
-					} else {
-						schedule(emptyWait)
-					}
-				}
-			case EventUtteranceHandled:
-				if !phaseComplete {
-					phaseComplete = true
-					if len(fragments) > 0 {
-						schedule(settleWait)
-					} else {
-						schedule(emptyWait)
-					}
-				}
 			}
 		}
 	}
