@@ -78,6 +78,7 @@ type HTTPTransport struct {
 	pollDone      chan struct{}
 	BusEvents     chan Event
 	HiveEvents    chan HiveMessage
+	admitted      bool
 	connected     bool
 	handshake     bool
 	lastError     error
@@ -121,6 +122,19 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 	t.lifecycleMu.Lock()
 	defer t.lifecycleMu.Unlock()
 	t.stopPolling()
+	t.pollMu.Lock()
+	defer t.pollMu.Unlock()
+	t.mu.Lock()
+	admitted := t.admitted
+	t.admitted = false
+	t.mu.Unlock()
+	if admitted {
+		// The HTTP plugin only offers a fresh handshake for an unregistered peer.
+		// Reset this object's own previous admission before renewing its session.
+		cleanupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, _ = t.request(cleanupCtx, http.MethodPost, "/disconnect", nil)
+		cancel()
+	}
 	t.invalidateNoise()
 	t.beginConnection()
 	defer func() {
@@ -161,6 +175,7 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 	}
 	t.mu.Lock()
 	t.connected = true
+	t.admitted = true
 	t.connection.markOpen(time.Now(), false)
 	t.mu.Unlock()
 	defer func() {
@@ -168,10 +183,13 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cleanupCancel()
 			_, _ = t.request(cleanupCtx, http.MethodPost, "/disconnect", nil)
+			t.mu.Lock()
+			t.admitted = false
+			t.mu.Unlock()
 		}
 	}()
 	for !t.IsHandshakeComplete() {
-		if err = t.PollOnce(handshakeCtx); err != nil {
+		if err = t.pollOnceLocked(handshakeCtx); err != nil {
 			return err
 		}
 		if t.IsHandshakeComplete() {
@@ -208,12 +226,19 @@ func (t *HTTPTransport) Disconnect(ctx context.Context) error {
 	t.lifecycleMu.Lock()
 	defer t.lifecycleMu.Unlock()
 	t.stopPolling()
-	t.invalidateNoise()
 	t.pollMu.Lock()
 	defer t.pollMu.Unlock()
-	_, err := t.request(ctx, http.MethodPost, "/disconnect", nil)
+	t.invalidateNoise()
 	t.mu.Lock()
-	t.connected, t.handshake = false, false
+	admitted := t.admitted
+	t.admitted = false
+	t.mu.Unlock()
+	var err error
+	if admitted {
+		_, err = t.request(ctx, http.MethodPost, "/disconnect", nil)
+	}
+	t.mu.Lock()
+	t.connected, t.handshake, t.admitted = false, false, false
 	t.noise = nil
 	t.connection.close()
 	t.mu.Unlock()
@@ -309,14 +334,18 @@ func (t *HTTPTransport) pollLoop(ctx context.Context) {
 	}
 }
 
-func (t *HTTPTransport) PollOnce(ctx context.Context) (err error) {
+func (t *HTTPTransport) PollOnce(ctx context.Context) error {
+	t.pollMu.Lock()
+	defer t.pollMu.Unlock()
+	return t.pollOnceLocked(ctx)
+}
+
+func (t *HTTPTransport) pollOnceLocked(ctx context.Context) (err error) {
 	defer func() {
 		if err != nil {
 			t.failConnection(err)
 		}
 	}()
-	t.pollMu.Lock()
-	defer t.pollMu.Unlock()
 	body, err := t.request(ctx, http.MethodGet, "/get_messages", nil)
 	if err != nil {
 		return err
@@ -523,6 +552,8 @@ func elapsedMS(start time.Time, end time.Time) float64 {
 }
 
 func (t *HTTPTransport) sendHiveMessage(ctx context.Context, message HiveMessage, _ bool) error {
+	t.lifecycleMu.Lock()
+	defer t.lifecycleMu.Unlock()
 	t.mu.RLock()
 	channel := t.noise
 	connected := t.connected

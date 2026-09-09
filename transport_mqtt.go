@@ -305,6 +305,8 @@ func (t *MQTTTransport) receive(ctx context.Context, channel *noiseChannel, raw 
 }
 
 func (t *MQTTTransport) sendHiveMessage(ctx context.Context, message HiveMessage, _ bool) error {
+	t.lifecycleMu.Lock()
+	defer t.lifecycleMu.Unlock()
 	t.mu.RLock()
 	channel, connected, generation := t.noise, t.connected, t.generation
 	t.mu.RUnlock()

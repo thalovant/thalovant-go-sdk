@@ -502,6 +502,10 @@ The derivation costs 64 MiB and a few hundred milliseconds. WSS caches the
 result per hub; HTTP and MQTT derive from the current password on each fresh
 connection. All transports retain the hub pin after authentication failures.
 
+HTTP reconnect first resets this transport object's previously admitted peer,
+so a failed poll can recover even while the hub still retains the old session.
+An initial connection does not disconnect a peer admitted by another process.
+
 HTTP preserves the hub's replica affinity cookie and posts encrypted frames as
 Base64 form data with `binary=1`; encrypted replies arrive through
 `/get_binary_messages`. Both non-success HTTP status codes and JSON `error`
