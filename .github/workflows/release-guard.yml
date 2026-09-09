@@ -53,6 +53,7 @@ jobs:
             context_mutex.go
             fallbacks.go
             subscriptions.go
+            listen.go
             noise_store_file.go
             README.md
             LICENSE

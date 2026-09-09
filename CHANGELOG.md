@@ -3,6 +3,8 @@
 ## 0.5.0
 
 - Require Go 1.26 or newer and use patched `golang.org/x/crypto` 0.56.0.
+- Add `WaitForEvent` and filtered `Listen` with correlation/predicate options, bounded buffers, event limits, explicit timeout/disconnect/overflow errors, and cancellation that unsubscribes immediately.
+- Validate device verification URLs before display/browser launch and keep URLs as direct arguments without a command shell.
 - Refuse control-plane redirects and require HTTPS for credential-bearing requests except literal local development endpoints, including injected HTTP clients.
 - Include connection diagnostics in caller deadlines, preserve SDK timeout classification, drain queued reply fragments at settlement, and retain HTTP teardown ownership after caller cancellation.
 - Add `IntentsWithCapabilities`, `ListFallbacks`, and `HubIntentCapabilities.MayAnswer`: optional fallback discovery distinguishes unknown from known-empty and shares one bounded connect/send/reply budget. Silent unified listings use engine manifests by default.

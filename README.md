@@ -117,7 +117,9 @@ omitted from the request body, so `LoginWithOptions` with a zero-value
 ### Sign In With the Browser (Device Flow)
 
 Accounts without a password (for example Google sign-in) use the device flow.
-`LoginWithBrowser` prints a verification URL and a short user code, opens the
+`LoginWithBrowser` accepts only HTTP(S) verification URLs with a host and no
+embedded credentials. Browser launch uses direct arguments without a command
+shell. It prints a verification URL and a short user code, opens the
 browser on a best-effort basis, and polls until you approve the request:
 
 ```go
@@ -485,6 +487,30 @@ consumer falls behind. Treat delivered events and their maps as read-only.
 Transport `SubscribeHiveMessages` supports independent query/cascade observers.
 Legacy `Events` and `HiveMessages` channels remain available for compatibility;
 the bounded subscription API reports overflow explicitly.
+
+`WaitForEvent(ctx, name, EventOptions)` waits for one named event with a default
+12-second deadline including connection. `Listen` returns a filtered subscription:
+
+```go
+stream, err := client.Listen(ctx, thalovant.EventSpeak, thalovant.ListenOptions{
+    EventOptions: thalovant.EventOptions{Timeout: 30*time.Second, SessionID: "session-id"},
+    MaxEvents: 10,
+    Capacity: 128,
+})
+if err != nil { return err }
+defer stream.Close()
+for event := range stream.C { fmt.Println(event.Text()) }
+if err := stream.Err(); err != nil { return err }
+```
+
+Both support `Context`, `RequestID`, `SessionID`, and a `Predicate` function.
+Matching request IDs take precedence over the hub-assigned session ID; ID-less
+legacy events retain session fallback. `Listen` has no lifetime/count cap when
+`Timeout`/`MaxEvents` are zero, so use a cancellable context or call `Close`.
+Buffers default to 256 events and are capped at 65536. Timeout, disconnect and
+slow-consumer overflow are explicit errors; reaching `MaxEvents` or calling
+`Close` succeeds. Cancellation removes the subscription even if a custom
+predicate is still pending; predicates should return promptly.
 
 `AskWithOptions` adds `ReplySettle` (default 250ms) and `EmptyReplyWait` (default
 5s) alongside embedded `RequestOptions`. The request deadline bounds connection,

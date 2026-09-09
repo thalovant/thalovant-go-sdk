@@ -753,7 +753,9 @@ func TestHTTPNoiseReconnectResetsPreviouslyAdmittedSession(t *testing.T) {
 	fixture.mu.Lock()
 	fixture.tamper = false
 	fixture.mu.Unlock()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	// Race-instrumented cryptography on slower runners needs a fixture budget;
+	// separate cancellation regressions enforce short caller deadlines.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := transport.Connect(ctx); err != nil {
 		t.Fatal(err)

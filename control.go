@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -282,6 +283,14 @@ func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOpt
 	if deviceCode == "" || userCode == "" || verificationURI == "" {
 		return nil, fmt.Errorf("%w: device authorization response was incomplete", ErrAPI)
 	}
+	if err := validateBrowserURL(verificationURI); err != nil {
+		return nil, err
+	}
+	if completeURI := optional(grant["verification_uri_complete"]); completeURI != "" {
+		if err := validateBrowserURL(completeURI); err != nil {
+			return nil, err
+		}
+	}
 	interval := defaultDevicePollInterval
 	if raw, ok := grant["interval"].(float64); ok && raw >= 0 {
 		interval = time.Duration(raw * float64(time.Second))
@@ -373,16 +382,44 @@ func (c *ControlPlane) pollDeviceToken(
 // openBrowser launches the platform browser opener. It is a package variable
 // so tests can capture the opened URL without spawning a process.
 var openBrowser = func(target string) error {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", target)
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
-	default:
-		cmd = exec.Command("xdg-open", target)
+	cmd, err := browserCommand(target, runtime.GOOS)
+	if err != nil {
+		return err
 	}
-	return cmd.Start()
+	if err = cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
+}
+
+// validateBrowserURL rejects option-like targets, local files, executable URI
+// schemes and embedded credentials before anything is displayed or launched.
+func validateBrowserURL(target string) error {
+	endpoint, err := url.Parse(target)
+	invalid := err != nil || strings.IndexFunc(target, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0
+	if !invalid {
+		invalid = (!strings.EqualFold(endpoint.Scheme, "http") && !strings.EqualFold(endpoint.Scheme, "https")) || endpoint.Hostname() == "" || endpoint.User != nil
+	}
+	if invalid {
+		return fmt.Errorf("%w: device verification URL must be an HTTP(S) URL with a host and no embedded credentials", ErrAPI)
+	}
+	return nil
+}
+
+// browserCommand passes the validated URL as one argument, never through a shell.
+func browserCommand(target, platform string) (*exec.Cmd, error) {
+	if err := validateBrowserURL(target); err != nil {
+		return nil, err
+	}
+	switch platform {
+	case "darwin":
+		return exec.Command("open", target), nil
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", target), nil
+	default:
+		return exec.Command("xdg-open", target), nil
+	}
 }
 
 // sleepContext waits for the duration or until ctx is cancelled.
