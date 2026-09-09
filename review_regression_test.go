@@ -131,7 +131,12 @@ type queuedSettlementTransport struct {
 	deny bool
 }
 
-func (t *queuedSettlementTransport) EmitBus(_ context.Context, _ string, _ Data, ctx Context) error {
+func (t *queuedSettlementTransport) SubscribeEvents(capacity int) *Subscription[Event] {
+	// Install a complete backlog before the collector receives the channel.
+	// Emit and collection now run concurrently, so synchronous Emit alone no
+	// longer guarantees that the later frames are queued at zero settlement.
+	sub := t.blockedClientTransport.SubscribeEvents(capacity)
+	ctx := Context{"request_id": "queued"}
 	t.streams.bus.publish(Event{Name: EventUtteranceHandled, Context: ctx})
 	for _, text := range []string{"one", "two", "three"} {
 		t.streams.bus.publish(Event{Name: EventSpeak, Data: Data{"utterance": text}, Context: ctx})
@@ -140,14 +145,14 @@ func (t *queuedSettlementTransport) EmitBus(_ context.Context, _ string, _ Data,
 	if t.deny {
 		t.streams.bus.publish(Event{Name: EventPolicyDenied, Context: ctx})
 	}
-	return nil
+	return sub
 }
 func TestAskSettlementIncludesQueuedSpeechAndHardFailure(t *testing.T) {
 	for _, deny := range []bool{false, true} {
 		for i := 0; i < 20; i++ {
 			transport := &queuedSettlementTransport{blockedClientTransport: newBlockedClientTransport(), deny: deny}
 			transport.ready.Store(true)
-			reply, err := (&Client{Transport: transport}).AskWithOptions(context.Background(), "test", AskOptions{RequestOptions: RequestOptions{Timeout: time.Second}, EmptyReplyWait: -1, ReplySettle: -1})
+			reply, err := (&Client{Transport: transport}).AskWithOptions(context.Background(), "test", AskOptions{RequestOptions: RequestOptions{Timeout: time.Second, RequestID: "queued"}, EmptyReplyWait: -1, ReplySettle: -1})
 			if err != nil || reply.Text != "one two three" || reply.OK == deny || len(reply.Utterances) != 3 {
 				t.Fatalf("queued reply lost: %+v %v", reply, err)
 			}

@@ -514,9 +514,16 @@ predicate is still pending; predicates should return promptly.
 
 `AskWithOptions` adds `ReplySettle` (default 250ms) and `EmptyReplyWait` (default
 5s) alongside embedded `RequestOptions`. The request deadline bounds connection,
-send and reply collection. Delayed speech can recover from a soft intent miss;
-policy denials remain failures even when a partial reply is available. Existing
-`Ask` calls use the same defaults.
+send and reply collection. First nonempty speech starts a fixed settlement window;
+first handled or soft intent-miss without speech starts a fixed empty wait. Later
+fragments do not reset settlement. Collected speech is returned when the total
+deadline clips a window, even if an admitted write is still retiring. Policy denial
+or explicit query timeout freezes the partial reply immediately; soft intent misses
+can recover. `Query` waits for `hive.query.complete` or a hard terminal event.
+`Ask` requires the matching request ID and accepts a runtime-replaced session ID;
+ambient events cannot satisfy it. Existing `Ask` calls use the same defaults.
+Cancellation does not replay an application request, and a retiring send retains
+transport ownership until its cleanup completes.
 
 Connection callers share authenticated readiness. A canceled or timed-out caller
 cannot race a later connection against its unfinished cleanup. `Close` uses the
