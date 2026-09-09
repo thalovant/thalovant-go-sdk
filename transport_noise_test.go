@@ -248,6 +248,10 @@ func (f *httpNoiseFixture) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(map[string]any{"status": "message sent"})
 	case "/disconnect":
+		if !f.connected {
+			reply(map[string]any{"error": "Already Disconnected"})
+			return
+		}
 		f.connected = false
 		reply(map[string]any{"status": "Disconnected"})
 	default:
@@ -904,5 +908,93 @@ func TestHTTPFailedAdmissionResetRetainsOwnershipAndReportsError(t *testing.T) {
 	}
 	if resets.Load() != 2 || admissions.Load() != 0 {
 		t.Fatal("owned cleanup was not retried before admission")
+	}
+}
+
+// The HTTPS peer processes cleanup, but the client loses the successful reply.
+// A retry gets HiveMind HTTP's real no-session response, not another success status.
+// https://github.com/JarbasHiveMind/hivemind-http-protocol/blob/033ab8c559efb45d1515f50fe86a8e4ff4506db9/hivemind_http_protocol/__init__.py#L715
+type lostDisconnectReply struct {
+	base http.RoundTripper
+	lose atomic.Bool
+}
+
+func (l *lostDisconnectReply) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := l.base.RoundTrip(request)
+	if err == nil && request.URL.Path == "/disconnect" && l.lose.Swap(false) {
+		_, _ = io.Copy(io.Discard, response.Body)
+		_ = response.Body.Close()
+		return nil, errors.New("synthetic lost disconnect acknowledgment")
+	}
+	return response, err
+}
+func TestHTTPNoiseLostDisconnectReplyRecoversWithIdempotentAcknowledgment(t *testing.T) {
+	fixture := newHTTPNoiseFixture(t)
+	transport := fixture.transport(t)
+	lost := &lostDisconnectReply{base: transport.HTTPClient.Transport}
+	transport.HTTPClient.Transport = lost
+	if err := transport.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pin := transport.RemoteStaticKey()
+	lost.lose.Store(true)
+	if err := transport.Disconnect(context.Background()); err == nil {
+		t.Fatal("lost reply reported cleanup success")
+	}
+	fixture.mu.Lock()
+	connected := fixture.connected
+	fixture.mu.Unlock()
+	if connected || !transport.admitted {
+		t.Fatal("lost acknowledgment must retain local responsibility for remote cleanup")
+	}
+	if err := transport.Disconnect(context.Background()); err != nil {
+		t.Fatalf("confirmed idempotent cleanup failed: %v", err)
+	}
+	if transport.admitted {
+		t.Fatal("confirmed cleanup remained admitted")
+	}
+	if err := transport.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if transport.RemoteStaticKey() != pin {
+		t.Fatal("cleanup retry changed authenticated trust")
+	}
+	if err := transport.Disconnect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := fmt.Sprint(fixture.responder.patterns); got != "[XXpsk2 KKpsk0]" {
+		t.Fatalf("lost pin continuity: %s", got)
+	}
+}
+func TestHTTPDisconnectAcknowledgmentRejectsAmbiguousResponses(t *testing.T) {
+	cases := []struct {
+		name, path, body string
+		status           int
+	}{
+		{"explicit false", "/disconnect", `{"status":"Disconnected","ok":false}`, 200},
+		{"idempotent false", "/disconnect", `{"error":"Already Disconnected","ok":false}`, 200},
+		{"contradictory status", "/disconnect", `{"error":"Already Disconnected","status":"Connected"}`, 200},
+		{"arbitrary refusal", "/disconnect", `{"error":"arbitrary-refusal-must-stay-private"}`, 200},
+		{"wrong endpoint", "/connect", `{"error":"Already Disconnected"}`, 200},
+		{"unsuccessful HTTP", "/disconnect", `{"error":"Already Disconnected"}`, 503},
+		{"missing acknowledgment", "/disconnect", `{}`, 200},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			defer server.Close()
+			transport := NewHTTPTransport(Identity{Password: "synthetic", DataPlaneEndpoints: HubDataPlaneEndpoints{HTTPS: server.URL}})
+			transport.HTTPClient = server.Client()
+			_, err := transport.request(context.Background(), http.MethodPost, tc.path, nil)
+			if err == nil {
+				t.Fatal("ambiguous/refused cleanup was accepted")
+			}
+			if strings.Contains(err.Error(), "arbitrary-refusal-must-stay-private") {
+				t.Fatal("response body leaked into error")
+			}
+		})
 	}
 }
