@@ -546,6 +546,9 @@ func serveNoiseMQTT(conn net.Conn, responder *transportResponder, topics MqttTop
 		}
 		switch p := packet.(type) {
 		case *packets.ConnectPacket:
+			if strings.Contains(p.ClientIdentifier, "test-access") {
+				return fmt.Errorf("access key leaked in broker client ID")
+			}
 			if p.Username != "broker-user" || string(p.Password) != "broker-password" {
 				return fmt.Errorf("wrong broker credentials")
 			}
@@ -687,5 +690,39 @@ func TestWSSNoiseRejectsPreHandshakeBusAndDecodesAuthenticatedBinary(t *testing.
 		}
 	default:
 		t.Fatal("authenticated binary event discarded")
+	}
+}
+
+func TestHTTPNoiseRefusesAdmissionRedirects(t *testing.T) {
+	for _, downgrade := range []bool{false, true} {
+		t.Run(fmt.Sprint(downgrade), func(t *testing.T) {
+			var contacted bool
+			handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				contacted = true
+				_ = json.NewEncoder(w).Encode(map[string]any{"status": "Connected"})
+			})
+			var target *httptest.Server
+			if downgrade {
+				target = httptest.NewServer(handler)
+			} else {
+				target = httptest.NewTLSServer(handler)
+			}
+			defer target.Close()
+			source := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+			}))
+			defer source.Close()
+			transport := NewHTTPTransport(Identity{AccessKey: "test-access", Password: "test-password", DefaultMaster: source.URL, DataPlaneEndpoints: HubDataPlaneEndpoints{HTTPS: source.URL}})
+			transport.HTTPClient = source.Client()
+			if err := transport.Connect(context.Background()); err == nil {
+				t.Fatal("redirect accepted")
+			}
+			if contacted {
+				t.Fatal("redirect destination received an SDK request")
+			}
+			if transport.Healthcheck().HandshakeComplete {
+				t.Fatal("redirect marked ready")
+			}
+		})
 	}
 }

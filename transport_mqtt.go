@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -83,12 +82,9 @@ func (t *MQTTTransport) Connect(ctx context.Context) (err error) {
 	}
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(brokerURL)
-	// The data-plane access key is the MQTT client ID (here) and a topic segment
-	// (see mqtt_topics.go). This is a protocol-mandated exposure: the broker
-	// keys ACLs and session state off these identifiers, so the key travels in
-	// the clear over the connection by design. safeMQTTClientID does NOT mask it
-	// (it preserves base64url characters); do not assume this value is redacted.
-	opts.SetClientID("thalovant-" + safeMQTTClientID(t.Identity.AccessKey))
+	// Broker authentication and ACLs use the per-client credentials/topics.
+	// Keep the broker's connection identifier independent of the access key.
+	opts.SetClientID("thalovant-" + NewSessionID())
 	opts.SetUsername(t.Identity.MQTT.Username)
 	opts.SetPassword(t.Identity.MQTT.Password)
 	opts.SetCleanSession(true)
@@ -419,28 +415,4 @@ func (t *MQTTTransport) failConnection(err error) {
 	t.lastError = err
 	t.connection.fail(time.Now(), err)
 	t.mu.Unlock()
-}
-
-// safeMQTTClientID sanitizes value into an MQTT-safe client ID. It preserves
-// base64url characters (letters, digits, '_' and '-'), which are exactly the
-// characters a data-plane access key uses, so it does NOT mask the key -- it
-// only replaces broker-illegal characters and bounds the length. The access key
-// appearing in the client ID is a protocol-mandated exposure (the broker keys
-// session state and ACLs off it), not an accident to be redacted.
-func safeMQTTClientID(value string) string {
-	var builder strings.Builder
-	for _, char := range value {
-		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '_' || char == '-' {
-			builder.WriteRune(char)
-		} else {
-			builder.WriteRune('-')
-		}
-		if builder.Len() >= 48 {
-			break
-		}
-	}
-	if builder.Len() == 0 {
-		return NewSessionID()
-	}
-	return builder.String()
 }

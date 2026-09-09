@@ -510,6 +510,10 @@ binary payloads after its initial cleartext HELLO and Noise exchange. TLS remain
 required on HTTP and MQTT because the access key and broker credentials also
 need protection. `MQTTTransport.TLSConfig` can supply private CA roots.
 
+MQTT uses an opaque random broker connection ID; the access key still appears
+in the protocol-required topic paths. Use a distinct identity per simultaneous
+client because the hub keys its Noise sessions by identity.
+
 A broker disconnect invalidates MQTT readiness. Call `Connect` again to
 resubscribe and negotiate a fresh Noise session; Paho's automatic connection
 resumption is disabled because it would retain stale encryption counters.

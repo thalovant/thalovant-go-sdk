@@ -141,6 +141,9 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 	// Never mutate the caller's client or a process-global default. Keep the jar
 	// across requests and reconnects for the HTTP plugin's replica affinity cookie.
 	copyClient := *client
+	// Identity authorization and encrypted form traffic are bound to this
+	// endpoint; never let a redirect move credentials or downgrade TLS.
+	copyClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
 	if copyClient.Jar == nil {
 		copyClient.Jar, err = cookiejar.New(nil)
 		if err != nil {
