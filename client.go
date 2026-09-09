@@ -338,7 +338,8 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 	var hardFailure, softFailure *Event
 	var settling *time.Timer
 	var settled <-chan time.Time
-	phaseComplete := false
+	emptyStarted := false
+	settleStarted := false
 	schedule := func(delay time.Duration) {
 		if settling != nil {
 			settling.Stop()
@@ -352,6 +353,12 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 		}
 	}()
 	finish := func() (Reply, error) {
+		if err := ctx.Err(); err == context.Canceled {
+			return Reply{}, fmt.Errorf("%w: %w", ErrTimeout, err)
+		}
+		if err := sub.Err(); err != nil {
+			return Reply{}, subscriptionError(err)
+		}
 		failure := hardFailure
 		if failure == nil && len(fragments) == 0 {
 			failure = softFailure
@@ -360,19 +367,30 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 			return Reply{}, fmt.Errorf("%w: %s", ErrRuntime, failure.Name)
 		}
 		if len(fragments) == 0 {
+			if err := ctx.Err(); err != nil {
+				return Reply{}, fmt.Errorf("%w: %w", ErrTimeout, err)
+			}
 			return Reply{}, fmt.Errorf("%w: hub finished without a speak reply", ErrTimeout)
 		}
-		return Reply{Text: strings.Join(fragments, " "), Utterances: fragments, Handled: failure == nil, OK: failure == nil, SessionID: SessionIDFromContext(eventContext), RequestID: requestID, Events: events, FailureEvent: failure}, nil
+		sessionID := SessionIDFromContext(eventContext)
+		for _, event := range events {
+			if id := event.SessionID(); id != "" {
+				sessionID = id
+				break
+			}
+		}
+		return Reply{Text: strings.Join(fragments, " "), Utterances: fragments, Handled: failure == nil, OK: failure == nil, SessionID: sessionID, RequestID: requestID, Events: events, FailureEvent: failure}, nil
 	}
 	accept := func(event Event) bool {
-		if !EventMatchesContext(event, eventContext) {
+		if event.RequestID() != requestID {
 			return false
 		}
 		events = append(events, event)
 		switch event.Name {
 		case EventSpeak, EventOvosUtteranceSpeak:
 			appendFragment(&fragments, event.Text())
-			if phaseComplete && len(fragments) > 0 {
+			if !settleStarted && len(fragments) > 0 {
+				settleStarted = true
 				schedule(settleWait)
 			}
 		case EventPolicyDenied, EventQueryTimeout:
@@ -380,48 +398,69 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 			return true
 		case EventIntentUnmatched, EventIntentFailure:
 			softFailure = &event
-			if !phaseComplete {
-				phaseComplete = true
-				if len(fragments) > 0 {
-					schedule(settleWait)
-				} else {
-					schedule(emptyWait)
-				}
+			if !emptyStarted && !settleStarted {
+				emptyStarted = true
+				schedule(emptyWait)
 			}
 		case EventUtteranceHandled:
-			if !phaseComplete {
-				phaseComplete = true
-				if len(fragments) > 0 {
-					schedule(settleWait)
-				} else {
-					schedule(emptyWait)
-				}
+			if !emptyStarted && !settleStarted {
+				emptyStarted = true
+				schedule(emptyWait)
 			}
 		}
 		return false
 	}
-	if err := c.Emit(ctx, EventRecognizerLoopUtterance, UtterancePayload(prompt, lang), eventContext); err != nil {
-		return Reply{}, err
+	// The collector remains active while an admitted send retires. runOwned
+	// retains transport ownership even when this caller has already finished.
+	sendResult := make(chan error, 1)
+	go func() {
+		sendResult <- c.Emit(ctx, EventRecognizerLoopUtterance, UtterancePayload(prompt, lang), eventContext)
+	}()
+	drain := func() error {
+		// Snapshot the backlog so a continuing producer cannot postpone a
+		// deadline indefinitely. Stop at the first hard terminal event.
+		for queued := len(sub.C); queued > 0; queued-- {
+			select {
+			case event, open := <-sub.C:
+				if !open {
+					return subscriptionError(sub.Err())
+				}
+				if accept(event) {
+					return nil
+				}
+			default:
+				return nil
+			}
+		}
+		return nil
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			return Reply{}, fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
-		case <-settled:
-			// Consume the backlog observed at settlement. Snapshot its size so
-			// an ongoing producer cannot keep the deadline branch busy forever.
-			for queued := len(sub.C); queued > 0; queued-- {
-				select {
-				case event, open := <-sub.C:
-					if !open {
-						return Reply{}, subscriptionError(sub.Err())
-					}
-					if accept(event) {
-						return finish()
-					}
-				default:
-					queued = 0
+			if ctx.Err() == context.Canceled {
+				return Reply{}, fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+			}
+			if err := drain(); err != nil {
+				return Reply{}, err
+			}
+			return finish()
+		case err := <-sendResult:
+			sendResult = nil
+			if err != nil {
+				if ctx.Err() == context.Canceled {
+					return Reply{}, err
 				}
+				if drainErr := drain(); drainErr != nil {
+					return Reply{}, drainErr
+				}
+				if hardFailure != nil || ctx.Err() == context.DeadlineExceeded {
+					return finish()
+				}
+				return Reply{}, err
+			}
+		case <-settled:
+			if err := drain(); err != nil {
+				return Reply{}, err
 			}
 			return finish()
 		case event, open := <-sub.C:
@@ -472,7 +511,7 @@ func (c *Client) Query(ctx context.Context, text string, opts QueryOptions) (Rep
 	}
 	events := []Event{}
 	fragments := []string{}
-	var failure *Event
+	var failure, softFailure *Event
 	sub := subscribeHiveMessages(transport)
 	defer sub.Close()
 	messages := sub.C
@@ -486,65 +525,112 @@ func (c *Client) Query(ctx context.Context, text string, opts QueryOptions) (Rep
 		Metadata: map[string]any{},
 		Route:    []any{},
 	}
-	if err := c.runOwned(queryCtx, true, func() error {
-		return transport.SendHiveMessage(queryCtx, HiveMessage{
-			MsgType:  "query",
-			Payload:  hiveMessagePayload(inner),
-			Metadata: map[string]any{"query_id": queryID},
-			Route:    []any{},
-		}, true)
-	}); err != nil {
-		return Reply{}, err
+	sendResult := make(chan error, 1)
+	go func() {
+		sendResult <- c.runOwned(queryCtx, true, func() error {
+			return transport.SendHiveMessage(queryCtx, HiveMessage{
+				MsgType:  "query",
+				Payload:  hiveMessagePayload(inner),
+				Metadata: map[string]any{"query_id": queryID},
+				Route:    []any{},
+			}, true)
+		})
+	}()
+	finish := func() (Reply, error) {
+		if err := queryCtx.Err(); err == context.Canceled {
+			return Reply{}, fmt.Errorf("%w: %w", ErrTimeout, err)
+		}
+		if err := sub.Err(); err != nil {
+			return Reply{}, subscriptionError(err)
+		}
+		if failure == nil && len(fragments) == 0 {
+			failure = softFailure
+		}
+		if failure != nil && len(fragments) == 0 {
+			return Reply{}, fmt.Errorf("%w: %s", ErrRuntime, failure.Name)
+		}
+		if len(fragments) == 0 {
+			return Reply{}, fmt.Errorf("%w: hub finished the query without a speak reply", ErrTimeout)
+		}
+		return Reply{
+			Text:         strings.Join(fragments, " "),
+			Utterances:   fragments,
+			Handled:      failure == nil,
+			OK:           failure == nil,
+			SessionID:    SessionIDFromContext(eventContext),
+			RequestID:    requestID,
+			Events:       events,
+			FailureEvent: failure,
+		}, nil
+	}
+	accept := func(message HiveMessage) bool {
+		if queryIDFromHiveMessage(message) != queryID {
+			return false
+		}
+		event, ok := eventFromQueryHiveMessage(message)
+		if !ok {
+			return false
+		}
+		events = append(events, event)
+		if event.Name == "hive.query.complete" {
+			return true
+		}
+		switch event.Name {
+		case EventSpeak, EventOvosUtteranceSpeak:
+			appendFragment(&fragments, event.Text())
+		case EventIntentUnmatched, EventIntentFailure:
+			softFailure = &event
+		case EventPolicyDenied, EventQueryTimeout:
+			failure = &event
+			return true
+		}
+		return false
+	}
+	drain := func() (bool, error) {
+		for queued := len(messages); queued > 0; queued-- {
+			select {
+			case message, open := <-messages:
+				if !open {
+					return false, subscriptionError(sub.Err())
+				}
+				if accept(message) {
+					return true, nil
+				}
+			default:
+				return false, nil
+			}
+		}
+		return false, nil
 	}
 	for {
 		select {
 		case <-queryCtx.Done():
+			if queryCtx.Err() != context.Canceled {
+				if terminal, err := drain(); err != nil {
+					return Reply{}, err
+				} else if terminal {
+					return finish()
+				}
+			}
 			return Reply{}, fmt.Errorf("%w: %w", ErrTimeout, queryCtx.Err())
+		case err := <-sendResult:
+			sendResult = nil
+			if err != nil {
+				if queryCtx.Err() != context.Canceled {
+					if terminal, drainErr := drain(); drainErr != nil {
+						return Reply{}, drainErr
+					} else if terminal {
+						return finish()
+					}
+				}
+				return Reply{}, err
+			}
 		case message, open := <-messages:
 			if !open {
 				return Reply{}, subscriptionError(sub.Err())
 			}
-			if queryIDFromHiveMessage(message) != queryID {
-				continue
-			}
-			event, ok := eventFromQueryHiveMessage(message)
-			if !ok {
-				continue
-			}
-			events = append(events, event)
-			if event.Name == "hive.query.complete" {
-				if failure != nil && len(fragments) == 0 {
-					return Reply{}, fmt.Errorf("%w: %s", ErrRuntime, failure.Name)
-				}
-				if len(fragments) == 0 {
-					return Reply{}, fmt.Errorf("%w: hub finished the query without a speak reply", ErrTimeout)
-				}
-				return Reply{
-					Text:         strings.Join(fragments, " "),
-					Utterances:   fragments,
-					Handled:      failure == nil,
-					OK:           failure == nil,
-					SessionID:    SessionIDFromContext(eventContext),
-					RequestID:    requestID,
-					Events:       events,
-					FailureEvent: failure,
-				}, nil
-			}
-			switch event.Name {
-			case EventSpeak, EventOvosUtteranceSpeak:
-				if strings.TrimSpace(event.Text()) != "" {
-					appendFragment(&fragments, event.Text())
-					if failure != nil && (failure.Name == EventIntentUnmatched || failure.Name == EventIntentFailure) {
-						failure = nil
-					}
-				}
-			case EventIntentUnmatched, EventIntentFailure:
-				failure = &event
-			case EventPolicyDenied, EventQueryTimeout:
-				failure = &event
-				if len(fragments) == 0 {
-					return Reply{}, fmt.Errorf("%w: %s", ErrRuntime, event.Name)
-				}
+			if accept(message) {
+				return finish()
 			}
 		}
 	}

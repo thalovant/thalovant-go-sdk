@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.1
+
+- Start Ask settlement on the first nonempty speech, keep fixed empty/settlement windows within the original deadline, and return collected speech at that deadline.
+- Collect replies while an admitted send retires, retaining transport cleanup ownership and never replaying application requests.
+- Freeze Query immediately on policy denial or explicit query timeout; a soft intent miss cannot invalidate speech already collected.
+- Require the matching request ID for Ask, accept runtime-replaced session IDs, and reject unrelated or uncorrelated ambient replies.
+- Add race-tested regressions for fixed settlement, deadline-clipped speech, hard terminal replies during suspended sends, cleanup ownership, and soft-failure recovery.
+
 ## 0.5.0
 
 - Require Go 1.26 or newer and use patched `golang.org/x/crypto` 0.56.0.
