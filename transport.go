@@ -66,6 +66,7 @@ type RuntimeTransport interface {
 }
 
 type HTTPTransport struct {
+	streams      runtimeStreams
 	Identity     Identity
 	UserAgent    string
 	PollInterval time.Duration
@@ -73,8 +74,8 @@ type HTTPTransport struct {
 	// NoiseStateDir selects the persistent client key and hub pin directory.
 	NoiseStateDir string
 	noise         *noiseChannel
-	pollMu        sync.Mutex
-	lifecycleMu   sync.Mutex
+	pollMu        contextMutex
+	lifecycleMu   contextMutex
 	pollDone      chan struct{}
 	BusEvents     chan Event
 	HiveEvents    chan HiveMessage
@@ -119,21 +120,44 @@ func (t *HTTPTransport) Authorization() string {
 }
 
 func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
-	t.lifecycleMu.Lock()
+	ctx, cancelConnect := context.WithTimeout(ctx, 20*time.Second)
+	defer cancelConnect()
+	if err := t.lifecycleMu.Lock(ctx); err != nil {
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
+	}
 	defer t.lifecycleMu.Unlock()
-	t.stopPolling()
-	t.pollMu.Lock()
+	// Join any manually driven poll before deciding this session is reusable.
+	if err := t.pollMu.Lock(ctx); err != nil {
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
+	}
+	health := t.Healthcheck()
+	t.pollMu.Unlock()
+	if health.Connected && health.HandshakeComplete {
+		return nil
+	}
+	if err := t.stopPolling(ctx); err != nil {
+		return err
+	}
+	if err := t.pollMu.Lock(ctx); err != nil {
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
+	}
 	defer t.pollMu.Unlock()
 	t.mu.Lock()
 	admitted := t.admitted
-	t.admitted = false
 	t.mu.Unlock()
 	if admitted {
 		// The HTTP plugin only offers a fresh handshake for an unregistered peer.
 		// Reset this object's own previous admission before renewing its session.
 		cleanupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-		_, _ = t.request(cleanupCtx, http.MethodPost, "/disconnect", nil)
+		_, cleanupErr := t.request(cleanupCtx, http.MethodPost, "/disconnect", nil)
 		cancel()
+		if cleanupErr != nil {
+			t.failConnection(cleanupErr)
+			return cleanupErr
+		}
+		t.mu.Lock()
+		t.admitted = false
+		t.mu.Unlock()
 	}
 	t.invalidateNoise()
 	t.beginConnection()
@@ -180,12 +204,14 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 	t.mu.Unlock()
 	defer func() {
 		if err != nil {
-			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 2*time.Second)
 			defer cleanupCancel()
-			_, _ = t.request(cleanupCtx, http.MethodPost, "/disconnect", nil)
-			t.mu.Lock()
-			t.admitted = false
-			t.mu.Unlock()
+			_, cleanupErr := t.request(cleanupCtx, http.MethodPost, "/disconnect", nil)
+			if cleanupErr == nil {
+				t.mu.Lock()
+				t.admitted = false
+				t.mu.Unlock()
+			}
 		}
 	}()
 	for !t.IsHandshakeComplete() {
@@ -211,38 +237,72 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 
 // stopPolling joins the old reader before replacing a channel, preventing a
 // previous connection's delayed poll from consuming a new session's counters.
-func (t *HTTPTransport) stopPolling() {
+func (t *HTTPTransport) stopPolling(ctx context.Context) error {
 	if t.cancelPolling != nil {
 		t.cancelPolling()
 		t.cancelPolling = nil
 	}
 	if t.pollDone != nil {
-		<-t.pollDone
-		t.pollDone = nil
+		select {
+		case <-t.pollDone:
+			t.pollDone = nil
+		case <-ctx.Done():
+			return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+		}
 	}
+	return nil
 }
 
+// Disconnect bounds the caller while retaining teardown ownership until old
+// readers retire. Only an acknowledged remote reset clears admission.
 func (t *HTTPTransport) Disconnect(ctx context.Context) error {
-	t.lifecycleMu.Lock()
-	defer t.lifecycleMu.Unlock()
-	t.stopPolling()
-	t.pollMu.Lock()
-	defer t.pollMu.Unlock()
-	t.invalidateNoise()
-	t.mu.Lock()
-	admitted := t.admitted
-	t.admitted = false
-	t.mu.Unlock()
-	var err error
-	if admitted {
-		_, err = t.request(ctx, http.MethodPost, "/disconnect", nil)
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := t.lifecycleMu.Lock(ctx); err != nil {
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	t.mu.Lock()
-	t.connected, t.handshake, t.admitted = false, false, false
-	t.noise = nil
+	t.connected, t.handshake = false, false
 	t.connection.close()
 	t.mu.Unlock()
-	return err
+	result := make(chan error, 1)
+	go func() {
+		defer t.lifecycleMu.Unlock()
+		// The caller may leave, but a replacement connection must not race a
+		// stale poll. A custom HTTP client that ignores cancellation keeps this
+		// worker's ownership until its actual operation returns.
+		_ = t.stopPolling(context.Background())
+		_ = t.pollMu.Lock(context.Background())
+		defer t.pollMu.Unlock()
+		t.invalidateNoise()
+		t.mu.RLock()
+		admitted := t.admitted
+		t.mu.RUnlock()
+		var err error
+		if admitted {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_, err = t.request(cleanupCtx, http.MethodPost, "/disconnect", nil)
+			cleanupCancel()
+		}
+		t.mu.Lock()
+		t.connected, t.handshake = false, false
+		if err == nil {
+			t.admitted = false
+		}
+		t.noise = nil
+		t.connection.close()
+		t.mu.Unlock()
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+		}
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+	}
 }
 
 func (t *HTTPTransport) invalidateNoise() {
@@ -335,7 +395,11 @@ func (t *HTTPTransport) pollLoop(ctx context.Context) {
 }
 
 func (t *HTTPTransport) PollOnce(ctx context.Context) error {
-	t.pollMu.Lock()
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if err := t.pollMu.Lock(ctx); err != nil {
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
+	}
 	defer t.pollMu.Unlock()
 	return t.pollOnceLocked(ctx)
 }
@@ -425,17 +489,20 @@ func (t *HTTPTransport) dispatch(message *HiveMessage) {
 	if message == nil {
 		return
 	}
-	dispatchNoiseMessage(t.BusEvents, t.HiveEvents, *message)
+	dispatchNoiseMessage(t.BusEvents, t.HiveEvents, *message, &t.streams)
 }
 
-func dispatchNoiseMessage(bus chan Event, hive chan HiveMessage, message HiveMessage) {
+func dispatchNoiseMessage(bus chan Event, hive chan HiveMessage, message HiveMessage, streams *runtimeStreams) {
 	switch message.MsgType {
 	case "bus":
+		event := Event{Name: fmt.Sprint(message.Payload["type"]), Data: mapValue(message.Payload["data"]), Context: mapValue(message.Payload["context"]), Raw: message}
+		streams.bus.publish(event)
 		select {
-		case bus <- Event{Name: fmt.Sprint(message.Payload["type"]), Data: mapValue(message.Payload["data"]), Context: mapValue(message.Payload["context"]), Raw: message}:
+		case bus <- event:
 		default:
 		}
 	case "query", "cascade":
+		streams.hive.publish(message)
 		select {
 		case hive <- message:
 		default:
@@ -552,7 +619,11 @@ func elapsedMS(start time.Time, end time.Time) float64 {
 }
 
 func (t *HTTPTransport) sendHiveMessage(ctx context.Context, message HiveMessage, _ bool) error {
-	t.lifecycleMu.Lock()
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if err := t.lifecycleMu.Lock(ctx); err != nil {
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
+	}
 	defer t.lifecycleMu.Unlock()
 	t.mu.RLock()
 	channel := t.noise

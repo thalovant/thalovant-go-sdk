@@ -848,7 +848,7 @@ func TestADescribeTheHubDoesNotKnowStaysAnEmptyAnswer(t *testing.T) {
 func TestASilentHubTimesOutOnTheListing(t *testing.T) {
 	hub := newIntentHub()
 	hub.silent[EventIntentList] = true
-	_, err := intentClient(hub).Intents(context.Background(), []string{"en-us"}, IntentOptions{Timeout: 200 * time.Millisecond})
+	_, err := intentClient(hub).Intents(context.Background(), []string{"en-us"}, IntentOptions{Timeout: 200 * time.Millisecond, Fallback: boolPointer(false)})
 
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("expected a timeout, got %v", err)

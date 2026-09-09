@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/url"
 	"sync"
 	"time"
@@ -15,6 +16,7 @@ import (
 )
 
 type WSSTransport struct {
+	streams   runtimeStreams
 	Identity  Identity
 	UserAgent string
 
@@ -31,7 +33,9 @@ type WSSTransport struct {
 	connection     connectionTelemetry
 	handshakeReady chan struct{}
 	readDone       chan struct{}
-	writeMu        sync.Mutex
+	writeMu        contextMutex
+	receiveMu      sync.Mutex
+	attempt        *wssConnectionAttempt
 	mu             sync.RWMutex
 
 	// generation identifies one connection attempt. Disconnect does not wait
@@ -69,99 +73,154 @@ func NewWSSTransport(identity Identity) *WSSTransport {
 	}
 }
 
+type wssConnectionAttempt struct {
+	done   chan struct{}
+	cancel context.CancelFunc
+	err    error
+}
+
+type wssGenerationKey struct{}
+
 func (t *WSSTransport) Connect(ctx context.Context) error {
-	t.beginConnection()
-	endpoint := t.Identity.EndpointFor(ProtocolWSS)
-	if endpoint == "" {
-		err := fmt.Errorf("%w: identity does not include a WSS endpoint", ErrProtocol)
-		t.failConnection(err)
-		return err
-	}
-	if t.Identity.Password == "" {
-		err := fmt.Errorf("%w: the v3 Noise handshake needs the identity password", ErrIdentity)
-		t.failConnection(err)
-		return err
-	}
-	url, err := authorizedWSSURL(endpoint, t.Authorization())
-	if err != nil {
-		t.failConnection(err)
-		return err
-	}
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, url, nil)
-	if err != nil {
-		// The dial URL carries the access key in its ?authorization= query.
-		// gorilla does not put the URL in its dial errors today -- refused,
-		// DNS, bad-scheme and TLS failures all come back as a plain net error
-		// -- so this is defence rather than a fix: scrubTransportError is a
-		// no-op unless the error is a *url.Error, and it costs nothing to keep
-		// the guarantee independent of the library's error shape.
-		wrapped := fmt.Errorf("%w: %v", ErrConnection, scrubTransportError(err))
-		t.failConnection(wrapped)
-		return wrapped
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	t.mu.Lock()
-	t.conn = conn
-	t.connected = true
-	t.connection.markOpen(time.Now(), true)
-	ready := t.handshakeReady
-	closed := t.readDone
+	if t.connected && t.handshake && t.conn != nil {
+		t.mu.Unlock()
+		return nil
+	}
+	if pending := t.attempt; pending != nil {
+		t.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+		case <-pending.done:
+			if ctx.Err() != nil {
+				return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+			}
+			return pending.err
+		}
+	}
+	owned, cancel := context.WithTimeout(ctx, 20*time.Second)
+	pending := &wssConnectionAttempt{done: make(chan struct{}), cancel: cancel}
+	t.attempt = pending
+	old := t.beginConnectionLocked()
 	generation := t.generation
 	t.mu.Unlock()
-	go t.readLoop(context.Background(), conn, generation)
+	if old != nil {
+		_ = old.Close()
+	}
+	err := t.connectGeneration(owned, generation)
+	cancel()
+	t.mu.Lock()
+	pending.err = err
+	if t.attempt == pending {
+		t.attempt = nil
+	}
+	close(pending.done)
+	t.mu.Unlock()
+	return err
+}
 
-	// The handshake runs argon2id at 64 MiB on first contact with a hub, which
-	// takes a few hundred milliseconds on top of the round trips.
-	timer := time.NewTimer(20 * time.Second)
-	defer timer.Stop()
+func (t *WSSTransport) connectGeneration(ctx context.Context, generation uint64) (result error) {
+	var conn *websocket.Conn
+	defer func() {
+		if result != nil {
+			t.poisonGeneration(generation, conn, result)
+		}
+	}()
+	endpoint := t.Identity.EndpointFor(ProtocolWSS)
+	if endpoint == "" {
+		return fmt.Errorf("%w: identity does not include a WSS endpoint", ErrProtocol)
+	}
+	if t.Identity.Password == "" {
+		return fmt.Errorf("%w: the v3 Noise handshake needs the identity password", ErrIdentity)
+	}
+	endpointURL, err := authorizedWSSURL(endpoint, t.Authorization())
+	if err != nil {
+		return err
+	}
+	conn, _, err = websocket.DefaultDialer.DialContext(ctx, endpointURL, nil)
+	if err != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+		}
+		return fmt.Errorf("%w: %v", ErrConnection, scrubTransportError(err))
+	}
+	t.mu.Lock()
+	if t.generation != generation || ctx.Err() != nil {
+		t.mu.Unlock()
+		_ = conn.Close()
+		return fmt.Errorf("%w: connection retired during dial", ErrConnection)
+	}
+	t.conn, t.connected = conn, true
+	t.connection.markOpen(time.Now(), true)
+	ready, closed := t.handshakeReady, t.readDone
+	t.mu.Unlock()
+	go t.readLoop(context.Background(), conn, generation)
 	select {
-	case <-ready:
-		t.completeConnection()
-		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
 	case <-closed:
-		// The socket went before the handshake finished. Report why -- a hub
-		// that refuses the handshake closes with 1008, and reporting that as a
-		// timeout would hide a wrong password behind a twenty second wait.
-		_ = t.Disconnect(ctx)
 		t.mu.RLock()
 		cause := t.lastError
 		t.mu.RUnlock()
-		if cause == nil {
-			cause = fmt.Errorf("the hub closed the connection during the v3 Noise handshake")
+		return fmt.Errorf("%w: v3 Noise handshake did not complete: %v", ErrConnection, cause)
+	case <-ready:
+		t.mu.Lock()
+		defer t.mu.Unlock()
+		if ctx.Err() != nil {
+			return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
 		}
-		err := fmt.Errorf("%w: v3 Noise handshake did not complete: %v", ErrConnection, cause)
-		t.failConnection(err)
-		return err
-	case <-ctx.Done():
-		_ = t.Disconnect(ctx)
-		err := fmt.Errorf("%w: %v", ErrTimeout, ctx.Err())
-		t.failConnection(err)
-		return err
-	case <-timer.C:
-		_ = t.Disconnect(ctx)
-		err := fmt.Errorf("%w: HiveMind WSS handshake timed out", ErrTimeout)
-		t.failConnection(err)
-		return err
+		if t.generation != generation || t.conn != conn || !t.connected || !t.handshake {
+			return fmt.Errorf("%w: connection retired before authenticated readiness", ErrConnection)
+		}
+		t.connection.complete(time.Now())
+		return nil
 	}
 }
 
 func (t *WSSTransport) Disconnect(_ context.Context) error {
-	// Capture and clear under one lock, then close outside it: reading t.conn
-	// unlocked races a concurrent Connect or Disconnect.
 	t.mu.Lock()
 	conn := t.conn
-	t.conn = nil
-	t.connected = false
-	t.handshake = false
-	t.session = nil
-	t.noiseHandshake = nil
-	t.serverHello = nil
-	t.nodeID = ""
+	pending := t.attempt
+	t.generation++
+	t.conn, t.connected, t.handshake = nil, false, false
+	t.session, t.noiseHandshake, t.serverHello, t.nodeID = nil, nil, nil, ""
 	t.connection.close()
 	t.mu.Unlock()
+	if pending != nil {
+		pending.cancel()
+	}
 	if conn != nil {
 		_ = conn.Close()
 	}
 	return nil
+}
+
+// Retire only the captured socket and generation, never a replacement session.
+func (t *WSSTransport) poisonGeneration(generation uint64, conn *websocket.Conn, err error) {
+	t.mu.Lock()
+	if t.generation == generation && (conn == nil || t.conn == conn) {
+		t.connected, t.handshake, t.conn = false, false, nil
+		t.session, t.noiseHandshake, t.serverHello, t.nodeID = nil, nil, nil, ""
+		t.lastError = err
+		t.connection.fail(time.Now(), err)
+	}
+	t.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+}
+
+func (t *WSSTransport) generationCurrentLocked(ctx context.Context) bool {
+	generation, scoped := ctx.Value(wssGenerationKey{}).(uint64)
+	return !scoped || generation == t.generation && t.connected && t.conn != nil
+}
+
+func staleWSSGeneration() error {
+	return fmt.Errorf("%w: stale WebSocket connection generation", ErrConnection)
 }
 
 func (t *WSSTransport) Healthcheck() TransportHealth {
@@ -223,6 +282,7 @@ func (t *WSSTransport) IsHandshakeComplete() bool {
 }
 
 func (t *WSSTransport) readLoop(ctx context.Context, conn *websocket.Conn, generation uint64) {
+	ctx = context.WithValue(ctx, wssGenerationKey{}, generation)
 	defer t.signalReadDone(generation)
 	for {
 		select {
@@ -247,7 +307,13 @@ func (t *WSSTransport) readLoop(ctx context.Context, conn *websocket.Conn, gener
 }
 
 func (t *WSSTransport) handleRawMessage(ctx context.Context, raw []byte) error {
+	t.receiveMu.Lock()
+	defer t.receiveMu.Unlock()
 	t.mu.RLock()
+	if !t.generationCurrentLocked(ctx) {
+		t.mu.RUnlock()
+		return staleWSSGeneration()
+	}
 	session := t.session
 	t.mu.RUnlock()
 
@@ -281,7 +347,7 @@ func (t *WSSTransport) handleRawMessage(ctx context.Context, raw []byte) error {
 
 	switch msgType {
 	case "hello":
-		return t.handleHello(payload)
+		return t.handleHelloGeneration(ctx, payload)
 	case "handshake", "shake":
 		return t.handleHandshake(ctx, payload)
 	}
@@ -293,29 +359,25 @@ func (t *WSSTransport) handleRawMessage(ctx context.Context, raw []byte) error {
 	if err := json.Unmarshal(raw, &message); err != nil {
 		return err
 	}
-	switch message.MsgType {
-	case "bus":
-		t.BusEvents <- Event{
-			Name:    fmt.Sprint(message.Payload["type"]),
-			Data:    mapValue(message.Payload["data"]),
-			Context: mapValue(message.Payload["context"]),
-			Raw:     message,
-		}
-	case "query", "cascade":
-		select {
-		case t.HiveEvents <- message:
-		default:
-		}
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if !t.generationCurrentLocked(ctx) {
+		return staleWSSGeneration()
 	}
+	dispatchNoiseMessage(t.BusEvents, t.HiveEvents, message, &t.streams)
 	return nil
 }
 
-// handleHello records the server's cleartext HELLO. Both its payload and the
-// parameter HANDSHAKE payload are bound into the Noise prologue, so it has to
-// be kept verbatim rather than read for the node id alone.
-func (t *WSSTransport) handleHello(payload map[string]any) error {
+// handleHelloGeneration records the server's cleartext HELLO. Both its payload
+// and the parameter HANDSHAKE payload are bound into the Noise prologue, so it
+// has to be kept verbatim rather than read for the node id alone.
+func (t *WSSTransport) handleHelloGeneration(ctx context.Context, payload map[string]any) error {
 	nodeID, _ := payload["node_id"].(string)
 	t.mu.Lock()
+	if !t.generationCurrentLocked(ctx) {
+		t.mu.Unlock()
+		return staleWSSGeneration()
+	}
 	if t.session == nil && t.serverHello == nil {
 		t.serverHello = payload
 		t.nodeID = nodeID
@@ -339,6 +401,14 @@ func (t *WSSTransport) handleHandshake(ctx context.Context, payload map[string]a
 // the prologue, and sends Noise message 1.
 func (t *WSSTransport) startNoiseHandshake(ctx context.Context, handshakePayload, noiseParams map[string]any) error {
 	t.mu.RLock()
+	if !t.generationCurrentLocked(ctx) {
+		t.mu.RUnlock()
+		return staleWSSGeneration()
+	}
+	if t.session != nil || t.noiseHandshake != nil {
+		t.mu.RUnlock()
+		return fmt.Errorf("%w: duplicate Noise negotiation", ErrConnection)
+	}
 	serverHello, nodeID := t.serverHello, t.nodeID
 	t.mu.RUnlock()
 
@@ -369,7 +439,11 @@ func (t *WSSTransport) startNoiseHandshake(ctx context.Context, handshakePayload
 	if err != nil {
 		return err
 	}
-	handshake, err := newNoiseHandshake(pattern, suite, t.pskFor(nodeID), prologue, staticKey, pinned)
+	psk, err := t.pskForGeneration(ctx, nodeID)
+	if err != nil {
+		return err
+	}
+	handshake, err := newNoiseHandshake(pattern, suite, psk, prologue, staticKey, pinned)
 	if err != nil {
 		return err
 	}
@@ -389,6 +463,10 @@ func (t *WSSTransport) startNoiseHandshake(ctx context.Context, handshakePayload
 	}
 
 	t.mu.Lock()
+	if !t.generationCurrentLocked(ctx) {
+		t.mu.Unlock()
+		return staleWSSGeneration()
+	}
 	t.noiseHandshake = handshake
 	t.mu.Unlock()
 
@@ -408,6 +486,10 @@ func (t *WSSTransport) startNoiseHandshake(ctx context.Context, handshakePayload
 // message when the pattern needs one, and brings the transport up.
 func (t *WSSTransport) continueNoiseHandshake(ctx context.Context, noiseParams map[string]any) error {
 	t.mu.RLock()
+	if !t.generationCurrentLocked(ctx) {
+		t.mu.RUnlock()
+		return staleWSSGeneration()
+	}
 	handshake, nodeID := t.noiseHandshake, t.nodeID
 	t.mu.RUnlock()
 	if handshake == nil {
@@ -426,7 +508,12 @@ func (t *WSSTransport) continueNoiseHandshake(ctx context.Context, noiseParams m
 		// The PSK is the other thing this message authenticates, so a rejection
 		// may mean the stored key was derived from a password that has since
 		// been rotated. Drop it; the next attempt derives from the current one.
-		t.forgetPSK(nodeID)
+		t.mu.RLock()
+		current := t.generationCurrentLocked(ctx)
+		t.mu.RUnlock()
+		if current {
+			t.forgetPSK(nodeID)
+		}
 		return err
 	}
 	if !handshake.complete {
@@ -451,11 +538,21 @@ func (t *WSSTransport) continueNoiseHandshake(ctx context.Context, noiseParams m
 		return err
 	}
 
+	t.mu.RLock()
+	current := t.generationCurrentLocked(ctx)
+	t.mu.RUnlock()
+	if !current {
+		return staleWSSGeneration()
+	}
 	if err := t.pinServerKey(nodeID, session.remoteStaticKey); err != nil {
 		return err
 	}
 
 	t.mu.Lock()
+	if !t.generationCurrentLocked(ctx) {
+		t.mu.Unlock()
+		return staleWSSGeneration()
+	}
 	t.session = session
 	t.noiseHandshake = nil
 	t.mu.Unlock()
@@ -466,6 +563,10 @@ func (t *WSSTransport) continueNoiseHandshake(ctx context.Context, noiseParams m
 	}
 
 	t.mu.Lock()
+	if !t.generationCurrentLocked(ctx) {
+		t.mu.Unlock()
+		return staleWSSGeneration()
+	}
 	if !t.handshake {
 		t.handshake = true
 		close(t.handshakeReady)
@@ -486,16 +587,25 @@ func (t *WSSTransport) pinServerKey(nodeID, remoteStaticKey string) error {
 
 // pskFor derives (or reuses) the pre-shared key for a hub.
 func (t *WSSTransport) pskFor(nodeID string) []byte {
+	psk, _ := t.pskForGeneration(context.Background(), nodeID)
+	return psk
+}
+
+func (t *WSSTransport) pskForGeneration(ctx context.Context, nodeID string) ([]byte, error) {
 	password := t.Identity.Password
 
 	t.mu.Lock()
+	if !t.generationCurrentLocked(ctx) {
+		t.mu.Unlock()
+		return nil, staleWSSGeneration()
+	}
 	cached, sameHub := t.cachedPSK, t.cachedPSKNodeID == nodeID
 	samePassword := t.cachedPSKPassword == password
 	stateDir := t.NoiseStateDir
 	t.mu.Unlock()
 
 	if cached != nil && sameHub && samePassword {
-		return cached
+		return cached, nil
 	}
 
 	// Having already derived for this hub under a different password means the
@@ -511,14 +621,24 @@ func (t *WSSTransport) pskFor(nodeID string) []byte {
 	}
 	if psk == nil {
 		psk = derivePSK(password, nodeID)
+		t.mu.RLock()
+		current := t.generationCurrentLocked(ctx)
+		t.mu.RUnlock()
+		if !current {
+			return nil, staleWSSGeneration()
+		}
 		// Persisting is an optimisation, never a reason to fail the connection.
 		_ = SaveCachedPSK(stateDir, nodeID, psk)
 	}
 
 	t.mu.Lock()
+	if !t.generationCurrentLocked(ctx) {
+		t.mu.Unlock()
+		return nil, staleWSSGeneration()
+	}
 	t.cachedPSK, t.cachedPSKNodeID, t.cachedPSKPassword = psk, nodeID, password
 	t.mu.Unlock()
-	return psk
+	return psk, nil
 }
 
 // forgetPSK drops the cached key for a hub, in memory and on disk. The
@@ -536,46 +656,79 @@ func (t *WSSTransport) forgetPSK(nodeID string) {
 // sendCleartext writes a handshake message as a JSON text frame. Only the
 // handshake exchange itself travels this way; everything after Split() goes
 // through the Noise session.
-func (t *WSSTransport) sendCleartext(_ context.Context, message HiveMessage) error {
-	// One snapshot under the lock: readLoop calls this during the handshake
-	// while Connect's timeout branch can be running Disconnect, which sets
-	// t.conn to nil.
+func (t *WSSTransport) sendCleartext(ctx context.Context, message HiveMessage) error {
 	t.mu.RLock()
-	conn := t.conn
+	generation, conn := t.generation, t.conn
+	current := t.generationCurrentLocked(ctx)
 	t.mu.RUnlock()
-	if conn == nil {
-		return fmt.Errorf("%w: HiveMind WSS transport is not connected", ErrConnection)
+	if !current {
+		return staleWSSGeneration()
 	}
 	raw, err := json.Marshal(message)
 	if err != nil {
 		return err
 	}
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
-	return conn.WriteMessage(websocket.TextMessage, raw)
+	return t.writeGeneration(ctx, generation, conn, func() error { return conn.WriteMessage(websocket.TextMessage, raw) })
 }
 
-func (t *WSSTransport) sendHiveMessage(_ context.Context, message HiveMessage, _ bool) error {
+func (t *WSSTransport) sendHiveMessage(ctx context.Context, message HiveMessage, _ bool) error {
 	t.mu.RLock()
-	session, conn := t.session, t.conn
+	generation, session, conn := t.generation, t.session, t.conn
+	current := t.generationCurrentLocked(ctx)
+	_, scoped := ctx.Value(wssGenerationKey{}).(uint64)
+	authenticated := t.handshake || scoped && message.MsgType == "hello"
 	t.mu.RUnlock()
-	if conn == nil {
-		return fmt.Errorf("%w: HiveMind WSS transport is not connected", ErrConnection)
+	if !current {
+		return staleWSSGeneration()
 	}
-	if session == nil {
+	if session == nil || !authenticated {
 		return fmt.Errorf("%w: refusing to send before the v3 Noise session is established", ErrConnection)
 	}
 	raw, err := json.Marshal(message)
 	if err != nil {
 		return err
 	}
-	// sendMessage holds its own lock across every chunk of one message, and
-	// writeMu keeps two senders from interleaving on the socket.
-	t.writeMu.Lock()
-	defer t.writeMu.Unlock()
-	return session.sendMessage(raw, true, func(frame []byte) error {
-		return conn.WriteMessage(websocket.BinaryMessage, frame)
+	return t.writeGeneration(ctx, generation, conn, func() error {
+		return session.sendMessage(raw, true, func(frame []byte) error { return conn.WriteMessage(websocket.BinaryMessage, frame) })
 	})
+}
+
+// Cancellation while queued never advances a cipher. After admission, failed or
+// cancelled writes poison only this captured generation, because delivery is uncertain.
+func (t *WSSTransport) writeGeneration(ctx context.Context, generation uint64, conn *websocket.Conn, write func() error) error {
+	if conn == nil {
+		return fmt.Errorf("%w: HiveMind WSS transport is not connected", ErrConnection)
+	}
+	bounded, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if err := t.writeMu.Lock(bounded); err != nil {
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
+	}
+	defer t.writeMu.Unlock()
+	t.mu.RLock()
+	current := t.generation == generation && t.conn == conn && t.connected
+	t.mu.RUnlock()
+	if !current {
+		return staleWSSGeneration()
+	}
+	deadline, _ := bounded.Deadline()
+	_ = conn.SetWriteDeadline(deadline)
+	finished := make(chan struct{})
+	stop := context.AfterFunc(bounded, func() { _ = conn.Close(); close(finished) })
+	err := write()
+	if !stop() {
+		<-finished
+	}
+	_ = conn.SetWriteDeadline(time.Time{})
+	if bounded.Err() != nil {
+		err = fmt.Errorf("%w: %w", ErrTimeout, bounded.Err())
+	} else if timeoutErr, ok := err.(net.Error); ok && timeoutErr.Timeout() {
+		err = fmt.Errorf("%w: %w", ErrTimeout, err)
+	}
+	if err != nil {
+		t.poisonGeneration(generation, conn, err)
+	}
+	return err
 }
 
 // decodeJSONNumbers decodes a JSON object keeping numbers as their original
@@ -634,6 +787,16 @@ func helloHiveMessage(identity Identity, prefix string) HiveMessage {
 
 func (t *WSSTransport) beginConnection() {
 	t.mu.Lock()
+	old := t.beginConnectionLocked()
+	t.mu.Unlock()
+	if old != nil {
+		_ = old.Close()
+	}
+}
+
+func (t *WSSTransport) beginConnectionLocked() *websocket.Conn {
+	old := t.conn
+	t.conn = nil
 	t.generation++
 	t.lastError = nil
 	t.connected = false
@@ -645,7 +808,7 @@ func (t *WSSTransport) beginConnection() {
 	t.handshakeReady = make(chan struct{})
 	t.readDone = make(chan struct{})
 	t.connection.begin(time.Now())
-	t.mu.Unlock()
+	return old
 }
 
 // recordReadFailure stores why the read loop stopped, but only while its

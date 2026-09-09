@@ -411,8 +411,8 @@ func (inv HubIntentInventory) HasPhrases() bool {
 // failed the query rather than refused the type: that returns an error
 // wrapping ErrRuntime, and the engines are not asked instead.
 //
-// Like Ask, it reads the transport's event channel, so it must not run
-// concurrently with Ask or another intent call on the same client.
+// Built-in transports give each call its own bounded event subscription.
+// Hubs that omit request IDs still require one same-type query at a time.
 func (c *Client) Intents(ctx context.Context, languages []string, opts ...IntentOptions) (HubIntentInventory, error) {
 	options := intentOptions(opts)
 	asked, err := askedLanguages(languages)
@@ -428,14 +428,16 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 		})
 		if err != nil {
 			var denied *PolicyDeniedError
-			if !options.fallback() || !errors.As(err, &denied) || denied.DeniedType != EventIntentList {
+			refused := errors.As(err, &denied) && denied.DeniedType == EventIntentList
+			silent := errors.Is(err, ErrTimeout) && ctx.Err() == nil
+			if !options.fallback() || (!refused && !silent) {
 				return HubIntentInventory{}, err
 			}
 			names, err := c.intentNames(ctx, asked[0], options.Timeout)
 			if err != nil {
 				return HubIntentInventory{}, err
 			}
-			return inventoryFromNames(names, asked, denied.DeniedType), nil
+			return inventoryFromNames(names, asked, EventIntentList), nil
 		}
 		listed[lang] = rows
 	}
@@ -514,8 +516,8 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 // definition; a runtime that honours it fills IntentRegistration.Definition.
 // A hub that answers ok: false returns an error wrapping ErrRuntime carrying
 // the hub's own text: a listing that failed is not a hub with no intents.
-// Like Ask, it reads the transport's event channel, so it must not run
-// concurrently with Ask or another intent call on the same client.
+// Built-in transports give each call its own bounded event subscription.
+// Hubs that omit request IDs still require one same-type query at a time.
 func (c *Client) ListIntents(ctx context.Context, lang string, opts ...IntentOptions) ([]IntentRegistration, error) {
 	options := intentOptions(opts)
 	if strings.TrimSpace(lang) == "" {
@@ -548,9 +550,9 @@ func (c *Client) ListIntents(ctx context.Context, lang string, opts ...IntentOpt
 // language, keyword ones first, sentences included for a template intent. An
 // empty lang asks for "en-us". A registration the hub does not know yields an
 // empty list, not an error: ok: false is a real answer here, unlike on the
-// listing, and means the intent has no sentences. Like Ask, it reads the transport's event channel,
-// so it must not run concurrently with Ask or another intent call on the
-// same client.
+// listing, and means the intent has no sentences. Built-in transports support
+// concurrent collectors through independent subscriptions. Legacy custom
+// transports with one shared event channel must serialize collectors.
 func (c *Client) DescribeIntent(ctx context.Context, skillID, intentName, lang string, opts ...IntentOptions) ([]IntentDefinition, error) {
 	options := intentOptions(opts)
 	skillID = strings.TrimSpace(skillID)
@@ -624,26 +626,33 @@ func (c *Client) intentQueryContext(lang, requestID string) Context {
 // first one wins and repeats are dropped by the next query. A
 // hive.policy.denied naming the query returns a *PolicyDeniedError at once.
 func (c *Client) requestReply(ctx context.Context, queryType, replyType string, data Data, lang string, timeout time.Duration) (Event, error) {
-	if err := c.Connect(ctx); err != nil {
+	queryCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := c.Connect(queryCtx); err != nil {
 		return Event{}, err
 	}
 	requestID := NewRequestID()
 	eventContext := c.intentQueryContext(lang, requestID)
-	events := c.Transport.Events()
+	sub := c.SubscribeEvents(256)
+	defer sub.Close()
+	events := sub.C
 	// Whatever is queued now was sent before the query and cannot answer it:
 	// the previous query's repeated replies, for one.
-	drainEvents(events)
-	queryCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	if _, independent := c.Transport.(EventSubscriber); !independent {
+		drainEvents(events)
+	}
 	if err := c.Emit(queryCtx, queryType, data, eventContext); err != nil {
 		return Event{}, err
 	}
 	for {
 		select {
 		case <-queryCtx.Done():
-			return Event{}, fmt.Errorf("%w: hub did not answer %s within %s", ErrTimeout, queryType, timeout)
-		case event := <-events:
-			if denied := policyDenial(event, queryType); denied != nil {
+			return Event{}, fmt.Errorf("%w: %w: hub did not answer %s within %s", ErrTimeout, queryCtx.Err(), queryType, timeout)
+		case event, open := <-events:
+			if !open {
+				return Event{}, subscriptionError(sub.Err())
+			}
+			if denied := policyDenial(event, queryType); denied != nil && EventMatchesContext(event, eventContext) {
 				return Event{}, denied
 			}
 			if event.Name == replyType && EventMatchesContext(event, eventContext) {
@@ -701,8 +710,12 @@ func (c *Client) describeMany(ctx context.Context, wanted []intentKey, timeout t
 // found. Whatever is queued when it starts was sent before its requests and
 // cannot answer them -- the previous batch's repeated replies, in practice.
 func (c *Client) describeBatch(ctx context.Context, wanted []intentKey, timeout time.Duration, found map[intentKey][]IntentDefinition) error {
-	events := c.Transport.Events()
-	drainEvents(events)
+	sub := c.SubscribeEvents(256)
+	defer sub.Close()
+	events := sub.C
+	if _, independent := c.Transport.(EventSubscriber); !independent {
+		drainEvents(events)
+	}
 	queryCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	byRequest := make(map[string]intentKey, len(wanted))
@@ -717,12 +730,19 @@ func (c *Client) describeBatch(ctx context.Context, wanted []intentKey, timeout 
 	for answered := 0; answered < len(wanted); {
 		select {
 		case <-queryCtx.Done():
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 			if answered == 0 {
 				return fmt.Errorf("%w: hub did not answer %s within %s", ErrTimeout, EventIntentDescribe, timeout)
 			}
 			return nil
-		case event := <-events:
-			if denied := policyDenial(event, EventIntentDescribe); denied != nil {
+		case event, open := <-events:
+			if !open {
+				return subscriptionError(sub.Err())
+			}
+			_, ownsRequest := byRequest[event.RequestID()]
+			if denied := policyDenial(event, EventIntentDescribe); denied != nil && (event.RequestID() == "" || ownsRequest) {
 				return denied
 			}
 			if event.Name != EventIntentDescribeResponse {
@@ -730,7 +750,7 @@ func (c *Client) describeBatch(ctx context.Context, wanted []intentKey, timeout 
 			}
 			definitions := definitionsFromEvent(event)
 			key, ok := byRequest[event.RequestID()]
-			if !ok && len(definitions) > 0 {
+			if !ok && event.RequestID() == "" && len(definitions) > 0 {
 				// No request id came back: the definition names what it
 				// describes.
 				key, ok = keyForDefinition(wanted, definitions[0])

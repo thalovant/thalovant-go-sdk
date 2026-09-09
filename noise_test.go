@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -495,12 +496,15 @@ func TestNoiseKeyPersistsAcrossCalls(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if perm := info.Mode().Perm(); perm&0o077 != 0 {
+	if perm := info.Mode().Perm(); runtime.GOOS != "windows" && perm&0o077 != 0 {
 		t.Fatalf("the static key file is %04o; it must not be group or world accessible", perm)
 	}
 }
 
 func TestNoiseKeyRejectsAPermissiveFile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows protects files with directory ACLs, not POSIX mode bits")
+	}
 	dir := t.TempDir()
 	if _, err := LoadOrCreateNoiseKey(dir); err != nil {
 		t.Fatal(err)

@@ -16,7 +16,7 @@ Full docs: <https://docs.thalovant.com/developers/sdks/go/>
 
 ## Install
 
-Use Go 1.25 or newer so the SDK receives supported upstream networking security fixes.
+Use Go 1.26 or newer so the SDK receives supported upstream networking security fixes.
 
 ```bash
 go get github.com/thalovant/thalovant-go-sdk
@@ -85,6 +85,10 @@ func main() {
 
 `NewDefaultControlPlane` uses `https://api.thalovant.com`. Use
 `NewControlPlane` only for local development or a self-hosted control plane.
+Credential-bearing control requests require HTTPS; HTTP is supported only for
+literal `localhost`, `127.0.0.1`, and `[::1]` development endpoints. Control
+requests do not follow redirects, including when using an injected `http.Client`,
+so login passwords and bearer credentials remain bound to the chosen endpoint.
 
 ### Login With MFA
 
@@ -113,7 +117,9 @@ omitted from the request body, so `LoginWithOptions` with a zero-value
 ### Sign In With the Browser (Device Flow)
 
 Accounts without a password (for example Google sign-in) use the device flow.
-`LoginWithBrowser` prints a verification URL and a short user code, opens the
+`LoginWithBrowser` accepts only HTTP(S) verification URLs with a host and no
+embedded credentials. Browser launch uses direct arguments without a command
+shell. It prints a verification URL and a short user code, opens the
 browser on a best-effort basis, and polls until you approve the request:
 
 ```go
@@ -454,6 +460,84 @@ Environment variables are supported too:
 client, err := thalovant.NewClientFromEnv()
 ```
 
+
+### Runtime capabilities and concurrent replies
+
+`IntentsWithCapabilities` adds optional fallback discovery without changing
+existing `HubIntentInventory` literals:
+
+```go
+capabilities, err := client.IntentsWithCapabilities(ctx, []string{"en-us"}, thalovant.IntentOptions{})
+if err != nil { return err }
+fmt.Println(capabilities.Inventory.Source, capabilities.FallbacksKnown)
+fmt.Println("may answer:", capabilities.MayAnswer("en-us"))
+```
+
+`Fallbacks` contains skill IDs and numeric priorities, sorted by priority and
+skill ID. The optional probe has a 1.5-second budget including connect, send and
+reply collection. Unsupported, silent, refused, malformed or explicitly failed
+listings remain unknown; an explicit empty list is known-empty. `MayAnswer` is a
+conservative capability hint, not a guarantee that the next request will succeed.
+Disabled intent phrases do not imply that the runtime can answer them.
+`ListFallbacks(ctx, timeout)` exposes the probe directly; nil means unknown.
+
+Use `client.SubscribeEvents(capacity)` for an independent observer and call its
+`Close` method when finished. Its channel closes with `ErrEventOverflow` if the
+consumer falls behind. Treat delivered events and their maps as read-only.
+Transport `SubscribeHiveMessages` supports independent query/cascade observers.
+Legacy `Events` and `HiveMessages` channels remain available for compatibility;
+the bounded subscription API reports overflow explicitly.
+
+`WaitForEvent(ctx, name, EventOptions)` waits for one named event with a default
+12-second deadline including connection. `Listen` returns a filtered subscription:
+
+```go
+stream, err := client.Listen(ctx, thalovant.EventSpeak, thalovant.ListenOptions{
+    EventOptions: thalovant.EventOptions{Timeout: 30*time.Second, SessionID: "session-id"},
+    MaxEvents: 10,
+    Capacity: 128,
+})
+if err != nil { return err }
+defer stream.Close()
+for event := range stream.C { fmt.Println(event.Text()) }
+if err := stream.Err(); err != nil { return err }
+```
+
+Both support `Context`, `RequestID`, `SessionID`, and a `Predicate` function.
+Matching request IDs take precedence over the hub-assigned session ID; ID-less
+legacy events retain session fallback. `Listen` has no lifetime/count cap when
+`Timeout`/`MaxEvents` are zero, so use a cancellable context or call `Close`.
+Buffers default to 256 events and are capped at 65536. Timeout, disconnect and
+slow-consumer overflow are explicit errors; reaching `MaxEvents` or calling
+`Close` succeeds. Cancellation removes the subscription even if a custom
+predicate is still pending; predicates should return promptly.
+
+`AskWithOptions` adds `ReplySettle` (default 250ms) and `EmptyReplyWait` (default
+5s) alongside embedded `RequestOptions`. The request deadline bounds connection,
+send and reply collection. Delayed speech can recover from a soft intent miss;
+policy denials remain failures even when a partial reply is available. Existing
+`Ask` calls use the same defaults.
+
+Connection callers share authenticated readiness. A canceled or timed-out caller
+cannot race a later connection against its unfinished cleanup. `Close` uses the
+client connection timeout by default (6s) and honors an earlier context deadline;
+`ConnectWithInfo` includes diagnostic collection in that same deadline, even for
+custom transports. HTTP cleanup continues after a timed-out caller until its old
+poll retires, and reconnect waits for that owned cleanup;
+a timeout means cleanup has not completed, so do not reuse that identity in a
+separate client. Do not copy a `Client` or built-in transport after first use.
+
+Noise trust writes use atomic publication and an OS lock shared across processes.
+An interrupted writer cannot publish a partial static key or lose another hub's
+pin. A conflicting pin requires explicit verification and `ForgetNoisePin`.
+Sharing a state directory does not permit simultaneous runtime sessions with the
+same identity: each active connection needs its own identity.
+
+CI runs race-enabled tests on Linux, macOS and Windows, both minimum/current Go
+on Linux, reachable vulnerability analysis and a bounded frame-parser fuzz run.
+Tests use local TLS/Noise peers and cover process crashes, concurrent discovery,
+reconnect ownership, canceled writes and request correlation.
+
 ## Protocols
 
 Hubs may expose one or more public data-plane protocols:
@@ -476,7 +560,11 @@ the identity `password` with argon2id, salted with the hub's node id, so an
 identity that can authenticate can already handshake.
 
 Two files persist beside the SDK config file (`~/.config/thalovant` unless
-`XDG_CONFIG_HOME` or `%APPDATA%` says otherwise), both `0600`:
+`XDG_CONFIG_HOME` or `%APPDATA%` says otherwise), both `0600` on Unix.
+Windows inherits directory access controls; use an application-private directory
+accessible only to the intended user. The state filesystem must support atomic
+rename and hard links (for example ext4, APFS or NTFS); unsupported storage fails
+without replacing the existing identity. The files are:
 
 - `noise_key` — this client's static X25519 key. It has to persist: a hub pins
   it on first contact, so regenerating it makes the client look like a
@@ -697,12 +785,13 @@ with a slot, shorter first. `Engine` is `padatious` for a template intent and
 `adapt` for a keyword one.
 
 `inventory.Source` is `intent-manifest` when the sentences came from the
-manifest. A hub whose connection may not publish `ovos.intent.list` is asked
-for the engines' own manifests instead: the result then carries names only,
-`Source` is `engine-manifests`, `Denied` names the refused query and
+manifest. A refused or silent `ovos.intent.list` query uses the engines' own
+manifests instead: the result then carries names only,
+`Source` is `engine-manifests`, the legacy `Denied` field names `ovos.intent.list`
+for either case (silence does not prove a policy refusal), and
 `HasPhrases()` is false. `IntentOptions` tunes the call — `Timeout` bounds each
 query the hub is sent (5 seconds when zero), `Fallback` set to a false pointer
-returns the `*PolicyDeniedError` instead of falling back, and `Describe` set to
+returns the original refusal or timeout instead of falling back, and `Describe` set to
 a false pointer skips the per-intent describes and returns names and engines
 only:
 
@@ -716,9 +805,11 @@ inventory, err := client.Intents(ctx, nil, thalovant.IntentOptions{
 
 A nil or empty language list asks for `en-us`; tags are trimmed, and a
 language repeated under another spelling (`en-us`, `en-US`, `en_us`) is asked
-once, under the first spelling given. Like `Ask`, these calls read the
-transport's event channel, so run them one at a time on a client. The two
-underlying queries are exposed too:
+once, under the first spelling given. Built-in transports give concurrent
+`Ask`, `Query`, and inventory calls independent subscriptions. Custom transports
+should implement `EventSubscriber` and `HiveMessageSubscriber` for this behavior;
+legacy custom implementations sharing one channel must serialize reply collectors.
+The two underlying queries are exposed too:
 
 ```go
 // ovos.intent.list: one row per registration in one language.

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -50,6 +51,9 @@ func TestCachedPSKFileHoldsOnlyTheKey(t *testing.T) {
 }
 
 func TestCachedPSKFileIsOwnerOnly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows protects files with directory ACLs, not POSIX mode bits")
+	}
 	dir := t.TempDir()
 	if err := SaveCachedPSK(dir, pskTestNodeID, derivePSK(testPassword(), pskTestNodeID)); err != nil {
 		t.Fatalf("SaveCachedPSK: %v", err)

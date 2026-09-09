@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,7 +21,7 @@ import (
 
 type hangingTransport struct {
 	events       chan Event
-	disconnected int
+	disconnected atomic.Int32
 }
 
 func (t *hangingTransport) Connect(ctx context.Context) error {
@@ -29,7 +30,7 @@ func (t *hangingTransport) Connect(ctx context.Context) error {
 }
 
 func (t *hangingTransport) Disconnect(context.Context) error {
-	t.disconnected++
+	t.disconnected.Add(1)
 	return nil
 }
 
@@ -451,8 +452,12 @@ func TestClientConnectEnforcesDefaultTimeout(t *testing.T) {
 	if !errors.Is(err, ErrTimeout) {
 		t.Fatalf("expected timeout error, got %v", err)
 	}
-	if transport.disconnected != 1 {
-		t.Fatalf("expected disconnect after timeout, got %d", transport.disconnected)
+	deadline := time.Now().Add(time.Second)
+	for transport.disconnected.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if transport.disconnected.Load() != 1 {
+		t.Fatalf("expected disconnect after timeout, got %d", transport.disconnected.Load())
 	}
 }
 

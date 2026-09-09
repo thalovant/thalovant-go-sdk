@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/flynn/noise"
 )
@@ -21,10 +20,6 @@ const NoiseKeyFilename = "noise_key"
 // NoisePinsFilename records the server static keys this client has pinned, as
 // a JSON object keyed by the server node id.
 const NoisePinsFilename = "noise_pins.json"
-
-// noiseStoreMu serializes the read-modify-write of the pin file so two
-// connections pinning different hubs at once cannot lose one another's entry.
-var noiseStoreMu sync.Mutex
 
 // NoiseStateDir is the directory holding the static key and the pin file. It
 // sits beside the SDK config file, so XDG_CONFIG_HOME and the Windows APPDATA
@@ -40,8 +35,8 @@ func NoiseStateDir() (string, error) {
 // LoadOrCreateNoiseKey returns this client's persistent static X25519 keypair,
 // generating and storing one on first use.
 //
-// The key file is created 0600 and is rejected if it is group- or
-// world-accessible, matching how the SDK treats every other on-disk secret.
+// On Unix the key file is created 0600 and rejected if group/world-accessible.
+// Windows inherits the protected state directory's access controls.
 func LoadOrCreateNoiseKey(dir string) (noise.DHKey, error) {
 	if strings.TrimSpace(dir) == "" {
 		resolved, err := NoiseStateDir()
@@ -52,9 +47,15 @@ func LoadOrCreateNoiseKey(dir string) (noise.DHKey, error) {
 	}
 	path := filepath.Join(dir, NoiseKeyFilename)
 
-	noiseStoreMu.Lock()
-	defer noiseStoreMu.Unlock()
+	unlock, err := lockNoiseStore(dir)
+	if err != nil {
+		return noise.DHKey{}, err
+	}
+	defer unlock()
 
+	if err := validateNoiseFile(path, "Noise key file"); err != nil {
+		return noise.DHKey{}, err
+	}
 	if raw, err := os.ReadFile(path); err == nil {
 		if err := assertSecureSecretFile(path, "Noise key file"); err != nil {
 			return noise.DHKey{}, err
@@ -79,7 +80,7 @@ func LoadOrCreateNoiseKey(dir string) (noise.DHKey, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return noise.DHKey{}, fmt.Errorf("%w: unable to create %s: %v", ErrIdentity, dir, err)
 	}
-	if err := os.WriteFile(path, []byte(hex.EncodeToString(key.Private)), 0o600); err != nil {
+	if err := publishNoiseFile(path, []byte(hex.EncodeToString(key.Private)), false); err != nil {
 		return noise.DHKey{}, fmt.Errorf("%w: unable to write Noise key file %s: %v", ErrIdentity, path, err)
 	}
 	return key, nil
@@ -110,12 +111,18 @@ func SaveNoisePin(dir, nodeID, publicKey string) error {
 		return nil
 	}
 
-	noiseStoreMu.Lock()
-	defer noiseStoreMu.Unlock()
+	unlock, err := lockNoiseStore(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	pins, path, err := readNoisePinsLocked(dir)
 	if err != nil {
 		return err
+	}
+	if pinned := pins[nodeID]; pinned != "" && pinned != publicKey {
+		return fmt.Errorf("%w: the hub Noise pin changed; verify it before ForgetNoisePin", ErrConnection)
 	}
 	if pins[nodeID] == publicKey {
 		return nil
@@ -130,8 +137,11 @@ func pinNoisePeer(dir, nodeID, key string) error {
 	if nodeID == "" || key == "" {
 		return fmt.Errorf("%w: Noise peer supplied no static identity", ErrConnection)
 	}
-	noiseStoreMu.Lock()
-	defer noiseStoreMu.Unlock()
+	unlock, err := lockNoiseStore(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	pins, path, err := readNoisePinsLocked(dir)
 	if err != nil {
 		return err
@@ -150,8 +160,11 @@ func pinNoisePeer(dir, nodeID, key string) error {
 // deliberately reinstalled or replaced; a pin that stops matching on its own is
 // a failure to investigate, not one to clear.
 func ForgetNoisePin(dir, nodeID string) error {
-	noiseStoreMu.Lock()
-	defer noiseStoreMu.Unlock()
+	unlock, err := lockNoiseStore(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	pins, path, err := readNoisePinsLocked(dir)
 	if err != nil {
@@ -165,8 +178,11 @@ func ForgetNoisePin(dir, nodeID string) error {
 }
 
 func readNoisePins(dir string) (map[string]string, string, error) {
-	noiseStoreMu.Lock()
-	defer noiseStoreMu.Unlock()
+	unlock, err := lockNoiseStore(dir)
+	if err != nil {
+		return nil, "", err
+	}
+	defer unlock()
 	return readNoisePinsLocked(dir)
 }
 
@@ -180,6 +196,9 @@ func readNoisePinsLocked(dir string) (map[string]string, string, error) {
 	}
 	path := filepath.Join(dir, NoisePinsFilename)
 	pins := map[string]string{}
+	if err := validateNoiseFile(path, "Noise pin file"); err != nil {
+		return nil, path, err
+	}
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return pins, path, nil
@@ -187,7 +206,10 @@ func readNoisePinsLocked(dir string) (map[string]string, string, error) {
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: unable to read Noise pin file %s: %v", ErrIdentity, path, err)
 	}
-	if err := json.Unmarshal(raw, &pins); err != nil {
+	if err := assertSecureSecretFile(path, "Noise pin file"); err != nil {
+		return nil, "", err
+	}
+	if err := json.Unmarshal(raw, &pins); err != nil || pins == nil {
 		return nil, "", fmt.Errorf("%w: Noise pin file %s is not a JSON object of node id to key: %v", ErrIdentity, path, err)
 	}
 	return pins, path, nil
@@ -201,7 +223,7 @@ func writeNoisePinsLocked(path string, pins map[string]string) error {
 	if err != nil {
 		return fmt.Errorf("%w: unable to encode Noise pins: %v", ErrIdentity, err)
 	}
-	return os.WriteFile(path, append(encoded, '\n'), 0o600)
+	return publishNoiseFile(path, append(encoded, '\n'), true)
 }
 
 // NoisePskFilename caches derived pre-shared keys, as a JSON object keyed by
@@ -233,6 +255,9 @@ func pskCachePathLocked(dir string) (string, error) {
 
 func readPskCacheLocked(path string) map[string]string {
 	cache := map[string]string{}
+	if err := validateNoiseFile(path, "Noise PSK cache"); err != nil {
+		return cache
+	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return cache
@@ -241,7 +266,7 @@ func readPskCacheLocked(path string) map[string]string {
 		return cache
 	}
 	// A corrupt cache is derivable state, not a reason to fail a connection.
-	if err := json.Unmarshal(raw, &cache); err != nil {
+	if err := json.Unmarshal(raw, &cache); err != nil || cache == nil {
 		return map[string]string{}
 	}
 	return cache
@@ -255,7 +280,7 @@ func writePskCacheLocked(path string, cache map[string]string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("%w: unable to create %s: %v", ErrIdentity, filepath.Dir(path), err)
 	}
-	return os.WriteFile(path, append(payload, '\n'), 0o600)
+	return publishNoiseFile(path, append(payload, '\n'), true)
 }
 
 // LoadCachedPSK returns the stored pre-shared key for a hub, or nil when there
@@ -265,8 +290,11 @@ func LoadCachedPSK(dir, nodeID string) []byte {
 		return nil
 	}
 
-	noiseStoreMu.Lock()
-	defer noiseStoreMu.Unlock()
+	unlock, err := lockNoiseStore(dir)
+	if err != nil {
+		return nil
+	}
+	defer unlock()
 
 	path, err := pskCachePathLocked(dir)
 	if err != nil {
@@ -287,8 +315,11 @@ func SaveCachedPSK(dir, nodeID string, psk []byte) error {
 		return nil
 	}
 
-	noiseStoreMu.Lock()
-	defer noiseStoreMu.Unlock()
+	unlock, err := lockNoiseStore(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	path, err := pskCachePathLocked(dir)
 	if err != nil {
@@ -307,8 +338,11 @@ func SaveCachedPSK(dir, nodeID string, psk []byte) error {
 // rejects one, which is how a rotated password is noticed: the next attempt
 // derives again from the current one.
 func ForgetCachedPSK(dir, nodeID string) error {
-	noiseStoreMu.Lock()
-	defer noiseStoreMu.Unlock()
+	unlock, err := lockNoiseStore(dir)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 
 	path, err := pskCachePathLocked(dir)
 	if err != nil {

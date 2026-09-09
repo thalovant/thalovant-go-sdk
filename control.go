@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const (
@@ -282,6 +283,14 @@ func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOpt
 	if deviceCode == "" || userCode == "" || verificationURI == "" {
 		return nil, fmt.Errorf("%w: device authorization response was incomplete", ErrAPI)
 	}
+	if err := validateBrowserURL(verificationURI); err != nil {
+		return nil, err
+	}
+	if completeURI := optional(grant["verification_uri_complete"]); completeURI != "" {
+		if err := validateBrowserURL(completeURI); err != nil {
+			return nil, err
+		}
+	}
 	interval := defaultDevicePollInterval
 	if raw, ok := grant["interval"].(float64); ok && raw >= 0 {
 		interval = time.Duration(raw * float64(time.Second))
@@ -373,16 +382,44 @@ func (c *ControlPlane) pollDeviceToken(
 // openBrowser launches the platform browser opener. It is a package variable
 // so tests can capture the opened URL without spawning a process.
 var openBrowser = func(target string) error {
-	var cmd *exec.Cmd
-	switch runtime.GOOS {
-	case "darwin":
-		cmd = exec.Command("open", target)
-	case "windows":
-		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", target)
-	default:
-		cmd = exec.Command("xdg-open", target)
+	cmd, err := browserCommand(target, runtime.GOOS)
+	if err != nil {
+		return err
 	}
-	return cmd.Start()
+	if err = cmd.Start(); err != nil {
+		return err
+	}
+	go func() { _ = cmd.Wait() }()
+	return nil
+}
+
+// validateBrowserURL rejects option-like targets, local files, executable URI
+// schemes and embedded credentials before anything is displayed or launched.
+func validateBrowserURL(target string) error {
+	endpoint, err := url.Parse(target)
+	invalid := err != nil || strings.IndexFunc(target, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) >= 0
+	if !invalid {
+		invalid = (!strings.EqualFold(endpoint.Scheme, "http") && !strings.EqualFold(endpoint.Scheme, "https")) || endpoint.Hostname() == "" || endpoint.User != nil
+	}
+	if invalid {
+		return fmt.Errorf("%w: device verification URL must be an HTTP(S) URL with a host and no embedded credentials", ErrAPI)
+	}
+	return nil
+}
+
+// browserCommand passes the validated URL as one argument, never through a shell.
+func browserCommand(target, platform string) (*exec.Cmd, error) {
+	if err := validateBrowserURL(target); err != nil {
+		return nil, err
+	}
+	switch platform {
+	case "darwin":
+		return exec.Command("open", target), nil
+	case "windows":
+		return exec.Command("rundll32", "url.dll,FileProtocolHandler", target), nil
+	default:
+		return exec.Command("xdg-open", target), nil
+	}
 }
 
 // sleepContext waits for the duration or until ctx is cancelled.
@@ -1069,7 +1106,7 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.APIURL+strings.TrimLeft(path, "/"), body)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, fmt.Errorf("%w: invalid control request", ErrAPI)
 	}
 	req.Header.Set("accept", "application/json")
 	req.Header.Set("user-agent", c.UserAgent)
@@ -1085,13 +1122,53 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 		}
 		req.Header.Set("authorization", "Bearer "+c.AccessToken)
 	}
-	resp, err := c.HTTPClient.Do(req)
+	// Bind passwords, device codes and bearer credentials to a secure endpoint.
+	// Literal loopback development endpoints remain supported without DNS
+	// resolution; a remote name resolving to loopback is not an exception.
+	client := c.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	sendsCookies := client.Jar != nil && len(client.Jar.Cookies(req.URL)) != 0
+	if auth || payload != nil || req.URL.User != nil || sendsCookies || req.Header.Get("authorization") != "" || req.Header.Get("cookie") != "" || req.Header.Get("proxy-authorization") != "" {
+		if err := requireControlCredentialEndpoint(req.URL); err != nil {
+			return 0, nil, err
+		}
+	}
+	scopedClient := *client
+	// 307/308 redirects can forward the original JSON password body. Keep the
+	// injected client's transport/jar while preventing all redirect hops.
+	scopedClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := scopedClient.Do(req)
 	if err != nil {
-		return 0, nil, fmt.Errorf("%w: %v", ErrAPI, err)
+		// url.Error includes the complete request URL, and an injected transport
+		// may return arbitrary credential-bearing text. Preserve only known,
+		// safe context errors; never retain the transport cause in the chain.
+		if cause := ctx.Err(); cause == context.Canceled || cause == context.DeadlineExceeded {
+			return 0, nil, fmt.Errorf("%w: %w", ErrAPI, cause)
+		}
+		return 0, nil, fmt.Errorf("%w: control request failed", ErrAPI)
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
 	return resp.StatusCode, raw, nil
+}
+
+// requireControlCredentialEndpoint permits HTTP only for literal local development.
+func requireControlCredentialEndpoint(endpoint *url.URL) error {
+	if endpoint.User != nil {
+		return fmt.Errorf("%w: control API URL must not contain credentials", ErrAPI)
+	}
+	if endpoint.Scheme == "https" && endpoint.Hostname() != "" {
+		return nil
+	}
+	if endpoint.Scheme == "http" {
+		switch strings.ToLower(endpoint.Hostname()) {
+		case "localhost", "127.0.0.1", "::1":
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: credential-bearing control requests require HTTPS; HTTP is allowed only for localhost, 127.0.0.1 or [::1] development", ErrAPI)
 }
 
 // maxServerErrorDetail bounds how much of a surfaced server message is echoed

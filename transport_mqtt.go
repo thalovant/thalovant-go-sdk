@@ -13,6 +13,7 @@ import (
 )
 
 type MQTTTransport struct {
+	streams        runtimeStreams
 	Identity       Identity
 	UserAgent      string
 	Topics         MqttTopicSet
@@ -29,7 +30,7 @@ type MQTTTransport struct {
 	// TLSConfig optionally supplies broker trust roots or a client certificate.
 	TLSConfig    *tls.Config
 	noise        *noiseChannel
-	lifecycleMu  sync.Mutex
+	lifecycleMu  contextMutex
 	failureReady chan struct{}
 	generation   uint64
 	mu           sync.RWMutex
@@ -51,8 +52,16 @@ func NewMQTTTransport(identity Identity) (*MQTTTransport, error) {
 }
 
 func (t *MQTTTransport) Connect(ctx context.Context) (err error) {
-	t.lifecycleMu.Lock()
+	ctx, cancelConnect := context.WithTimeout(ctx, 20*time.Second)
+	defer cancelConnect()
+	if err := t.lifecycleMu.Lock(ctx); err != nil {
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
+	}
 	defer t.lifecycleMu.Unlock()
+	health := t.Healthcheck()
+	if health.Connected && health.HandshakeComplete {
+		return nil
+	}
 	t.closeClient()
 	t.beginConnection()
 	defer func() {
@@ -181,7 +190,11 @@ func (t *MQTTTransport) Connect(ctx context.Context) (err error) {
 }
 
 func (t *MQTTTransport) Disconnect(ctx context.Context) error {
-	t.lifecycleMu.Lock()
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	if err := t.lifecycleMu.Lock(ctx); err != nil {
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
+	}
 	defer t.lifecycleMu.Unlock()
 	t.mu.RLock()
 	client := t.client
@@ -291,7 +304,7 @@ func (t *MQTTTransport) receive(ctx context.Context, channel *noiseChannel, raw 
 		return err
 	}
 	if message != nil {
-		dispatchNoiseMessage(t.BusEvents, t.HiveEvents, *message)
+		dispatchNoiseMessage(t.BusEvents, t.HiveEvents, *message, &t.streams)
 	}
 	if channel.ready() {
 		t.mu.Lock()
@@ -305,7 +318,12 @@ func (t *MQTTTransport) receive(ctx context.Context, channel *noiseChannel, raw 
 }
 
 func (t *MQTTTransport) sendHiveMessage(ctx context.Context, message HiveMessage, _ bool) error {
-	t.lifecycleMu.Lock()
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	ctx = sendCtx
+	if err := t.lifecycleMu.Lock(ctx); err != nil {
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
+	}
 	defer t.lifecycleMu.Unlock()
 	t.mu.RLock()
 	channel, connected, generation := t.noise, t.connected, t.generation
@@ -313,8 +331,6 @@ func (t *MQTTTransport) sendHiveMessage(ctx context.Context, message HiveMessage
 	if channel == nil || !connected {
 		return fmt.Errorf("%w: MQTT transport is not connected", ErrConnection)
 	}
-	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-	defer cancel()
 	if err := channel.send(sendCtx, message); err != nil {
 		t.failGeneration(generation, err)
 		return err

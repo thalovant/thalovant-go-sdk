@@ -1,0 +1,2 @@
+# Keep gofmt input identical on Unix and Windows checkouts.
+*.go text eol=lf
