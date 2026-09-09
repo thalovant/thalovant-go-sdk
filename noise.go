@@ -235,8 +235,9 @@ func buildPrologue(helloPayload, handshakePayload map[string]any, protocolName s
 	if err != nil {
 		return nil, err
 	}
-	prologue := make([]byte, 0, len(hello)+len(handshake)+len(protocolName))
-	prologue = append(prologue, hello...)
+	// Grow with append instead of adding attacker-controlled lengths into a
+	// capacity calculation that could overflow before allocation.
+	prologue := append([]byte(nil), hello...)
 	prologue = append(prologue, handshake...)
 	prologue = append(prologue, protocolName...)
 	return prologue, nil
