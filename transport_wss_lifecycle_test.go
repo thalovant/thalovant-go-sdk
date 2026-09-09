@@ -316,3 +316,21 @@ func TestWSSStaleReaderAndSendFailureCannotMutateReconnectedSession(t *testing.T
 	}
 	assertWSSEcho(t, f.transport)
 }
+
+func TestWSSApplicationSendWaitsUntilEncryptedHelloCompletes(t *testing.T) {
+	f := newWSSLifecycleFixture(t, false, false)
+	if err := f.transport.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Model the interval after Noise split/pinning but before encrypted HELLO finishes.
+	f.transport.mu.Lock()
+	f.transport.handshake = false
+	f.transport.mu.Unlock()
+	if err := f.transport.EmitBus(context.Background(), "premature", Data{}, Context{}); !errors.Is(err, ErrConnection) {
+		t.Fatalf("application send escaped readiness: %v", err)
+	}
+	f.transport.mu.Lock()
+	f.transport.handshake = true
+	f.transport.mu.Unlock()
+	assertWSSEcho(t, f.transport)
+}

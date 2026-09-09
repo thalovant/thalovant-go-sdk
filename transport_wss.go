@@ -679,11 +679,13 @@ func (t *WSSTransport) sendHiveMessage(ctx context.Context, message HiveMessage,
 	t.mu.RLock()
 	generation, session, conn := t.generation, t.session, t.conn
 	current := t.generationCurrentLocked(ctx)
+	_, scoped := ctx.Value(wssGenerationKey{}).(uint64)
+	authenticated := t.handshake || scoped && message.MsgType == "hello"
 	t.mu.RUnlock()
 	if !current {
 		return staleWSSGeneration()
 	}
-	if session == nil {
+	if session == nil || !authenticated {
 		return fmt.Errorf("%w: refusing to send before the v3 Noise session is established", ErrConnection)
 	}
 	raw, err := json.Marshal(message)
