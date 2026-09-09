@@ -674,6 +674,11 @@ func (t *HTTPTransport) request(ctx context.Context, method, path string, form u
 	if err := decoder.Decode(&body); err != nil || body == nil {
 		return nil, fmt.Errorf("%w: malformed HTTP %s response", ErrProtocol, path)
 	}
+	// The upstream no-session reply confirms a lost cleanup acknowledgment.
+	// Match its complete shape only on disconnect; other refusals stay errors.
+	if path == "/disconnect" && len(body) == 1 && body["error"] == "Already Disconnected" {
+		return body, nil
+	}
 	if _, failed := body["error"]; failed {
 		return nil, fmt.Errorf("%w: HTTP %s rejected by the hub", ErrRuntime, path)
 	}
@@ -687,7 +692,7 @@ func (t *HTTPTransport) request(ctx context.Context, method, path string, form u
 			return nil, fmt.Errorf("%w: HTTP send was not acknowledged", ErrProtocol)
 		}
 	case "/disconnect":
-		if body["status"] != "Disconnected" {
+		if body["status"] != "Disconnected" || body["ok"] == false {
 			return nil, fmt.Errorf("%w: HTTP disconnect was not acknowledged", ErrProtocol)
 		}
 	}

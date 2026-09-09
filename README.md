@@ -597,6 +597,11 @@ The derivation costs 64 MiB and a few hundred milliseconds. WSS caches the
 result per hub; HTTP and MQTT derive from the current password on each fresh
 connection. All transports retain the hub pin after authentication failures.
 
+An unconfirmed HTTP disconnect retains cleanup responsibility. A retry recognizes
+the hub's exact already-disconnected acknowledgment when its earlier success
+response was lost; arbitrary refusals and contradictory acknowledgments still fail.
+Pins and replica affinity remain intact.
+
 HTTP reconnect first resets this transport object's previously admitted peer,
 so a failed poll can recover even while the hub still retains the old session.
 An initial connection does not disconnect a peer admitted by another process.

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.2
+
+- Recover HTTP cleanup after a lost success response by recognizing the upstream exact already-disconnected acknowledgment, while retaining admission responsibility until that confirmation.
+- Reject contradictory or explicitly failed disconnect acknowledgments; retain replica affinity and authenticated pins through a cleanup retry and KK reconnect.
+- Add real TLS/Noise lost-response and malformed/refused acknowledgment regressions.
+
 ## 0.5.1
 
 - Start Ask settlement on the first nonempty speech, keep fixed empty/settlement windows within the original deadline, and return collected speech at that deadline.
