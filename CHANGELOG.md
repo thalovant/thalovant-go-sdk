@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0
+
+- Require Go 1.26 or newer and use patched `golang.org/x/crypto` 0.56.0.
+- Add `IntentsWithCapabilities`, `ListFallbacks`, and `HubIntentCapabilities.MayAnswer`: optional fallback discovery distinguishes unknown from known-empty and shares one bounded connect/send/reply budget. Silent unified listings use engine manifests by default.
+- Add independent bounded subscriptions on all built-in transports so concurrent Ask, Query and inventory calls retain their own replies. Slow observers fail explicitly with `ErrEventOverflow`.
+- Add `AskWithOptions` for delayed speech and fragment settlement, preserving existing request option literals. Soft intent misses can recover with later speech; hard denials retain partial-reply failure information.
+- Enforce authenticated connection readiness, bounded connection/send/close callers, retained cleanup ownership, cancellable queued operations and generation-specific WSS teardown. Failed HTTP admission cleanup must succeed before a new admission.
+- Publish complete Noise identity/trust files atomically under a crash-released cross-process lock; reject conflicting pins and unexpected trust-file types.
+- Expand CI to race tests on Linux/macOS/Windows, minimum/current Go, vulnerability checks and parser fuzzing, including real TLS/Noise transport and process-crash regressions.
+
 ## 0.4.5
 
 - Reset this transport object's prior HTTP admission before reconnecting after

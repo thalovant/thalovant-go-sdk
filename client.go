@@ -12,6 +12,7 @@ type Client struct {
 	Identity       Identity
 	Transport      RuntimeTransport
 	ConnectTimeout time.Duration
+	connectionGate contextMutex
 }
 
 type ClientOptions struct {
@@ -96,23 +97,48 @@ func defaultRuntimeProtocol(identity Identity) (HubProtocol, error) {
 }
 
 func (c *Client) Connect(ctx context.Context) error {
+	timeout := c.connectTimeout()
+	connectCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	if err := c.connectionGate.Lock(connectCtx); err != nil {
+		return fmt.Errorf("%w: %w", ErrTimeout, err)
+	}
 	health := c.Transport.Healthcheck()
 	if health.Connected && health.HandshakeComplete {
+		c.connectionGate.Unlock()
 		return nil
 	}
-	timeout := c.connectTimeout()
-	connectCtx := ctx
-	cancel := func() {}
-	if _, ok := ctx.Deadline(); !ok && timeout > 0 {
-		connectCtx, cancel = context.WithTimeout(ctx, timeout)
+	// The worker retains ownership through cleanup, even if a custom
+	// transport ignores cancellation. A later caller cannot race its teardown.
+	result := make(chan error, 1)
+	go func() {
+		defer c.connectionGate.Unlock()
+		err := c.Transport.Connect(connectCtx)
+		if err == nil {
+			health := c.Transport.Healthcheck()
+			if !health.Connected || !health.HandshakeComplete {
+				err = fmt.Errorf("%w: transport returned before authenticated readiness", ErrConnection)
+			}
+		}
+		if connectCtx.Err() != nil {
+			err = fmt.Errorf("%w: %w", ErrTimeout, connectCtx.Err())
+		}
+		if err != nil {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = c.Transport.Disconnect(cleanupCtx)
+			cleanupCancel()
+		}
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		if connectCtx.Err() != nil {
+			return fmt.Errorf("%w: %w", ErrTimeout, connectCtx.Err())
+		}
+		return err
+	case <-connectCtx.Done():
+		return fmt.Errorf("%w: %w", ErrTimeout, connectCtx.Err())
 	}
-	defer cancel()
-	err := c.Transport.Connect(connectCtx)
-	if err != nil && connectCtx.Err() != nil {
-		_ = c.Transport.Disconnect(context.Background())
-		return fmt.Errorf("%w: hub connection did not complete within %s", ErrTimeout, timeout)
-	}
-	return err
 }
 
 func (c *Client) ConnectWithInfo(ctx context.Context) (TransportConnectionInfo, error) {
@@ -125,7 +151,37 @@ func (c *Client) ConnectionInfo() TransportConnectionInfo {
 }
 
 func (c *Client) Close(ctx context.Context) error {
-	return c.Transport.Disconnect(ctx)
+	closeCtx, cancel := context.WithTimeout(ctx, c.connectTimeout())
+	defer cancel()
+	return c.runOwned(closeCtx, false, func() error { return c.Transport.Disconnect(closeCtx) })
+}
+
+// runOwned bounds the caller while retaining the transport until a custom
+// implementation has actually stopped. A queued caller never owns cleanup.
+func (c *Client) runOwned(ctx context.Context, cleanupOnError bool, operation func() error) error {
+	if err := c.connectionGate.Lock(ctx); err != nil {
+		return err
+	}
+	result := make(chan error, 1)
+	go func() {
+		defer c.connectionGate.Unlock()
+		err := operation()
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		if err != nil && cleanupOnError {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			_ = c.Transport.Disconnect(cleanupCtx)
+			cancel()
+		}
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (c *Client) Healthcheck() TransportHealth {
@@ -133,7 +189,11 @@ func (c *Client) Healthcheck() TransportHealth {
 }
 
 func (c *Client) Emit(ctx context.Context, eventType string, data Data, eventContext Context) error {
-	return c.Transport.EmitBus(ctx, eventType, data, c.contextWithIdentityMetadata(eventContext))
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	return c.runOwned(sendCtx, true, func() error {
+		return c.Transport.EmitBus(sendCtx, eventType, data, c.contextWithIdentityMetadata(eventContext))
+	})
 }
 
 func (c *Client) contextWithIdentityMetadata(eventContext Context) Context {
@@ -206,7 +266,19 @@ func (c *Client) SendCode(ctx context.Context, value string, opts CodeOptions) e
 	return c.Emit(ctx, EventRecognizerLoopUtterance, data, eventContext)
 }
 
+// AskOptions extends RequestOptions without changing existing keyed or unkeyed
+// RequestOptions literals. Zero settlement values use the family defaults.
+type AskOptions struct {
+	RequestOptions
+	ReplySettle    time.Duration
+	EmptyReplyWait time.Duration
+}
+
 func (c *Client) Ask(ctx context.Context, text string, opts RequestOptions) (Reply, error) {
+	return c.AskWithOptions(ctx, text, AskOptions{RequestOptions: opts})
+}
+
+func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOptions) (Reply, error) {
 	prompt := strings.TrimSpace(text)
 	if prompt == "" {
 		return Reply{}, fmt.Errorf("ask requires non-empty text")
@@ -216,8 +288,16 @@ func (c *Client) Ask(ctx context.Context, text string, opts RequestOptions) (Rep
 		lang = "en-us"
 	}
 	timeout := opts.Timeout
-	if timeout == 0 {
+	if timeout <= 0 {
 		timeout = 12 * time.Second
+	}
+	settleWait := opts.ReplySettle
+	if settleWait == 0 {
+		settleWait = 250 * time.Millisecond
+	}
+	emptyWait := opts.EmptyReplyWait
+	if emptyWait == 0 {
+		emptyWait = 5 * time.Second
 	}
 	requestID := opts.RequestID
 	if requestID == "" {
@@ -226,42 +306,87 @@ func (c *Client) Ask(ctx context.Context, text string, opts RequestOptions) (Rep
 	eventContext := ContextWithCorrelation(opts.Context, opts.SessionID, c.Identity.SiteID, lang, requestID)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
+	if err := c.Connect(ctx); err != nil {
+		return Reply{}, err
+	}
+	sub := c.SubscribeEvents(256)
+	defer sub.Close()
 	var events []Event
 	var fragments []string
-	var failure *Event
+	var hardFailure, softFailure *Event
+	var settling *time.Timer
+	var settled <-chan time.Time
+	phaseComplete := false
+	schedule := func(delay time.Duration) {
+		if settling != nil {
+			settling.Stop()
+		}
+		settling = time.NewTimer(max(delay, 0))
+		settled = settling.C
+	}
+	defer func() {
+		if settling != nil {
+			settling.Stop()
+		}
+	}()
+	finish := func() (Reply, error) {
+		failure := hardFailure
+		if failure == nil && len(fragments) == 0 {
+			failure = softFailure
+		}
+		if failure != nil && len(fragments) == 0 {
+			return Reply{}, fmt.Errorf("%w: %s", ErrRuntime, failure.Name)
+		}
+		if len(fragments) == 0 {
+			return Reply{}, fmt.Errorf("%w: hub finished without a speak reply", ErrTimeout)
+		}
+		return Reply{Text: strings.Join(fragments, " "), Utterances: fragments, Handled: failure == nil, OK: failure == nil, SessionID: SessionIDFromContext(eventContext), RequestID: requestID, Events: events, FailureEvent: failure}, nil
+	}
 	if err := c.Emit(ctx, EventRecognizerLoopUtterance, UtterancePayload(prompt, lang), eventContext); err != nil {
 		return Reply{}, err
 	}
 	for {
 		select {
 		case <-ctx.Done():
-			return Reply{}, fmt.Errorf("%w: utterance handling timed out", ErrTimeout)
-		case event := <-c.Transport.Events():
+			return Reply{}, fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+		case <-settled:
+			return finish()
+		case event, open := <-sub.C:
+			if !open {
+				return Reply{}, subscriptionError(sub.Err())
+			}
 			if !EventMatchesContext(event, eventContext) {
 				continue
 			}
 			events = append(events, event)
 			switch event.Name {
 			case EventSpeak, EventOvosUtteranceSpeak:
-				if event.Text() != "" {
-					fragments = append(fragments, event.Text())
+				appendFragment(&fragments, event.Text())
+				if phaseComplete && len(fragments) > 0 {
+					schedule(settleWait)
 				}
-			case EventIntentUnmatched, EventIntentFailure, EventPolicyDenied, EventQueryTimeout:
-				failure = &event
+			case EventPolicyDenied, EventQueryTimeout:
+				hardFailure = &event
+				return finish()
+			case EventIntentUnmatched, EventIntentFailure:
+				softFailure = &event
+				if !phaseComplete {
+					phaseComplete = true
+					if len(fragments) > 0 {
+						schedule(settleWait)
+					} else {
+						schedule(emptyWait)
+					}
+				}
 			case EventUtteranceHandled:
-				if failure != nil && len(fragments) == 0 {
-					return Reply{}, fmt.Errorf("%w: %s", ErrRuntime, failure.Name)
+				if !phaseComplete {
+					phaseComplete = true
+					if len(fragments) > 0 {
+						schedule(settleWait)
+					} else {
+						schedule(emptyWait)
+					}
 				}
-				return Reply{
-					Text:       strings.Join(fragments, " "),
-					Utterances: fragments,
-					Handled:    failure == nil,
-					OK:         failure == nil,
-					SessionID:  SessionIDFromContext(eventContext),
-					RequestID:  requestID,
-					Events:     events,
-				}, nil
 			}
 		}
 	}
@@ -275,9 +400,6 @@ func (c *Client) Query(ctx context.Context, text string, opts QueryOptions) (Rep
 	transport, ok := c.Transport.(hiveMessageTransport)
 	if !ok {
 		return Reply{}, fmt.Errorf("%w: this transport does not support HiveMind query frames", ErrRuntime)
-	}
-	if err := c.Connect(ctx); err != nil {
-		return Reply{}, err
 	}
 	lang := opts.Lang
 	if lang == "" {
@@ -302,10 +424,15 @@ func (c *Client) Query(ctx context.Context, text string, opts QueryOptions) (Rep
 	eventContext := ContextWithCorrelation(opts.Context, sessionID, c.Identity.SiteID, lang, requestID)
 	queryCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if err := c.Connect(queryCtx); err != nil {
+		return Reply{}, err
+	}
 	events := []Event{}
 	fragments := []string{}
 	var failure *Event
-	messages := transport.HiveMessages()
+	sub := subscribeHiveMessages(transport)
+	defer sub.Close()
+	messages := sub.C
 	inner := HiveMessage{
 		MsgType: "bus",
 		Payload: map[string]any{
@@ -316,19 +443,24 @@ func (c *Client) Query(ctx context.Context, text string, opts QueryOptions) (Rep
 		Metadata: map[string]any{},
 		Route:    []any{},
 	}
-	if err := transport.SendHiveMessage(queryCtx, HiveMessage{
-		MsgType:  "query",
-		Payload:  hiveMessagePayload(inner),
-		Metadata: map[string]any{"query_id": queryID},
-		Route:    []any{},
-	}, true); err != nil {
+	if err := c.runOwned(queryCtx, true, func() error {
+		return transport.SendHiveMessage(queryCtx, HiveMessage{
+			MsgType:  "query",
+			Payload:  hiveMessagePayload(inner),
+			Metadata: map[string]any{"query_id": queryID},
+			Route:    []any{},
+		}, true)
+	}); err != nil {
 		return Reply{}, err
 	}
 	for {
 		select {
 		case <-queryCtx.Done():
-			return Reply{}, fmt.Errorf("%w: query timed out", ErrTimeout)
-		case message := <-messages:
+			return Reply{}, fmt.Errorf("%w: %w", ErrTimeout, queryCtx.Err())
+		case message, open := <-messages:
+			if !open {
+				return Reply{}, subscriptionError(sub.Err())
+			}
 			if queryIDFromHiveMessage(message) != queryID {
 				continue
 			}
@@ -357,8 +489,15 @@ func (c *Client) Query(ctx context.Context, text string, opts QueryOptions) (Rep
 			}
 			switch event.Name {
 			case EventSpeak, EventOvosUtteranceSpeak:
-				appendFragment(&fragments, event.Text())
-			case EventIntentUnmatched, EventIntentFailure, EventPolicyDenied, EventQueryTimeout:
+				if strings.TrimSpace(event.Text()) != "" {
+					appendFragment(&fragments, event.Text())
+					if failure != nil && (failure.Name == EventIntentUnmatched || failure.Name == EventIntentFailure) {
+						failure = nil
+					}
+				}
+			case EventIntentUnmatched, EventIntentFailure:
+				failure = &event
+			case EventPolicyDenied, EventQueryTimeout:
 				failure = &event
 				if len(fragments) == 0 {
 					return Reply{}, fmt.Errorf("%w: %s", ErrRuntime, event.Name)

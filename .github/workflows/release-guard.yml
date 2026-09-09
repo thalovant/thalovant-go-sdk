@@ -50,6 +50,10 @@ jobs:
             noise_store.go
             wire.go
             client.go
+            context_mutex.go
+            fallbacks.go
+            subscriptions.go
+            noise_store_file.go
             README.md
             LICENSE
         run: python .github/scripts/release_guard.py

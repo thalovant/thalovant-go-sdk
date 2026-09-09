@@ -847,7 +847,9 @@ func TestHTTPNoiseReconnectWaitsForFailedCallerPoll(t *testing.T) {
 	if err := transport.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	transport.stopPolling()
+	if err := transport.stopPolling(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	held.pause.Store(true)
 	polled := make(chan error, 1)
 	go func() { polled <- transport.PollOnce(context.Background()) }()
