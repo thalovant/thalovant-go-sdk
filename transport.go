@@ -181,6 +181,9 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
 			defer cleanupCancel()
 			_, _ = t.request(cleanupCtx, http.MethodPost, "/disconnect", nil)
+			t.mu.Lock()
+			t.admitted = false
+			t.mu.Unlock()
 		}
 	}()
 	for !t.IsHandshakeComplete() {
@@ -224,7 +227,14 @@ func (t *HTTPTransport) Disconnect(ctx context.Context) error {
 	t.invalidateNoise()
 	t.pollMu.Lock()
 	defer t.pollMu.Unlock()
-	_, err := t.request(ctx, http.MethodPost, "/disconnect", nil)
+	t.mu.Lock()
+	admitted := t.admitted
+	t.admitted = false
+	t.mu.Unlock()
+	var err error
+	if admitted {
+		_, err = t.request(ctx, http.MethodPost, "/disconnect", nil)
+	}
 	t.mu.Lock()
 	t.connected, t.handshake, t.admitted = false, false, false
 	t.noise = nil
