@@ -78,6 +78,7 @@ type HTTPTransport struct {
 	pollDone      chan struct{}
 	BusEvents     chan Event
 	HiveEvents    chan HiveMessage
+	admitted      bool
 	connected     bool
 	handshake     bool
 	lastError     error
@@ -121,6 +122,17 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 	t.lifecycleMu.Lock()
 	defer t.lifecycleMu.Unlock()
 	t.stopPolling()
+	t.mu.Lock()
+	admitted := t.admitted
+	t.admitted = false
+	t.mu.Unlock()
+	if admitted {
+		// The HTTP plugin only offers a fresh handshake for an unregistered peer.
+		// Reset this object's own previous admission before renewing its session.
+		cleanupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		_, _ = t.request(cleanupCtx, http.MethodPost, "/disconnect", nil)
+		cancel()
+	}
 	t.invalidateNoise()
 	t.beginConnection()
 	defer func() {
@@ -161,6 +173,7 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 	}
 	t.mu.Lock()
 	t.connected = true
+	t.admitted = true
 	t.connection.markOpen(time.Now(), false)
 	t.mu.Unlock()
 	defer func() {
@@ -213,7 +226,7 @@ func (t *HTTPTransport) Disconnect(ctx context.Context) error {
 	defer t.pollMu.Unlock()
 	_, err := t.request(ctx, http.MethodPost, "/disconnect", nil)
 	t.mu.Lock()
-	t.connected, t.handshake = false, false
+	t.connected, t.handshake, t.admitted = false, false, false
 	t.noise = nil
 	t.connection.close()
 	t.mu.Unlock()

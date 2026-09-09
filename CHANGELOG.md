@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.5
+
+- Reset this transport object's prior HTTP admission before reconnecting after
+  a failed session. The listener does not issue a fresh Noise offer while the
+  old peer is still registered. Keep the static key and hub pin for XX-to-KK
+  recovery; a first connection does not disconnect an unknown existing peer.
+
 ## 0.4.4
 
 - Implement the deployed HiveMind v3 Noise exchange for HTTP and MQTT, including

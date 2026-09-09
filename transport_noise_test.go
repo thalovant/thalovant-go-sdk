@@ -171,6 +171,7 @@ type httpNoiseFixture struct {
 	tamper      bool
 	plainBus    bool
 	unsupported bool
+	connected   bool
 }
 
 func newHTTPNoiseFixture(t *testing.T) *httpNoiseFixture {
@@ -199,6 +200,11 @@ func (f *httpNoiseFixture) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.URL.Path {
 	case "/connect":
+		if f.connected {
+			reply(map[string]any{"status": "Connected"})
+			return
+		}
+		f.connected = true
 		f.responder.reset()
 		if f.unsupported {
 			f.responder.offer["noise"] = map[string]any{"patterns": []any{"unsupported"}, "suites": []any{"unsupported"}}
@@ -241,6 +247,7 @@ func (f *httpNoiseFixture) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		reply(map[string]any{"status": "message sent"})
 	case "/disconnect":
+		f.connected = false
 		reply(map[string]any{"status": "Disconnected"})
 	default:
 		http.NotFound(w, r)
@@ -724,5 +731,42 @@ func TestHTTPNoiseRefusesAdmissionRedirects(t *testing.T) {
 				t.Fatal("redirect marked ready")
 			}
 		})
+	}
+}
+
+func TestHTTPNoiseReconnectResetsPreviouslyAdmittedSession(t *testing.T) {
+	fixture := newHTTPNoiseFixture(t)
+	transport := fixture.transport(t)
+	if err := transport.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fixture.mu.Lock()
+	fixture.tamper = true
+	fixture.mu.Unlock()
+	if err := transport.EmitBus(context.Background(), "echo", Data{}, Context{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.PollOnce(context.Background()); err == nil {
+		t.Fatal("tampered reply accepted")
+	}
+	fixture.mu.Lock()
+	fixture.tamper = false
+	fixture.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := transport.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !transport.IsHandshakeComplete() {
+		t.Fatal("session did not recover")
+	}
+	fixture.mu.Lock()
+	patterns := fmt.Sprint(fixture.responder.patterns)
+	fixture.mu.Unlock()
+	if patterns != "[XXpsk2 KKpsk0]" {
+		t.Fatalf("recovery lost key continuity: %s", patterns)
+	}
+	if err := transport.Disconnect(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
