@@ -552,12 +552,19 @@ func (c *Client) Query(ctx context.Context, text string, opts QueryOptions) (Rep
 		if len(fragments) == 0 {
 			return Reply{}, fmt.Errorf("%w: hub finished the query without a speak reply", ErrTimeout)
 		}
+		replySessionID := SessionIDFromContext(eventContext)
+		for _, event := range events {
+			if id := event.SessionID(); id != "" {
+				replySessionID = id
+				break
+			}
+		}
 		return Reply{
 			Text:         strings.Join(fragments, " "),
 			Utterances:   fragments,
 			Handled:      failure == nil,
 			OK:           failure == nil,
-			SessionID:    SessionIDFromContext(eventContext),
+			SessionID:    replySessionID,
 			RequestID:    requestID,
 			Events:       events,
 			FailureEvent: failure,

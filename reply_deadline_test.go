@@ -163,3 +163,34 @@ func TestQueryTerminalReturnsWhileSendRetires(t *testing.T) {
 		})
 	}
 }
+
+func TestQueryReturnsAcceptedRuntimeSessionWithRequestedFallback(t *testing.T) {
+	for _, runtimeSession := range []string{"", "runtime-session"} {
+		t.Run("runtime="+runtimeSession, func(t *testing.T) {
+			transport := &queryDispatchTransport{blockedClientTransport: newBlockedClientTransport(), sent: make(chan HiveMessage, 1)}
+			transport.ready.Store(true)
+			done := make(chan Reply, 1)
+			errs := make(chan error, 1)
+			go func() {
+				reply, err := (&Client{Transport: transport}).Query(context.Background(), "hello", QueryOptions{Timeout: time.Second, QueryID: "owned", SessionID: "requested"})
+				done <- reply
+				errs <- err
+			}()
+			<-transport.sent
+			publish := func(queryID, name, sessionID string) {
+				transport.streams.hive.publish(HiveMessage{MsgType: "cascade", Metadata: map[string]any{"query_id": queryID}, Payload: map[string]any{"type": name, "data": map[string]any{"utterance": "answer"}, "context": map[string]any{"session_id": sessionID}}})
+			}
+			publish("foreign", EventSpeak, "foreign-session")
+			publish("owned", EventSpeak, runtimeSession)
+			publish("owned", "hive.query.complete", "")
+			reply := <-done
+			expected := runtimeSession
+			if expected == "" {
+				expected = "requested"
+			}
+			if err := <-errs; err != nil || reply.SessionID != expected {
+				t.Fatalf("wrong reply session: %+v %v", reply, err)
+			}
+		})
+	}
+}
