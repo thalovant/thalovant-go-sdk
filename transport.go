@@ -122,6 +122,8 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 	t.lifecycleMu.Lock()
 	defer t.lifecycleMu.Unlock()
 	t.stopPolling()
+	t.pollMu.Lock()
+	defer t.pollMu.Unlock()
 	t.mu.Lock()
 	admitted := t.admitted
 	t.admitted = false
@@ -187,7 +189,7 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 		}
 	}()
 	for !t.IsHandshakeComplete() {
-		if err = t.PollOnce(handshakeCtx); err != nil {
+		if err = t.pollOnceLocked(handshakeCtx); err != nil {
 			return err
 		}
 		if t.IsHandshakeComplete() {
@@ -224,9 +226,9 @@ func (t *HTTPTransport) Disconnect(ctx context.Context) error {
 	t.lifecycleMu.Lock()
 	defer t.lifecycleMu.Unlock()
 	t.stopPolling()
-	t.invalidateNoise()
 	t.pollMu.Lock()
 	defer t.pollMu.Unlock()
+	t.invalidateNoise()
 	t.mu.Lock()
 	admitted := t.admitted
 	t.admitted = false
@@ -332,14 +334,18 @@ func (t *HTTPTransport) pollLoop(ctx context.Context) {
 	}
 }
 
-func (t *HTTPTransport) PollOnce(ctx context.Context) (err error) {
+func (t *HTTPTransport) PollOnce(ctx context.Context) error {
+	t.pollMu.Lock()
+	defer t.pollMu.Unlock()
+	return t.pollOnceLocked(ctx)
+}
+
+func (t *HTTPTransport) pollOnceLocked(ctx context.Context) (err error) {
 	defer func() {
 		if err != nil {
 			t.failConnection(err)
 		}
 	}()
-	t.pollMu.Lock()
-	defer t.pollMu.Unlock()
 	body, err := t.request(ctx, http.MethodGet, "/get_messages", nil)
 	if err != nil {
 		return err

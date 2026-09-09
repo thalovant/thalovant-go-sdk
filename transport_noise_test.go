@@ -773,6 +773,7 @@ func TestHTTPNoiseReconnectResetsPreviouslyAdmittedSession(t *testing.T) {
 }
 
 type heldNoiseWrite struct {
+	path    string
 	base    http.RoundTripper
 	pause   atomic.Bool
 	entered chan struct{}
@@ -780,7 +781,11 @@ type heldNoiseWrite struct {
 }
 
 func (h *heldNoiseWrite) RoundTrip(request *http.Request) (*http.Response, error) {
-	if request.URL.Path == "/send_message" && h.pause.Swap(false) {
+	path := h.path
+	if path == "" {
+		path = "/send_message"
+	}
+	if request.URL.Path == path && h.pause.Swap(false) {
 		close(h.entered)
 		select {
 		case <-h.resume:
@@ -828,6 +833,41 @@ func TestHTTPNoiseReconnectWaitsForFailedInflightSend(t *testing.T) {
 	}
 	if event := <-transport.Events(); event.Name != "new" {
 		t.Fatal("new session failed")
+	}
+	if err := transport.Disconnect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestHTTPNoiseReconnectWaitsForFailedCallerPoll(t *testing.T) {
+	fixture := newHTTPNoiseFixture(t)
+	transport := fixture.transport(t)
+	held := &heldNoiseWrite{path: "/get_messages", base: transport.HTTPClient.Transport, entered: make(chan struct{}), resume: make(chan struct{})}
+	transport.HTTPClient.Transport = held
+	if err := transport.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	transport.stopPolling()
+	held.pause.Store(true)
+	polled := make(chan error, 1)
+	go func() { polled <- transport.PollOnce(context.Background()) }()
+	<-held.entered
+	reconnected := make(chan error, 1)
+	go func() { reconnected <- transport.Connect(context.Background()) }()
+	select {
+	case err := <-reconnected:
+		t.Fatalf("reconnect passed an in-flight caller poll: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(held.resume)
+	if err := <-polled; err == nil {
+		t.Fatal("failed poll was accepted")
+	}
+	if err := <-reconnected; err != nil {
+		t.Fatal(err)
+	}
+	if !transport.IsHandshakeComplete() {
+		t.Fatal("old poll invalidated new session")
 	}
 	if err := transport.Disconnect(context.Background()); err != nil {
 		t.Fatal(err)
