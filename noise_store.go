@@ -35,8 +35,8 @@ func NoiseStateDir() (string, error) {
 // LoadOrCreateNoiseKey returns this client's persistent static X25519 keypair,
 // generating and storing one on first use.
 //
-// The key file is created 0600 and is rejected if it is group- or
-// world-accessible, matching how the SDK treats every other on-disk secret.
+// On Unix the key file is created 0600 and rejected if group/world-accessible.
+// Windows inherits the protected state directory's access controls.
 func LoadOrCreateNoiseKey(dir string) (noise.DHKey, error) {
 	if strings.TrimSpace(dir) == "" {
 		resolved, err := NoiseStateDir()

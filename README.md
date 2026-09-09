@@ -527,7 +527,11 @@ the identity `password` with argon2id, salted with the hub's node id, so an
 identity that can authenticate can already handshake.
 
 Two files persist beside the SDK config file (`~/.config/thalovant` unless
-`XDG_CONFIG_HOME` or `%APPDATA%` says otherwise), both `0600`:
+`XDG_CONFIG_HOME` or `%APPDATA%` says otherwise), both `0600` on Unix.
+Windows inherits directory access controls; use an application-private directory
+accessible only to the intended user. The state filesystem must support atomic
+rename and hard links (for example ext4, APFS or NTFS); unsupported storage fails
+without replacing the existing identity. The files are:
 
 - `noise_key` — this client's static X25519 key. It has to persist: a hub pins
   it on first contact, so regenerating it makes the client look like a
