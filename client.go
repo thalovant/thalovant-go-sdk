@@ -103,17 +103,21 @@ func (c *Client) Connect(ctx context.Context) error {
 	if err := c.connectionGate.Lock(connectCtx); err != nil {
 		return fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
-	health := c.Transport.Healthcheck()
-	if health.Connected && health.HandshakeComplete {
-		c.connectionGate.Unlock()
-		return nil
-	}
 	// The worker retains ownership through cleanup, even if a custom
 	// transport ignores cancellation. A later caller cannot race its teardown.
 	result := make(chan error, 1)
 	go func() {
 		defer c.connectionGate.Unlock()
-		err := c.Transport.Connect(connectCtx)
+		var err error
+		health := c.Transport.Healthcheck()
+		if connectCtx.Err() != nil {
+			err = fmt.Errorf("%w: %w", ErrTimeout, connectCtx.Err())
+		} else if health.Connected && health.HandshakeComplete {
+			result <- nil
+			return
+		} else {
+			err = c.Transport.Connect(connectCtx)
+		}
 		if err == nil {
 			health := c.Transport.Healthcheck()
 			if !health.Connected || !health.HandshakeComplete {

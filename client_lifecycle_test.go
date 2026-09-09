@@ -161,3 +161,35 @@ func TestClientCloseBoundsCustomTransportAndRetainsOwnership(t *testing.T) {
 		t.Fatal("connect raced pending close")
 	}
 }
+
+type blockedHealthTransport struct {
+	*blockedClientTransport
+	healthStarted chan struct{}
+	healthRelease chan struct{}
+}
+
+func (t *blockedHealthTransport) Healthcheck() TransportHealth {
+	t.healthStarted <- struct{}{}
+	<-t.healthRelease
+	return TransportHealth{}
+}
+func TestClientDeadlineIncludesCustomHealthProbe(t *testing.T) {
+	transport := &blockedHealthTransport{blockedClientTransport: newBlockedClientTransport(), healthStarted: make(chan struct{}, 1), healthRelease: make(chan struct{})}
+	client := &Client{Transport: transport, ConnectTimeout: 25 * time.Millisecond}
+	done := make(chan error, 1)
+	go func() { done <- client.Connect(context.Background()) }()
+	awaitSignal(t, transport.healthStarted)
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrTimeout) {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("health probe defeated connect deadline")
+	}
+	if transport.connects.Load() != 0 {
+		t.Fatal("connect started after probe deadline")
+	}
+	close(transport.healthRelease)
+	awaitCleanup(t, transport.blockedClientTransport)
+}

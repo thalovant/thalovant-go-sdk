@@ -152,6 +152,7 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 		_, cleanupErr := t.request(cleanupCtx, http.MethodPost, "/disconnect", nil)
 		cancel()
 		if cleanupErr != nil {
+			t.failConnection(cleanupErr)
 			return cleanupErr
 		}
 		t.mu.Lock()

@@ -550,9 +550,9 @@ func (c *Client) ListIntents(ctx context.Context, lang string, opts ...IntentOpt
 // language, keyword ones first, sentences included for a template intent. An
 // empty lang asks for "en-us". A registration the hub does not know yields an
 // empty list, not an error: ok: false is a real answer here, unlike on the
-// listing, and means the intent has no sentences. Like Ask, it reads the transport's event channel,
-// so it must not run concurrently with Ask or another intent call on the
-// same client.
+// listing, and means the intent has no sentences. Built-in transports support
+// concurrent collectors through independent subscriptions. Legacy custom
+// transports with one shared event channel must serialize collectors.
 func (c *Client) DescribeIntent(ctx context.Context, skillID, intentName, lang string, opts ...IntentOptions) ([]IntentDefinition, error) {
 	options := intentOptions(opts)
 	skillID = strings.TrimSpace(skillID)

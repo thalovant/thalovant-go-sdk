@@ -875,3 +875,32 @@ func TestHTTPNoiseReconnectWaitsForFailedCallerPoll(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestHTTPFailedAdmissionResetRetainsOwnershipAndReportsError(t *testing.T) {
+	var resets, admissions atomic.Int32
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/disconnect" {
+			resets.Add(1)
+			http.Error(w, "synthetic cleanup failure", http.StatusServiceUnavailable)
+			return
+		}
+		admissions.Add(1)
+		http.Error(w, "unexpected admission", http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	transport := NewHTTPTransport(Identity{Password: "synthetic", DataPlaneEndpoints: HubDataPlaneEndpoints{HTTPS: server.URL}})
+	transport.HTTPClient = server.Client()
+	transport.admitted = true
+	for i := 0; i < 2; i++ {
+		err := transport.Connect(context.Background())
+		if err == nil {
+			t.Fatal("failed cleanup allowed new admission")
+		}
+		if !transport.admitted || transport.Healthcheck().LastError == "" {
+			t.Fatal("unconfirmed admission or error was forgotten")
+		}
+	}
+	if resets.Load() != 2 || admissions.Load() != 0 {
+		t.Fatal("owned cleanup was not retried before admission")
+	}
+}
