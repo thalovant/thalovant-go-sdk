@@ -165,7 +165,7 @@ func TestQueryTerminalReturnsWhileSendRetires(t *testing.T) {
 }
 
 func TestQueryReturnsAcceptedRuntimeSessionWithRequestedFallback(t *testing.T) {
-	for _, runtimeSession := range []string{"", "runtime-session"} {
+	for _, runtimeSession := range []string{"", " ", "runtime-session"} {
 		t.Run("runtime="+runtimeSession, func(t *testing.T) {
 			transport := &queryDispatchTransport{blockedClientTransport: newBlockedClientTransport(), sent: make(chan HiveMessage, 1)}
 			transport.ready.Store(true)
@@ -185,7 +185,7 @@ func TestQueryReturnsAcceptedRuntimeSessionWithRequestedFallback(t *testing.T) {
 			publish("owned", "hive.query.complete", "")
 			reply := <-done
 			expected := runtimeSession
-			if expected == "" {
+			if expected == "" || expected == " " {
 				expected = "requested"
 			}
 			if err := <-errs; err != nil || reply.SessionID != expected {

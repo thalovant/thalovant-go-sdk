@@ -374,7 +374,7 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 		}
 		sessionID := SessionIDFromContext(eventContext)
 		for _, event := range events {
-			if id := event.SessionID(); id != "" {
+			if id := event.SessionID(); strings.TrimSpace(id) != "" {
 				sessionID = id
 				break
 			}
@@ -554,7 +554,7 @@ func (c *Client) Query(ctx context.Context, text string, opts QueryOptions) (Rep
 		}
 		replySessionID := SessionIDFromContext(eventContext)
 		for _, event := range events {
-			if id := event.SessionID(); id != "" {
+			if id := event.SessionID(); strings.TrimSpace(id) != "" {
 				replySessionID = id
 				break
 			}
