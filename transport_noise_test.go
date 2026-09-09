@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -765,6 +766,68 @@ func TestHTTPNoiseReconnectResetsPreviouslyAdmittedSession(t *testing.T) {
 	fixture.mu.Unlock()
 	if patterns != "[XXpsk2 KKpsk0]" {
 		t.Fatalf("recovery lost key continuity: %s", patterns)
+	}
+	if err := transport.Disconnect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+type heldNoiseWrite struct {
+	base    http.RoundTripper
+	pause   atomic.Bool
+	entered chan struct{}
+	resume  chan struct{}
+}
+
+func (h *heldNoiseWrite) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.URL.Path == "/send_message" && h.pause.Swap(false) {
+		close(h.entered)
+		select {
+		case <-h.resume:
+			return nil, errors.New("synthetic failed write")
+		case <-request.Context().Done():
+			return nil, request.Context().Err()
+		}
+	}
+	return h.base.RoundTrip(request)
+}
+func TestHTTPNoiseReconnectWaitsForFailedInflightSend(t *testing.T) {
+	fixture := newHTTPNoiseFixture(t)
+	transport := fixture.transport(t)
+	held := &heldNoiseWrite{base: transport.HTTPClient.Transport, entered: make(chan struct{}), resume: make(chan struct{})}
+	transport.HTTPClient.Transport = held
+	if err := transport.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	held.pause.Store(true)
+	sent := make(chan error, 1)
+	go func() { sent <- transport.EmitBus(context.Background(), "old", Data{}, Context{}) }()
+	<-held.entered
+	reconnected := make(chan error, 1)
+	go func() { reconnected <- transport.Connect(context.Background()) }()
+	select {
+	case err := <-reconnected:
+		t.Fatalf("reconnect passed an in-flight send: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(held.resume)
+	if err := <-sent; err == nil {
+		t.Fatal("failed send was accepted")
+	}
+	if err := <-reconnected; err != nil {
+		t.Fatal(err)
+	}
+	if !transport.IsHandshakeComplete() {
+		t.Fatal("old send invalidated new session")
+	}
+	if err := transport.EmitBus(context.Background(), "new", Data{}, Context{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.PollOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if event := <-transport.Events(); event.Name != "new" {
+		t.Fatal("new session failed")
 	}
 	if err := transport.Disconnect(context.Background()); err != nil {
 		t.Fatal(err)

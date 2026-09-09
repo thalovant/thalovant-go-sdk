@@ -546,6 +546,8 @@ func elapsedMS(start time.Time, end time.Time) float64 {
 }
 
 func (t *HTTPTransport) sendHiveMessage(ctx context.Context, message HiveMessage, _ bool) error {
+	t.lifecycleMu.Lock()
+	defer t.lifecycleMu.Unlock()
 	t.mu.RLock()
 	channel := t.noise
 	connected := t.connected
