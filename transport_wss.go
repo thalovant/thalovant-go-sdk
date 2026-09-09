@@ -150,6 +150,7 @@ func (t *WSSTransport) Disconnect(_ context.Context) error {
 	t.mu.Lock()
 	conn := t.conn
 	t.conn = nil
+	t.connected = false
 	t.handshake = false
 	t.session = nil
 	t.noiseHandshake = nil
@@ -259,10 +260,14 @@ func (t *WSSTransport) handleRawMessage(ctx context.Context, raw []byte) error {
 			return nil
 		}
 		if !isJSON {
-			// A HIVEMIND-WIRE-1 binary frame. The Go SDK does not decode
-			// binary bus payloads yet, so it is dropped rather than
-			// mis-parsed as JSON.
-			return nil
+			decoded, err := DecodeHiveBinaryFrame(payload)
+			if err != nil {
+				return err
+			}
+			payload, err = json.Marshal(decoded)
+			if err != nil {
+				return err
+			}
 		}
 		raw = payload
 	}
@@ -281,6 +286,9 @@ func (t *WSSTransport) handleRawMessage(ctx context.Context, raw []byte) error {
 		return t.handleHandshake(ctx, payload)
 	}
 
+	if session == nil {
+		return fmt.Errorf("%w: application traffic received before Noise negotiation", ErrConnection)
+	}
 	var message HiveMessage
 	if err := json.Unmarshal(raw, &message); err != nil {
 		return err
@@ -413,13 +421,8 @@ func (t *WSSTransport) continueNoiseHandshake(ctx context.Context, noiseParams m
 	}
 
 	if _, err := handshake.readMessage(message); err != nil {
-		// KKpsk0 needs each side to hold the other's static key, but the
-		// client chose it knowing only that it had pinned the server's. The
-		// failure is as likely to mean the server never had ours, so drop the
-		// pin and let the next attempt fall back to XXpsk2.
-		if handshake.pattern == noisePatternKK {
-			_ = ForgetNoisePin(t.NoiseStateDir, nodeID)
-		}
+		// Authentication failure must not erase trust. Only an explicit
+		// ForgetNoisePin after verifying a key rotation may permit a new key.
 		// The PSK is the other thing this message authenticates, so a rejection
 		// may mean the stored key was derived from a password that has since
 		// been rotated. Drop it; the next attempt derives from the current one.
@@ -478,20 +481,7 @@ func (t *WSSTransport) continueNoiseHandshake(ctx context.Context, noiseParams m
 // answering at this address. The SDK cannot tell those apart, so it refuses and
 // leaves clearing the pin (ForgetNoisePin) as a deliberate act.
 func (t *WSSTransport) pinServerKey(nodeID, remoteStaticKey string) error {
-	if remoteStaticKey == "" {
-		return nil
-	}
-	pinned, err := LoadNoisePin(t.NoiseStateDir, nodeID)
-	if err != nil {
-		return err
-	}
-	if pinned == "" {
-		return SaveNoisePin(t.NoiseStateDir, nodeID, remoteStaticKey)
-	}
-	if pinned != remoteStaticKey {
-		return fmt.Errorf("%w: the hub's Noise static key changed. If the hub was not reinstalled or replaced, another machine may be answering at this address. If it was, drop the stale pin with ForgetNoisePin and reconnect to trust the new key", ErrConnection)
-	}
-	return nil
+	return pinNoisePeer(t.NoiseStateDir, nodeID, remoteStaticKey)
 }
 
 // pskFor derives (or reuses) the pre-shared key for a hub.
@@ -669,6 +659,9 @@ func (t *WSSTransport) recordReadFailure(generation uint64, err error) {
 	}
 	t.lastError = err
 	t.connected = false
+	t.handshake = false
+	t.session = nil
+	t.noiseHandshake = nil
 	t.connection.fail(time.Now(), err)
 }
 

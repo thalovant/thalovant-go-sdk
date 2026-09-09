@@ -1,5 +1,23 @@
 # Changelog
 
+## 0.4.4
+
+- Implement the deployed HiveMind v3 Noise exchange for HTTP and MQTT, including
+  persistent static keys, hub pin continuity, encrypted HELLO and bus traffic,
+  chunked messages, and XXpsk2/KKpsk0 reconnects. Capability offers alone never
+  mark a transport ready; plaintext sends cannot bypass the session.
+- HTTP retains replica affinity cookies, uses the binary send/poll endpoints,
+  and rejects error JSON even when the HTTP status is 200.
+- MQTT serializes encrypted publishes and fails closed on broker disconnects.
+  Call `Connect` again to resubscribe and negotiate a new session. Add
+  `TLSConfig` for broker trust roots, plus `NoiseStateDir` and `RemoteStaticKey`
+  on both HTTP and MQTT.
+- WSS no longer drops the trusted hub key after a failed KK exchange and clears
+  session/readiness on disconnect or read failure.
+- Validate real local TLS HTTP and MQTT round trips, same-object reconnects,
+  concurrent chunked messages, wrong passwords, tampering/replay, HTTP errors,
+  plaintext rejection, and key-change rejection.
+
 ## 0.4.1
 
 - **Security.** Move `golang.org/x/crypto` from `v0.44.0` to `v0.55.0`, which

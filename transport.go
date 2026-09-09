@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/cookiejar"
 	"net/url"
 	"strings"
 	"sync"
@@ -65,10 +66,16 @@ type RuntimeTransport interface {
 }
 
 type HTTPTransport struct {
-	Identity      Identity
-	UserAgent     string
-	PollInterval  time.Duration
-	HTTPClient    *http.Client
+	Identity     Identity
+	UserAgent    string
+	PollInterval time.Duration
+	HTTPClient   *http.Client
+	// NoiseStateDir selects the persistent client key and hub pin directory.
+	NoiseStateDir string
+	noise         *noiseChannel
+	pollMu        sync.Mutex
+	lifecycleMu   sync.Mutex
+	pollDone      chan struct{}
 	BusEvents     chan Event
 	HiveEvents    chan HiveMessage
 	connected     bool
@@ -110,76 +117,131 @@ func (t *HTTPTransport) Authorization() string {
 	return base64.StdEncoding.EncodeToString([]byte(t.UserAgent + ":" + t.Identity.AccessKey))
 }
 
-func (t *HTTPTransport) Connect(ctx context.Context) error {
+func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
+	t.lifecycleMu.Lock()
+	defer t.lifecycleMu.Unlock()
+	t.stopPolling()
+	t.invalidateNoise()
 	t.beginConnection()
-	// TLS is the only confidentiality on this path. The identity crypto key
-	// that once sealed HTTP payloads separately is gone with v3, so a plain
-	// http:// hub would put every message, and the access key in the
-	// authorization query, on the wire in the clear.
-	if err := requireTLSEndpoint(t.BaseURL()); err != nil {
-		t.failConnection(err)
+	defer func() {
+		if err != nil {
+			t.failConnection(err)
+		}
+	}()
+	if err = requireTLSEndpoint(t.BaseURL()); err != nil {
 		return err
 	}
-	endpoint := t.BaseURL() + "/connect?authorization=" + url.QueryEscape(t.Authorization())
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
-	if err != nil {
-		t.failConnection(err)
-		return err
+	if t.Identity.Password == "" {
+		return fmt.Errorf("%w: v3 Noise requires the identity password", ErrIdentity)
 	}
-	resp, err := t.HTTPClient.Do(req)
-	if err != nil {
-		wrapped := fmt.Errorf("%w: %v", ErrConnection, scrubTransportError(err))
-		t.failConnection(wrapped)
-		return wrapped
+	client := t.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
 	}
-	_ = resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		err := fmt.Errorf("%w: connect status %d", ErrConnection, resp.StatusCode)
-		t.failConnection(err)
+	// Never mutate the caller's client or a process-global default. Keep the jar
+	// across requests and reconnects for the HTTP plugin's replica affinity cookie.
+	copyClient := *client
+	// Identity authorization and encrypted form traffic are bound to this
+	// endpoint; never let a redirect move credentials or downgrade TLS.
+	copyClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+	if copyClient.Jar == nil {
+		copyClient.Jar, err = cookiejar.New(nil)
+		if err != nil {
+			return err
+		}
+	}
+	t.HTTPClient = &copyClient
+	t.mu.Lock()
+	t.noise = &noiseChannel{identity: t.Identity, stateDir: t.NoiseStateDir, write: t.writeFrame}
+	t.mu.Unlock()
+	handshakeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	if _, err = t.request(handshakeCtx, http.MethodPost, "/connect", nil); err != nil {
 		return err
 	}
 	t.mu.Lock()
 	t.connected = true
 	t.connection.markOpen(time.Now(), false)
 	t.mu.Unlock()
-
-	deadline := time.Now().Add(6 * time.Second)
-	for !t.IsHandshakeComplete() && time.Now().Before(deadline) {
-		if err := t.PollOnce(ctx); err != nil {
-			t.failConnection(err)
+	defer func() {
+		if err != nil {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cleanupCancel()
+			_, _ = t.request(cleanupCtx, http.MethodPost, "/disconnect", nil)
+		}
+	}()
+	for !t.IsHandshakeComplete() {
+		if err = t.PollOnce(handshakeCtx); err != nil {
 			return err
 		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if !t.IsHandshakeComplete() {
-		err := fmt.Errorf("%w: HiveMind HTTP handshake timed out", ErrTimeout)
-		t.failConnection(err)
-		return err
+		if t.IsHandshakeComplete() {
+			break
+		}
+		select {
+		case <-handshakeCtx.Done():
+			return fmt.Errorf("%w: HiveMind HTTP Noise handshake timed out", ErrTimeout)
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 	t.completeConnection()
-	pollCtx, cancel := context.WithCancel(context.Background())
-	t.cancelPolling = cancel
-	go t.pollLoop(pollCtx)
+	pollCtx, pollCancel := context.WithCancel(context.Background())
+	t.cancelPolling = pollCancel
+	t.pollDone = make(chan struct{})
+	go func(done chan struct{}) { defer close(done); t.pollLoop(pollCtx) }(t.pollDone)
 	return nil
 }
 
-func (t *HTTPTransport) Disconnect(ctx context.Context) error {
+// stopPolling joins the old reader before replacing a channel, preventing a
+// previous connection's delayed poll from consuming a new session's counters.
+func (t *HTTPTransport) stopPolling() {
 	if t.cancelPolling != nil {
 		t.cancelPolling()
+		t.cancelPolling = nil
 	}
-	endpoint := t.BaseURL() + "/disconnect?authorization=" + url.QueryEscape(t.Authorization())
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
-	if err == nil {
-		if resp, err := t.HTTPClient.Do(req); err == nil {
-			_ = resp.Body.Close()
-		}
+	if t.pollDone != nil {
+		<-t.pollDone
+		t.pollDone = nil
 	}
+}
+
+func (t *HTTPTransport) Disconnect(ctx context.Context) error {
+	t.lifecycleMu.Lock()
+	defer t.lifecycleMu.Unlock()
+	t.stopPolling()
+	t.invalidateNoise()
+	t.pollMu.Lock()
+	defer t.pollMu.Unlock()
+	_, err := t.request(ctx, http.MethodPost, "/disconnect", nil)
 	t.mu.Lock()
-	t.connected = false
-	t.handshake = false
+	t.connected, t.handshake = false, false
+	t.noise = nil
 	t.connection.close()
 	t.mu.Unlock()
-	return nil
+	return err
+}
+
+func (t *HTTPTransport) invalidateNoise() {
+	t.mu.Lock()
+	channel := t.noise
+	t.noise = nil
+	t.connected, t.handshake = false, false
+	t.mu.Unlock()
+	if channel != nil {
+		channel.mu.Lock()
+		channel.failed = true
+		channel.mu.Unlock()
+	}
+}
+
+// RemoteStaticKey returns the authenticated peer key, empty outside a session.
+func (t *HTTPTransport) RemoteStaticKey() string {
+	t.mu.RLock()
+	channel := t.noise
+	t.mu.RUnlock()
+	if channel == nil {
+		return ""
+	}
+	return channel.remoteKey()
 }
 
 func (t *HTTPTransport) Healthcheck() TransportHealth {
@@ -236,6 +298,8 @@ func (t *HTTPTransport) pollLoop(ctx context.Context) {
 			if err := t.PollOnce(ctx); err != nil {
 				t.mu.Lock()
 				t.lastError = err
+				t.handshake = false
+				t.noise = nil
 				t.connected = false
 				t.connection.fail(time.Now(), err)
 				t.mu.Unlock()
@@ -245,92 +309,115 @@ func (t *HTTPTransport) pollLoop(ctx context.Context) {
 	}
 }
 
-func (t *HTTPTransport) PollOnce(ctx context.Context) error {
-	endpoint := t.BaseURL() + "/get_messages?authorization=" + url.QueryEscape(t.Authorization())
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+func (t *HTTPTransport) PollOnce(ctx context.Context) (err error) {
+	defer func() {
+		if err != nil {
+			t.failConnection(err)
+		}
+	}()
+	t.pollMu.Lock()
+	defer t.pollMu.Unlock()
+	body, err := t.request(ctx, http.MethodGet, "/get_messages", nil)
 	if err != nil {
 		return err
 	}
-	resp, err := t.HTTPClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrConnection, scrubTransportError(err))
+	messages, ok := body["messages"].([]any)
+	if !ok {
+		return fmt.Errorf("%w: malformed HTTP message queue", ErrProtocol)
 	}
-	defer resp.Body.Close()
-	var body struct {
-		Error    string `json:"error"`
-		Messages []any  `json:"messages"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return err
-	}
-	if body.Error != "" {
-		return fmt.Errorf("%w: %s", ErrRuntime, body.Error)
-	}
-	for _, raw := range body.Messages {
+	for _, raw := range messages {
 		if err := t.handleRawMessage(ctx, raw); err != nil {
 			return err
 		}
+	}
+	t.mu.RLock()
+	channel := t.noise
+	t.mu.RUnlock()
+	if channel == nil || !channel.ready() {
+		return nil
+	}
+	body, err = t.request(ctx, http.MethodGet, "/get_binary_messages", nil)
+	if err != nil {
+		return err
+	}
+	frames, ok := body["b64_messages"].([]any)
+	if !ok {
+		return fmt.Errorf("%w: malformed HTTP binary message queue", ErrProtocol)
+	}
+	for _, encoded := range frames {
+		value, ok := encoded.(string)
+		if !ok {
+			return fmt.Errorf("%w: malformed HTTP binary frame", ErrProtocol)
+		}
+		raw, err := base64.StdEncoding.DecodeString(value)
+		if err != nil {
+			return fmt.Errorf("%w: malformed HTTP binary frame", ErrProtocol)
+		}
+		message, err := channel.receive(ctx, raw, true)
+		if err != nil {
+			return err
+		}
+		t.dispatch(message)
 	}
 	return nil
 }
 
 func (t *HTTPTransport) handleRawMessage(ctx context.Context, raw any) error {
 	var rawBytes []byte
-	switch value := raw.(type) {
-	case string:
+	if value, ok := raw.(string); ok {
 		rawBytes = []byte(value)
-	case map[string]any:
-		rawBytes, _ = json.Marshal(value)
-	default:
-		rawBytes, _ = json.Marshal(value)
+	} else {
+		var err error
+		rawBytes, err = json.Marshal(raw)
+		if err != nil {
+			return err
+		}
 	}
-	var message HiveMessage
-	if err := json.Unmarshal(rawBytes, &message); err != nil {
+	t.mu.RLock()
+	channel := t.noise
+	t.mu.RUnlock()
+	if channel == nil {
+		return fmt.Errorf("%w: HTTP transport is not connected", ErrConnection)
+	}
+	message, err := channel.receive(ctx, rawBytes, false)
+	if err != nil {
 		return err
 	}
-	switch message.MsgType {
-	case "handshake", "shake":
-		return t.handleHandshake(ctx, message.Payload)
-	case "bus":
-		t.BusEvents <- Event{
-			Name:    fmt.Sprint(message.Payload["type"]),
-			Data:    mapValue(message.Payload["data"]),
-			Context: mapValue(message.Payload["context"]),
-			Raw:     message,
-		}
-	case "query", "cascade":
-		select {
-		case t.HiveEvents <- message:
-		default:
-		}
+	t.dispatch(message)
+	if channel.ready() {
+		t.mu.Lock()
+		t.handshake = true
+		t.mu.Unlock()
 	}
 	return nil
 }
 
-func (t *HTTPTransport) handleHandshake(ctx context.Context, payload map[string]any) error {
-	if !truthy(payload["handshake"]) && payload["envelope"] == nil {
-		if err := t.sendHiveMessage(ctx, HiveMessage{
-			MsgType: "hello",
-			Payload: map[string]any{
-				"pubkey":  t.Identity.PublicKey,
-				"session": map[string]any{"session_id": "thalovant-go-" + NewSessionID()},
-				"site_id": t.Identity.SiteID,
-			},
-			Metadata: map[string]any{},
-			Route:    []any{},
-		}, false); err != nil {
-			return err
-		}
-		t.mu.Lock()
-		t.handshake = true
-		t.mu.Unlock()
-		return nil
+func (t *HTTPTransport) dispatch(message *HiveMessage) {
+	if message == nil {
+		return
 	}
-	return fmt.Errorf("%w: only preshared-key HiveMind HTTP handshakes are supported in this alpha", ErrConnection)
+	dispatchNoiseMessage(t.BusEvents, t.HiveEvents, *message)
+}
+
+func dispatchNoiseMessage(bus chan Event, hive chan HiveMessage, message HiveMessage) {
+	switch message.MsgType {
+	case "bus":
+		select {
+		case bus <- Event{Name: fmt.Sprint(message.Payload["type"]), Data: mapValue(message.Payload["data"]), Context: mapValue(message.Payload["context"]), Raw: message}:
+		default:
+		}
+	case "query", "cascade":
+		select {
+		case hive <- message:
+		default:
+		}
+	}
 }
 
 func (t *HTTPTransport) beginConnection() {
 	t.mu.Lock()
+	t.connected, t.handshake = false, false
+	t.noise = nil
 	t.lastError = nil
 	t.connection.begin(time.Now())
 	t.mu.Unlock()
@@ -344,6 +431,8 @@ func (t *HTTPTransport) completeConnection() {
 
 func (t *HTTPTransport) failConnection(err error) {
 	t.mu.Lock()
+	t.connected, t.handshake = false, false
+	t.noise = nil
 	t.lastError = err
 	t.connection.fail(time.Now(), err)
 	t.mu.Unlock()
@@ -434,27 +523,73 @@ func elapsedMS(start time.Time, end time.Time) float64 {
 }
 
 func (t *HTTPTransport) sendHiveMessage(ctx context.Context, message HiveMessage, _ bool) error {
-	raw, err := json.Marshal(message)
-	if err != nil {
+	t.mu.RLock()
+	channel := t.noise
+	connected := t.connected
+	t.mu.RUnlock()
+	if channel == nil || !connected {
+		return fmt.Errorf("%w: HTTP transport is not connected", ErrConnection)
+	}
+	if err := channel.send(ctx, message); err != nil {
+		t.failConnection(err)
 		return err
 	}
-	payload := string(raw)
-	form := url.Values{"message": []string{payload}}
-	endpoint := t.BaseURL() + "/send_message?authorization=" + url.QueryEscape(t.Authorization())
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewBufferString(form.Encode()))
-	if err != nil {
-		return err
+	return nil
+}
+
+func (t *HTTPTransport) writeFrame(ctx context.Context, raw []byte, binary bool) error {
+	form := url.Values{}
+	if binary {
+		form.Set("message", base64.StdEncoding.EncodeToString(raw))
+		form.Set("binary", "1")
+	} else {
+		form.Set("message", string(raw))
 	}
-	req.Header.Set("content-type", "application/x-www-form-urlencoded")
+	_, err := t.request(ctx, http.MethodPost, "/send_message", form)
+	return err
+}
+
+func (t *HTTPTransport) request(ctx context.Context, method, path string, form url.Values) (map[string]any, error) {
+	endpoint := t.BaseURL() + path + "?authorization=" + url.QueryEscape(t.Authorization())
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewBufferString(form.Encode()))
+	if err != nil {
+		return nil, scrubTransportError(err)
+	}
+	if method == http.MethodPost {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	}
 	resp, err := t.HTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrConnection, scrubTransportError(err))
+		return nil, fmt.Errorf("%w: %v", ErrConnection, scrubTransportError(err))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
-		return fmt.Errorf("%w: send status %d", ErrConnection, resp.StatusCode)
+		return nil, fmt.Errorf("%w: HTTP %s status %d", ErrConnection, path, resp.StatusCode)
 	}
-	return nil
+	var body map[string]any
+	decoder := json.NewDecoder(resp.Body)
+	decoder.UseNumber()
+	if err := decoder.Decode(&body); err != nil || body == nil {
+		return nil, fmt.Errorf("%w: malformed HTTP %s response", ErrProtocol, path)
+	}
+	if _, failed := body["error"]; failed {
+		return nil, fmt.Errorf("%w: HTTP %s rejected by the hub", ErrRuntime, path)
+	}
+	switch path {
+	case "/connect":
+		if body["status"] != "Connected" {
+			return nil, fmt.Errorf("%w: HTTP connect was not acknowledged", ErrProtocol)
+		}
+	case "/send_message":
+		if body["status"] != "message sent" && body["status"] != "buffered" {
+			return nil, fmt.Errorf("%w: HTTP send was not acknowledged", ErrProtocol)
+		}
+	case "/disconnect":
+		if body["status"] != "Disconnected" {
+			return nil, fmt.Errorf("%w: HTTP disconnect was not acknowledged", ErrProtocol)
+		}
+	}
+	return body, nil
 }
 
 func mapValue(raw any) map[string]any {
