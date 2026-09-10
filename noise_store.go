@@ -107,8 +107,8 @@ func LoadNoisePin(dir, nodeID string) (string, error) {
 
 // SaveNoisePin records the server static key for a node id on first contact.
 func SaveNoisePin(dir, nodeID, publicKey string) error {
-	if strings.TrimSpace(nodeID) == "" || strings.TrimSpace(publicKey) == "" {
-		return nil
+	if err := validateNoisePin(nodeID, publicKey); err != nil {
+		return err
 	}
 
 	unlock, err := lockNoiseStore(dir)
@@ -121,10 +121,10 @@ func SaveNoisePin(dir, nodeID, publicKey string) error {
 	if err != nil {
 		return err
 	}
-	if pinned := pins[nodeID]; pinned != "" && pinned != publicKey {
+	if pinned := pins[nodeID]; pinned != "" && !strings.EqualFold(pinned, publicKey) {
 		return fmt.Errorf("%w: the hub Noise pin changed; verify it before ForgetNoisePin", ErrConnection)
 	}
-	if pins[nodeID] == publicKey {
+	if strings.EqualFold(pins[nodeID], publicKey) {
 		return nil
 	}
 	pins[nodeID] = publicKey
@@ -137,6 +137,9 @@ func pinNoisePeer(dir, nodeID, key string) error {
 	if nodeID == "" || key == "" {
 		return fmt.Errorf("%w: Noise peer supplied no static identity", ErrConnection)
 	}
+	if err := validateNoisePin(nodeID, key); err != nil {
+		return err
+	}
 	unlock, err := lockNoiseStore(dir)
 	if err != nil {
 		return err
@@ -146,10 +149,10 @@ func pinNoisePeer(dir, nodeID, key string) error {
 	if err != nil {
 		return err
 	}
-	if pinned := pins[nodeID]; pinned != "" && pinned != key {
+	if pinned := pins[nodeID]; pinned != "" && !strings.EqualFold(pinned, key) {
 		return fmt.Errorf("%w: the hub's Noise static key changed; verify its identity before explicitly calling ForgetNoisePin", ErrConnection)
 	}
-	if pins[nodeID] == key {
+	if strings.EqualFold(pins[nodeID], key) {
 		return nil
 	}
 	pins[nodeID] = key
@@ -212,7 +215,21 @@ func readNoisePinsLocked(dir string) (map[string]string, string, error) {
 	if err := json.Unmarshal(raw, &pins); err != nil || pins == nil {
 		return nil, "", fmt.Errorf("%w: Noise pin file %s is not a JSON object of node id to key: %v", ErrIdentity, path, err)
 	}
+	for nodeID, key := range pins {
+		if err := validateNoisePin(nodeID, key); err != nil {
+			return nil, path, err
+		}
+	}
 	return pins, path, nil
+}
+
+func validateNoisePin(nodeID, key string) error {
+	if strings.TrimSpace(nodeID) != "" && len(key) == 64 {
+		if _, err := hex.DecodeString(key); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: Noise pin requires a nonempty node id and a 32-byte hexadecimal static key", ErrIdentity)
 }
 
 func writeNoisePinsLocked(path string, pins map[string]string) error {
