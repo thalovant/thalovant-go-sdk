@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.3 - 2026-09-09
+
+- Reject concurrent Ask calls sharing a request ID and concurrent Query calls
+  sharing a query ID before publication; release reservations with collectors.
+- Reject empty hub ETags locally before any update or delete request.
+- Preserve describe timeouts when prior replies contain no definitions; fully
+  answered empty inventories and usable partial definitions remain supported.
+- Correct caller idempotency-key reuse, error handling, and 429 retry metadata
+  documentation; add historical review regression coverage.
+
 ## 0.5.2
 
 - Recover HTTP cleanup after a lost success response by recognizing the upstream exact already-disconnected acknowledgment, while retaining admission responsibility until that confirmation.
@@ -57,8 +67,9 @@
 
 - **Security.** Move `golang.org/x/crypto` from `v0.44.0` to `v0.55.0`, which
   also lifts `golang.org/x/net` to `v0.57.0`. `v0.44.0` carries
-  CVE-2026-56854 (critical) and nine highs, and the `x/net` it pulled carried
-  five more. `0.4.0` shipped with all fifteen.
+  CVE-2026-56854 (critical) and nine highs. The `0.4.0` root module resolved
+  `golang.org/x/net v0.47.0`, which carried five more; this was newer than
+  the `v0.46.0` required by `x/crypto v0.44.0`. `0.4.0` shipped with all fifteen.
 
   The pin came from adding the Noise dependencies for v3: `go get
   golang.org/x/crypto@latest` wanted `v0.56.0`, which raises the `go`
@@ -325,8 +336,8 @@
 - Document the plan and scope requirements: the provisioning writes need a paid
   plan and `hubs:write` (HTTP 402 on the free plan), hub ratings need
   `hubs:write` but no paid plan, the marketplace catalog needs only `hubs:read`
-  and is not paid-gated, and the group-scoped inventory reads need
-  `hubs:inspect`. `ListRuntimeGroupInventory` reports a pending source instead
+  and is not paid-gated, and `ListRuntimeGroupInventory` and
+  `ListRuntimeGroupMarketplace` need `hubs:inspect`. `ListRuntimeGroupInventory` reports a pending source instead
   of the HTTP 409 `GetHubRuntimeCapabilities` returns when nothing is
   reporting.
 - No existing signature changed.

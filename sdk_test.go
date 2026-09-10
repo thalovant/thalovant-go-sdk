@@ -1283,6 +1283,9 @@ func TestControlPlaneGetsAnalyticsOverview(t *testing.T) {
 			t.Fatalf("unexpected authorization header %q", r.Header.Get("authorization"))
 		}
 		query := r.URL.Query()
+		if _, present := query["owner_id"]; present {
+			t.Fatalf("unexpected owner_id query in %q", r.URL.RawQuery)
+		}
 		expected := map[string]string{
 			"range":      "30d",
 			"bucket":     "1d",

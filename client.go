@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -14,6 +15,32 @@ type Client struct {
 	Transport      RuntimeTransport
 	ConnectTimeout time.Duration
 	connectionGate contextMutex
+	replyIDsMu     sync.Mutex
+	replyIDs       map[replyCorrelation]struct{}
+}
+
+// Ask request IDs and cascade query IDs are independent matching namespaces.
+type replyCorrelation struct {
+	query bool
+	id    string
+}
+
+func (c *Client) reserveReplyID(query bool, id string) (func(), error) {
+	c.replyIDsMu.Lock()
+	defer c.replyIDsMu.Unlock()
+	key := replyCorrelation{query: query, id: id}
+	if _, active := c.replyIDs[key]; active {
+		return nil, fmt.Errorf("%w: reply correlation ID is already active on this client", ErrRuntime)
+	}
+	if c.replyIDs == nil {
+		c.replyIDs = make(map[replyCorrelation]struct{})
+	}
+	c.replyIDs[key] = struct{}{}
+	return func() {
+		c.replyIDsMu.Lock()
+		defer c.replyIDsMu.Unlock()
+		delete(c.replyIDs, key)
+	}, nil
 }
 
 type ClientOptions struct {
@@ -325,6 +352,11 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 	if requestID == "" {
 		requestID = NewRequestID()
 	}
+	releaseID, err := c.reserveReplyID(false, requestID)
+	if err != nil {
+		return Reply{}, err
+	}
+	defer releaseID()
 	eventContext := ContextWithCorrelation(opts.Context, opts.SessionID, c.Identity.SiteID, lang, requestID)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -499,6 +531,11 @@ func (c *Client) Query(ctx context.Context, text string, opts QueryOptions) (Rep
 	if queryID == "" {
 		queryID = requestID
 	}
+	releaseID, err := c.reserveReplyID(true, queryID)
+	if err != nil {
+		return Reply{}, err
+	}
+	defer releaseID()
 	sessionID := opts.SessionID
 	if sessionID == "" {
 		sessionID = NewSessionID()
