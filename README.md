@@ -560,7 +560,8 @@ An interrupted writer cannot publish a partial static key or lose another hub's
 pin. A conflicting pin requires explicit verification and `ForgetNoisePin`. Saved pin
 values and new pins require exactly 64 hexadecimal characters (32 bytes) and a
 nonempty node ID. Invalid trust files, including null or empty pin values, fail
-before any rewrite; diagnose and repair that state explicitly.
+before any rewrite; diagnose and repair that state explicitly. Hexadecimal case
+does not change key identity; idempotent checks preserve existing file bytes.
 Sharing a state directory does not permit simultaneous runtime sessions with the
 same identity: each active connection needs its own identity.
 

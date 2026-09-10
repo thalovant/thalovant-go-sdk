@@ -2,6 +2,8 @@ package thalovant
 
 import (
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -69,5 +71,55 @@ func TestHTTPNoiseRejectsMalformedPinBeforeAuthenticatedHello(t *testing.T) {
 		if hellos != 0 {
 			t.Error("client identity was published after malformed pin")
 		}
+	}
+}
+
+func TestEquivalentHexNoisePinsPreserveStoredBytes(t *testing.T) {
+	for _, saved := range []string{strings.Repeat("AB", 32), strings.Repeat("aB", 32)} {
+		dir := t.TempDir()
+		if err := SaveNoisePin(dir, "hub", saved); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(dir, NoisePinsFilename)
+		before, _ := os.ReadFile(path)
+		if err := SaveNoisePin(dir, "hub", strings.ToLower(saved)); err != nil {
+			t.Errorf("equivalent setter rejected: %v", err)
+		}
+		if err := pinNoisePeer(dir, "hub", strings.ToLower(saved)); err != nil {
+			t.Errorf("equivalent peer rejected: %v", err)
+		}
+		if err := SaveNoisePin(dir, "hub", strings.Repeat("cd", 32)); !errors.Is(err, ErrConnection) {
+			t.Errorf("conflicting key accepted: %v", err)
+		}
+		after, _ := os.ReadFile(path)
+		if string(after) != string(before) {
+			t.Error("idempotence or conflict rewrote existing pin bytes")
+		}
+	}
+}
+
+func TestHTTPNoiseAcceptsUppercaseSavedPinWithoutRewriting(t *testing.T) {
+	fixture := newHTTPNoiseFixture(t)
+	transport := fixture.transport(t)
+	raw, err := json.Marshal(map[string]string{"test-hub": strings.ToUpper(hex.EncodeToString(fixture.responder.key.Public))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(transport.NoiseStateDir, NoisePinsFilename)
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !transport.IsHandshakeComplete() {
+		t.Fatal("valid uppercase pin did not authenticate")
+	}
+	after, _ := os.ReadFile(path)
+	if string(after) != string(raw) {
+		t.Fatal("authenticated handshake rewrote equivalent pin")
+	}
+	if err := transport.Disconnect(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
