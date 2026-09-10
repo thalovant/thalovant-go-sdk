@@ -67,8 +67,9 @@
 
 - **Security.** Move `golang.org/x/crypto` from `v0.44.0` to `v0.55.0`, which
   also lifts `golang.org/x/net` to `v0.57.0`. `v0.44.0` carries
-  CVE-2026-56854 (critical) and nine highs, and the `x/net` it pulled carried
-  five more. `0.4.0` shipped with all fifteen.
+  CVE-2026-56854 (critical) and nine highs. The `0.4.0` root module resolved
+  `golang.org/x/net v0.47.0`, which carried five more; this was newer than
+  the `v0.46.0` required by `x/crypto v0.44.0`. `0.4.0` shipped with all fifteen.
 
   The pin came from adding the Noise dependencies for v3: `go get
   golang.org/x/crypto@latest` wanted `v0.56.0`, which raises the `go`

@@ -16,8 +16,6 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
-// HiveMind protocol version that switches the handshake to Noise.
-
 // Registered handshake patterns, preference ordered.
 const (
 	noisePatternKK = "KKpsk0" // both static keys known in advance

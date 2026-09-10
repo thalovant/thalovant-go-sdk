@@ -995,3 +995,6 @@ Concurrent `Ask` calls on one client must use distinct request IDs; concurrent
 with `ErrRuntime` before publication. Ask and Query use separate namespaces.
 Reservations end when their collectors are disposed; existing transport
 ownership still prevents reuse while an admitted write retires.
+Use a fresh ID for each later logical operation, including after cancellation;
+delayed remote replies can outlive a disposed collector. Reuse is appropriate
+only when an application deliberately correlates the same operation.
