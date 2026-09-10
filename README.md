@@ -557,7 +557,10 @@ separate client. Do not copy a `Client` or built-in transport after first use.
 
 Noise trust writes use atomic publication and an OS lock shared across processes.
 An interrupted writer cannot publish a partial static key or lose another hub's
-pin. A conflicting pin requires explicit verification and `ForgetNoisePin`.
+pin. A conflicting pin requires explicit verification and `ForgetNoisePin`. Saved pin
+values and new pins require exactly 64 hexadecimal characters (32 bytes) and a
+nonempty node ID. Invalid trust files, including null or empty pin values, fail
+before any rewrite; diagnose and repair that state explicitly.
 Sharing a state directory does not permit simultaneous runtime sessions with the
 same identity: each active connection needs its own identity.
 

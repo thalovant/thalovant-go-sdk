@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.4
+
+- Refuse malformed saved Noise pins, including null or empty values, before loading or modifying trust. Preserve corrupt files for explicit diagnosis; never silently treat them as first contact.
+- Reject invalid pin inputs before writing. Valid pins require a nonempty node ID and exactly 32 bytes of hexadecimal key material; verified rotation still requires `ForgetNoisePin`.
+
 ## 0.5.3 - 2026-09-09
 
 - Reject concurrent Ask calls sharing a request ID and concurrent Query calls
