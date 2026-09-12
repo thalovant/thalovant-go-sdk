@@ -88,7 +88,7 @@ func TestPythonSpeakableRanking(t *testing.T) {
 		t.Fatal(got)
 	}
 	i := HubIntent{Phrases: map[string][]string{"en-us": {"{x}", "a complete sentence", "[please]", "(x|y)", "x"}}}
-	if got := i.ExamplesWithOptions("en-us", 2, IntentExampleOptions{Speakable: true}); !reflect.DeepEqual(got, []string{"x", "a complete sentence"}) {
+	if got := i.ExamplesWithOptions("en-us", 2, IntentExampleOptions{Speakable: true}); !reflect.DeepEqual(got, []string{"a complete sentence", "x"}) {
 		t.Fatal(got)
 	}
 }
