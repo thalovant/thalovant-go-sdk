@@ -284,21 +284,35 @@ func (i HubIntent) ID() string {
 // listingLanguages preserves manifest order and sorts any caller-provided
 // map-only keys, so fallback never depends on Go map iteration order.
 func (i HubIntent) listingLanguages() []string {
-	var result, extra []string
+	var result []string
+	keys := make([]string, 0, len(i.Phrases))
+	for key := range i.Phrases {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
 	seen := map[string]bool{}
 	for _, tag := range i.Languages {
-		if _, ok := i.Phrases[tag]; ok && !seen[tag] {
-			result = append(result, tag)
-			seen[tag] = true
+		key := tag
+		if _, exact := i.Phrases[key]; !exact {
+			key = ""
+			for _, candidate := range keys {
+				if SameLanguage(candidate, tag) {
+					key = candidate
+					break
+				}
+			}
+		}
+		if _, exists := i.Phrases[key]; exists && !seen[key] {
+			result = append(result, key)
+			seen[key] = true
 		}
 	}
-	for tag := range i.Phrases {
-		if !seen[tag] {
-			extra = append(extra, tag)
+	for _, key := range keys {
+		if !seen[key] {
+			result = append(result, key)
 		}
 	}
-	sort.Strings(extra)
-	return append(result, extra...)
+	return result
 }
 
 // PhrasesFor returns the closest OVOS-compatible language registration.

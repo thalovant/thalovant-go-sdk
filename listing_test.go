@@ -172,3 +172,14 @@ func TestListingUnicodeNonBoundary(t *testing.T) {
 		}
 	}
 }
+
+func TestListingManifestLanguageSpellingPreservesOrder(t *testing.T) {
+	intent := HubIntent{Languages: []string{"fr-FR", "en-US"}, Phrases: map[string][]string{"en_us": {"English"}, "fr_fr": {"Français"}}}
+	if got := intent.Examples("", 1); !reflect.DeepEqual(got, []string{"Français"}) {
+		t.Fatal(got)
+	}
+	intent.Phrases["fr-FR"] = []string{"Exact"}
+	if got := intent.Examples("", 1); !reflect.DeepEqual(got, []string{"Exact"}) {
+		t.Fatal(got)
+	}
+}

@@ -1111,5 +1111,5 @@ Generated data retains its source licenses in `LICENSE-languages` and
 Regenerate data and reference cases with `python scripts/sync-listing-data.py`
 in the public-package environment specified at the top of that script.
 
-The SDK code and CLDR matching tables are MIT-licensed; bundled
-`thalovant-languages` data is Apache-2.0-licensed. Both notices ship with the SDK.
+The SDK code, CLDR matching tables and bundled `thalovant-languages` data
+retain their upstream MIT license notices. Both data notices ship with the SDK.
