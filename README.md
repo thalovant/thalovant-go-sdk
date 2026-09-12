@@ -1095,6 +1095,7 @@ language is supplied, the selected registration's locale is retained.
 OVOS-compatible distance matching uses versioned langcodes 3.5.1 CLDR tables,
 including Portuguese norm-region behavior; distances above ten do not match.
 
+`DefaultListing()` returns the bundled immutable rules.
 `NewListingRules(&data)` accepts a complete `ListingData` tree and snapshots it.
 Set `IntentExampleOptions.Listing` or call the returned rules' methods to use it.
 `NewListingRules(nil)` produces bare rendering with slot names and no guessed

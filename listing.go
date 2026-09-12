@@ -111,6 +111,9 @@ func compileListingPattern(expression string, ignoreCase bool) (*regexp2.Regexp,
 	return pattern, nil
 }
 
+// DefaultListing returns the immutable bundled language rules.
+func DefaultListing() *ListingRules { return defaultListing }
+
 // NewListingRules validates patterns before publishing an immutable snapshot.
 // Invalid patterns return an error. Runtime backtracking is bounded by a 100ms
 // per-pattern deadline and a 65536-entry stack; Asks reports matching failures.

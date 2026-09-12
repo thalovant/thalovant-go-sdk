@@ -30,7 +30,7 @@ func TestListingPythonGoldenCases(t *testing.T) {
 			if err = json.Unmarshal(row.Expected, &want); err != nil {
 				t.Fatal(err)
 			}
-			if got := defaultListing.Rank(row.Phrases, row.Lang); !reflect.DeepEqual(got, want) {
+			if got := DefaultListing().Rank(row.Phrases, row.Lang); !reflect.DeepEqual(got, want) {
 				t.Errorf("rank %s: %v != %v", row.Lang, got, want)
 			}
 			continue
