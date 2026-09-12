@@ -6,12 +6,14 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os/exec"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -346,7 +348,11 @@ func (c *ControlPlane) pollDeviceToken(
 			return nil, err
 		}
 		if status >= 200 && status <= 299 {
-			return decodeControlJSON(raw)
+			result, decodeErr := decodeControlJSON(raw)
+			if decodeErr != nil {
+				return nil, &APIError{StatusCode: status, Detail: "invalid JSON response"}
+			}
+			return result, nil
 		}
 		errorCode := ""
 		if status == http.StatusBadRequest {
@@ -364,7 +370,7 @@ func (c *ControlPlane) pollDeviceToken(
 		case "expired_token":
 			return nil, fmt.Errorf("%w: the device sign-in code expired before it was approved; call LoginWithBrowser again to request a new code", ErrDeviceCodeExpired)
 		default:
-			return nil, fmt.Errorf("%w: HTTP %d: %s", ErrAPI, status, serverErrorDetail(raw))
+			return nil, &APIError{StatusCode: status, Detail: serverErrorDetail(raw)}
 		}
 		remaining := deadline.Sub(now())
 		if remaining <= 0 {
@@ -707,14 +713,47 @@ func (c *ControlPlane) GetRuntimeGroupConfig(ctx context.Context, runtimeGroupID
 	return c.request(ctx, http.MethodGet, path, nil, nil, true)
 }
 
-// UpdateRuntimeGroupConfig merges runtime configuration into a runtime group.
-//
-// The API merges config into the stored configuration rather than replacing
-// it, and marks the group pending so the runtime operator reconciles the
-// change. RuntimeGroupConfigOptions.Personas is replaced only when non-nil.
-//
-// Requires a paid plan and a token with the hubs:write scope.
+// UpdateRuntimeGroupConfig deep-merges with a revision precondition and at most
+// three attempts. Only 412 conflicts trigger a fresh read and merge. Older APIs
+// fail before writing. Requires hubs:read and paid hubs:write.
 func (c *ControlPlane) UpdateRuntimeGroupConfig(ctx context.Context, runtimeGroupID string, config map[string]any, opts RuntimeGroupConfigOptions) (map[string]any, error) {
+	path := "/v1/runtime-groups/" + url.PathEscape(runtimeGroupID) + "/config"
+	if config == nil {
+		config = map[string]any{}
+	}
+	raw, err := json.Marshal(config)
+	if err != nil {
+		return nil, err
+	}
+	var delta map[string]any
+	if err := json.Unmarshal(raw, &delta); err != nil {
+		return nil, err
+	}
+	for attempt := 0; ; attempt++ {
+		snapshot, err := c.GetRuntimeGroupConfig(ctx, runtimeGroupID)
+		if err != nil {
+			return nil, err
+		}
+		revision, validRevision := snapshot["revision"].(string)
+		base, validConfig := snapshot["config"].(map[string]any)
+		if !validRevision || !configRevisionPattern.MatchString(revision) || !validConfig {
+			return nil, fmt.Errorf("%w: safe configuration merge requires a valid config and revision from the API", ErrAPI)
+		}
+		payload := map[string]any{"config": mergeRuntimeConfig(base, delta), "expected_revision": revision}
+		if opts.Personas != nil {
+			payload["personas"] = opts.Personas
+		}
+		result, err := c.request(ctx, http.MethodPut, path, payload, nil, true)
+		var apiError *APIError
+		if !errors.As(err, &apiError) || apiError.StatusCode != http.StatusPreconditionFailed || attempt >= 2 {
+			return result, err
+		}
+	}
+}
+
+// ReplaceRuntimeGroupConfig explicitly replaces configuration via unconditional PATCH.
+// Personas are replaced only when non-nil. Requires paid hubs:write.
+func (c *ControlPlane) ReplaceRuntimeGroupConfig(ctx context.Context, runtimeGroupID string, config map[string]any, opts RuntimeGroupConfigOptions) (map[string]any, error) {
 	if config == nil {
 		config = map[string]any{}
 	}
@@ -722,8 +761,23 @@ func (c *ControlPlane) UpdateRuntimeGroupConfig(ctx context.Context, runtimeGrou
 	if opts.Personas != nil {
 		payload["personas"] = opts.Personas
 	}
-	path := "/v1/runtime-groups/" + url.PathEscape(runtimeGroupID) + "/config"
-	return c.request(ctx, http.MethodPatch, path, payload, nil, true)
+	return c.request(ctx, http.MethodPatch, "/v1/runtime-groups/"+url.PathEscape(runtimeGroupID)+"/config", payload, nil, true)
+}
+
+var configRevisionPattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+func mergeRuntimeConfig(base, delta map[string]any) map[string]any {
+	result := cloneMap(base)
+	for key, value := range delta {
+		old, oldOK := base[key].(map[string]any)
+		next, nextOK := value.(map[string]any)
+		if oldOK && nextOK {
+			result[key] = mergeRuntimeConfig(old, next)
+		} else {
+			result[key] = value
+		}
+	}
+	return result
 }
 
 // ReleaseRuntimeGroup applies a runtime image policy and returns the updated
@@ -1098,9 +1152,13 @@ func (c *ControlPlane) request(ctx context.Context, method string, path string, 
 		return nil, err
 	}
 	if status < 200 || status > 299 {
-		return nil, fmt.Errorf("%w: HTTP %d: %s", ErrAPI, status, serverErrorDetail(raw))
+		return nil, &APIError{StatusCode: status, Detail: serverErrorDetail(raw)}
 	}
-	return decodeControlJSON(raw)
+	result, decodeErr := decodeControlJSON(raw)
+	if decodeErr != nil {
+		return nil, &APIError{StatusCode: status, Detail: "invalid JSON response"}
+	}
+	return result, nil
 }
 
 func (c *ControlPlane) send(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool) (int, []byte, error) {

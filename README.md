@@ -299,7 +299,7 @@ Payload maps take the API's snake_case keys; the camelCase spellings
 `cloneFromDefault`) are accepted too and are renamed before the request is
 sent, so neither spelling is silently dropped.
 
-Runtime configuration is merged, not replaced, and `Personas` is replaced only
+Runtime configuration is deep-merged using a revision precondition, and `Personas` is replaced only
 when set:
 
 ```go
@@ -1023,3 +1023,43 @@ Methods: `ListHubSkills / ListHubSkillHistory / InstallHubSkill / UpdateHubSkill
 without waiting, retain the complete accepted response (including `operation_id`
 and `state`), then pass that response to the wait helper separately. Cancelling waiting does not undo the server operation. After a polling
 failure, inspect/resume that operation instead of submitting the write again.
+
+## Request helpers and safe configuration updates (0.7.0)
+
+Request hints carry a recognized language, ordered intent pipeline, and caller
+location without changing the caller's context. Empty hints are omitted. The
+location helper requires a city and omits invalid or zero/zero coordinates.
+The hub validates language hints against its configured languages.
+
+Replies expose their reported language, ordered speech/audio events, and a
+count of dropped media. Embedded skill clips are limited to 4 MiB each and
+16 MiB per reply, checked before retention and decoding. Audio does not extend
+the reply settlement window. Decoding accepts hexadecimal bytes with ASCII
+whitespace between bytes; it never fetches a skill-supplied URL or file path.
+The application owns playback (the `play`/`Play` function in this example).
+
+```go
+location := thalovant.BuildLocation(thalovant.LocationOptions{City: "Montréal", Country: "CA"})
+reply, err := client.AskWithOptions(ctx, "Quel temps fait-il ?", thalovant.AskOptions{
+    STTLang: "fr-ca", Location: location,
+})
+// Check err before reading reply. AudioBytes returns ([]byte, error).
+examples := intent.ExamplesWithOptions("en-us", 2, thalovant.IntentExampleOptions{Speakable: true})
+_, err = api.UpdateRuntimeGroupConfig(ctx, groupID, delta, thalovant.RuntimeGroupConfigOptions{})
+// Explicit full replacement:
+_, err = api.ReplaceRuntimeGroupConfig(ctx, groupID, fullConfig, thalovant.RuntimeGroupConfigOptions{})
+```
+
+Safe merging requires an API whose configuration GET returns a valid `revision`
+and whose configuration PUT checks `expected_revision`. The SDK rereads and
+reapplies the original delta only after HTTP 412, with at most three attempts.
+Arrays and scalar values replace; objects merge recursively. Personas replace
+only when explicitly supplied. Connection failures, redirects, other statuses,
+and ambiguous write results are never retried. No unsafe PATCH fallback is used.
+Unconditional replacements must still be coordinated with other writers.
+
+Use the explicit replacement operation shown above when a complete replacement
+is intended, including when working with an older API. Existing code relying on
+replacement must opt into it when upgrading. Raw intent patterns remain the
+default; speakable examples remove optional parts, choose alternatives, and
+substitute caller-supplied slots while retaining complete-phrase priority.

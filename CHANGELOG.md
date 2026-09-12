@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.0 — 2026-09-12
+
+- Match Python 0.6.3 request hints, location construction, ordered embedded audio replies, strict bounded hex decoding, and speakable intent examples with original phrase priority.
+- Default runtime configuration updates to revision-guarded deep merges. Retry only HTTP 412 (three attempts maximum); fail before writing against older servers. Explicit replacement remains available. Merging now requires both hubs:read and paid hubs:write.
+- Add regression coverage for conflict preservation, retry limits, unsupported revisions, audio bounds, caller context preservation, and example ranking.
+
 ## 0.6.0 — 2026-09-12
 
 - Add hub-addressed skill listing, history, install, update and removal.

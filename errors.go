@@ -86,3 +86,14 @@ func policyDeniedFromEvent(event Event) *PolicyDeniedError {
 		Allowed:    allowed,
 	}
 }
+
+// APIError preserves the HTTP status while continuing to match ErrAPI.
+type APIError struct {
+	StatusCode int
+	Detail     string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("%v: HTTP %d: %s", ErrAPI, e.StatusCode, e.Detail)
+}
+func (e *APIError) Unwrap() error { return ErrAPI }

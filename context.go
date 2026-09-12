@@ -1,5 +1,11 @@
 package thalovant
 
+import (
+	"math"
+	"strconv"
+	"strings"
+)
+
 type ClientContextOptions struct {
 	UserID       string
 	UserName     string
@@ -103,4 +109,81 @@ func cloneMap(values map[string]any) map[string]any {
 		out[key] = value
 	}
 	return out
+}
+
+// RequestContextOptions carries per-request hints read by OVOS.
+type RequestContextOptions struct {
+	STTLang  string
+	Pipeline []string
+	Location map[string]any
+}
+
+// RequestContext copies the context and its session before applying nonempty hints.
+func RequestContext(base Context, opts RequestContextOptions) Context {
+	result := MergeContext(base, nil)
+	var stages []string
+	for _, stage := range opts.Pipeline {
+		if stage = strings.TrimSpace(stage); stage != "" {
+			stages = append(stages, stage)
+		}
+	}
+	if len(stages) > 0 {
+		session := sessionFromContext(result)
+		session["pipeline"] = stages
+		result["session"] = session
+	}
+	if lang := strings.TrimSpace(opts.STTLang); lang != "" {
+		result["stt_lang"] = lang
+	}
+	if len(opts.Location) > 0 {
+		result["location"] = cloneMap(opts.Location)
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// LocationOptions accepts numeric or string coordinates. A city is required.
+type LocationOptions struct {
+	City, Region, Country, Timezone string
+	Latitude, Longitude             any
+}
+
+func BuildLocation(opts LocationOptions) map[string]any {
+	city := strings.TrimSpace(opts.City)
+	if city == "" {
+		return nil
+	}
+	result := map[string]any{"city": city}
+	if v := strings.TrimSpace(opts.Region); v != "" {
+		result["region"] = v
+	}
+	if v := strings.TrimSpace(opts.Country); v != "" {
+		result["country_code"] = strings.ToUpper(v)
+	}
+	if v := strings.TrimSpace(opts.Timezone); v != "" {
+		result["timezone"] = map[string]any{"code": v}
+	}
+	coordinate := func(value any) float64 {
+		switch v := value.(type) {
+		case float64:
+			return v
+		case float32:
+			return float64(v)
+		case int:
+			return float64(v)
+		case string:
+			n, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+			if err == nil {
+				return n
+			}
+		}
+		return math.NaN()
+	}
+	lat, lon := coordinate(opts.Latitude), coordinate(opts.Longitude)
+	if (lat != 0 || lon != 0) && lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180 {
+		result["coordinate"] = map[string]any{"latitude": lat, "longitude": lon}
+	}
+	return result
 }

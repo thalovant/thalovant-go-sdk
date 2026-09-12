@@ -3,6 +3,8 @@ package thalovant
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"strings"
 )
 
 type Context map[string]any
@@ -16,6 +18,7 @@ type Event struct {
 }
 
 type Reply struct {
+	DroppedMedia int
 	Text         string
 	Utterances   []string
 	Handled      bool
@@ -209,4 +212,97 @@ func newID(prefix string) string {
 		return prefix + "unknown"
 	}
 	return prefix + hex.EncodeToString(raw)
+}
+
+func (e Event) Lang() string {
+	for _, v := range []any{e.Data["lang"], e.Context["lang"], sessionFromContext(e.Context)["lang"]} {
+		if v != nil && fmt.Sprint(v) != "" {
+			return fmt.Sprint(v)
+		}
+	}
+	return ""
+}
+func (e Event) IsAudio() bool { return e.Name == EventAudioQueue }
+func (e Event) HasAudio() bool {
+	v, ok := e.Data["binary_data"].(string)
+	return e.IsAudio() && ok && v != ""
+}
+
+// AudioBytes decodes embedded hex only. It never fetches a skill path or URL.
+func (e Event) AudioBytes() ([]byte, error) { return e.AudioBytesWithLimit(MaxAudioClipBytes) }
+func (e Event) AudioBytesWithLimit(maxBytes int) ([]byte, error) {
+	encoded, ok := e.Data["binary_data"].(string)
+	if !e.IsAudio() || !ok || encoded == "" {
+		return nil, fmt.Errorf("missing embedded audio")
+	}
+	if maxBytes < 0 || (len(encoded)+1)/2 > maxBytes {
+		return nil, fmt.Errorf("embedded audio exceeds byte limit")
+	}
+	var compact strings.Builder
+	for _, c := range encoded {
+		if strings.ContainsRune(" \t\n\r\v\f", c) {
+			if compact.Len()%2 != 0 {
+				return nil, fmt.Errorf("invalid embedded audio hex")
+			}
+			continue
+		}
+		compact.WriteRune(c)
+	}
+	decoded, err := hex.DecodeString(compact.String())
+	if err != nil {
+		return nil, fmt.Errorf("invalid embedded audio hex")
+	}
+	return decoded, nil
+}
+func (r Reply) Lang() string {
+	for _, e := range r.Events {
+		if lang := e.Lang(); lang != "" {
+			return lang
+		}
+	}
+	return ""
+}
+func (r Reply) HasAudio() bool {
+	for _, e := range r.Events {
+		if e.IsAudio() {
+			return true
+		}
+	}
+	return false
+}
+func (r Reply) MediaEvents() []Event {
+	var result []Event
+	for _, e := range r.Events {
+		if e.IsAudio() || e.Name == EventSpeak || e.Name == EventOvosUtteranceSpeak {
+			result = append(result, e)
+		}
+	}
+	return result
+}
+
+type replyMediaBudget struct {
+	chars, dropped int
+	seen           map[string]bool
+}
+
+func (b *replyMediaBudget) accept(e Event) bool {
+	if !e.IsAudio() {
+		return true
+	}
+	// Maps retain their identity across duplicate deliveries, including value Event copies.
+	key := fmt.Sprintf("%p", e.Data)
+	if e.Data != nil && b.seen[key] {
+		return false
+	}
+	encoded, ok := e.Data["binary_data"].(string)
+	if !ok || len(encoded) > MaxAudioClipBytes*2 || b.chars+len(encoded) > MaxReplyMediaBytes*2 {
+		b.dropped++
+		return false
+	}
+	if b.seen == nil {
+		b.seen = map[string]bool{}
+	}
+	b.seen[key] = true
+	b.chars += len(encoded)
+	return true
 }
