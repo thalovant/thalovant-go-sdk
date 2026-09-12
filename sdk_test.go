@@ -1547,10 +1547,10 @@ func TestControlPlaneManagesRuntimeGroups(t *testing.T) {
 	if _, err := control.GetRuntimeGroupConfig(ctx, "rg-1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := control.UpdateRuntimeGroupConfig(ctx, "rg-1", map[string]any{"lang": "en-us"}, RuntimeGroupConfigOptions{}); err != nil {
+	if _, err := control.ReplaceRuntimeGroupConfig(ctx, "rg-1", map[string]any{"lang": "en-us"}, RuntimeGroupConfigOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := control.UpdateRuntimeGroupConfig(ctx, "rg-1", map[string]any{"lang": "fr-ca"}, RuntimeGroupConfigOptions{
+	if _, err := control.ReplaceRuntimeGroupConfig(ctx, "rg-1", map[string]any{"lang": "fr-ca"}, RuntimeGroupConfigOptions{
 		Personas: map[string]any{"default": "concierge"},
 	}); err != nil {
 		t.Fatal(err)

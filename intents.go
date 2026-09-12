@@ -35,9 +35,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -300,12 +302,39 @@ func (i HubIntent) PhrasesFor(lang string) []string {
 // with a slot, shorter ones first. An empty lang means the first language
 // the intent has; a limit of zero or less returns the whole pool.
 func (i HubIntent) Examples(lang string, limit int) []string {
+	return i.ExamplesWithOptions(lang, limit, IntentExampleOptions{})
+}
+
+// IntentExampleOptions renders patterns with optional caller-supplied slot examples.
+type IntentExampleOptions struct {
+	Speakable bool
+	Slots     map[string]string
+}
+
+func (i HubIntent) ExamplesWithOptions(lang string, limit int, opts IntentExampleOptions) []string {
 	var pool []string
 	switch {
 	case lang != "":
 		pool = i.PhrasesFor(lang)
 	case len(i.Languages) > 0:
 		pool = i.Phrases[i.Languages[0]]
+	}
+	ranks := map[string]bool{}
+	if opts.Speakable {
+		var rendered []string
+		for _, pattern := range pool {
+			sentence := Speakable(pattern, opts.Slots)
+			if sentence == "" {
+				continue
+			}
+			rank, exists := ranks[sentence]
+			if !exists {
+				rendered = append(rendered, sentence)
+				rank = true
+			}
+			ranks[sentence] = rank && strings.Contains(pattern, "{")
+		}
+		pool = rendered
 	}
 	if limit <= 0 {
 		return pool
@@ -314,10 +343,13 @@ func (i HubIntent) Examples(lang string, limit int) []string {
 	sort.SliceStable(ranked, func(a, b int) bool {
 		slotA := strings.Contains(ranked[a], "{")
 		slotB := strings.Contains(ranked[b], "{")
+		if opts.Speakable {
+			slotA, slotB = ranks[ranked[a]], ranks[ranked[b]]
+		}
 		if slotA != slotB {
 			return !slotA
 		}
-		return len(ranked[a]) < len(ranked[b])
+		return utf8.RuneCountInString(ranked[a]) < utf8.RuneCountInString(ranked[b])
 	})
 	if len(ranked) > limit {
 		ranked = ranked[:limit]
@@ -953,4 +985,40 @@ func anySlice(raw any) []any {
 		return out
 	}
 	return nil
+}
+
+var optionalPattern = regexp.MustCompile(`\[[^\[\]]*\]`)
+var groupPattern = regexp.MustCompile(`\(([^()]*)\)`)
+var slotPattern = regexp.MustCompile(`\{([a-z_][a-z0-9_]*)\}`)
+var repeatedSpaces = regexp.MustCompile(`\s{2,}`)
+
+// Speakable renders one sentence, removing optional parts without inventing slot values.
+func Speakable(pattern string, slots map[string]string) string {
+	text := pattern
+	for optionalPattern.MatchString(text) {
+		text = optionalPattern.ReplaceAllString(text, "")
+	}
+	for groupPattern.MatchString(text) {
+		text = groupPattern.ReplaceAllStringFunc(text, func(group string) string {
+			options := strings.Split(group[1:len(group)-1], "|")
+			var real []string
+			for _, option := range options {
+				if v := strings.TrimSpace(option); v != "" {
+					real = append(real, v)
+				}
+			}
+			if len(real) == 0 || (len(real) < len(options) && len(real) <= 1) {
+				return ""
+			}
+			return real[0]
+		})
+	}
+	text = slotPattern.ReplaceAllStringFunc(text, func(slot string) string {
+		key := slot[1 : len(slot)-1]
+		if value, ok := slots[key]; ok {
+			return value
+		}
+		return strings.ReplaceAll(key, "_", " ")
+	})
+	return strings.Trim(repeatedSpaces.ReplaceAllString(text, " "), " ,")
 }

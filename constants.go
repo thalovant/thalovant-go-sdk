@@ -1,5 +1,9 @@
 package thalovant
 
+const EventAudioQueue = "mycroft.audio.queue"
+const MaxAudioClipBytes = 4 * 1024 * 1024
+const MaxReplyMediaBytes = 16 * 1024 * 1024
+
 const (
 	EventRecognizerLoopUtterance = "recognizer_loop:utterance"
 	EventSpeak                   = "speak"

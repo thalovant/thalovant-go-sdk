@@ -318,6 +318,9 @@ func (c *Client) SendCode(ctx context.Context, value string, opts CodeOptions) e
 // AskOptions extends RequestOptions without changing existing keyed or unkeyed
 // RequestOptions literals. Zero settlement values use the family defaults.
 type AskOptions struct {
+	STTLang  string
+	Pipeline []string
+	Location map[string]any
 	RequestOptions
 	ReplySettle    time.Duration
 	EmptyReplyWait time.Duration
@@ -357,7 +360,7 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 		return Reply{}, err
 	}
 	defer releaseID()
-	eventContext := ContextWithCorrelation(opts.Context, opts.SessionID, c.Identity.SiteID, lang, requestID)
+	eventContext := ContextWithCorrelation(RequestContext(opts.Context, RequestContextOptions{STTLang: opts.STTLang, Pipeline: opts.Pipeline, Location: opts.Location}), opts.SessionID, c.Identity.SiteID, lang, requestID)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := c.Connect(ctx); err != nil {
@@ -366,6 +369,7 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 	sub := c.SubscribeEvents(256)
 	defer sub.Close()
 	var events []Event
+	var mediaBudget replyMediaBudget
 	var fragments []string
 	var hardFailure, softFailure *Event
 	var settling *time.Timer
@@ -411,10 +415,13 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 				break
 			}
 		}
-		return Reply{Text: strings.Join(fragments, " "), Utterances: fragments, Handled: failure == nil, OK: failure == nil, SessionID: sessionID, RequestID: requestID, Events: events, FailureEvent: failure}, nil
+		return Reply{Text: strings.Join(fragments, " "), Utterances: fragments, Handled: failure == nil, OK: failure == nil, SessionID: sessionID, RequestID: requestID, Events: events, DroppedMedia: mediaBudget.dropped, FailureEvent: failure}, nil
 	}
 	accept := func(event Event) bool {
 		if event.RequestID() != requestID {
+			return false
+		}
+		if !mediaBudget.accept(event) {
 			return false
 		}
 		events = append(events, event)
@@ -547,6 +554,7 @@ func (c *Client) Query(ctx context.Context, text string, opts QueryOptions) (Rep
 		return Reply{}, err
 	}
 	events := []Event{}
+	var mediaBudget replyMediaBudget
 	fragments := []string{}
 	var failure, softFailure *Event
 	sub := subscribeHiveMessages(transport)
@@ -604,6 +612,7 @@ func (c *Client) Query(ctx context.Context, text string, opts QueryOptions) (Rep
 			SessionID:    replySessionID,
 			RequestID:    requestID,
 			Events:       events,
+			DroppedMedia: mediaBudget.dropped,
 			FailureEvent: failure,
 		}, nil
 	}
@@ -613,6 +622,9 @@ func (c *Client) Query(ctx context.Context, text string, opts QueryOptions) (Rep
 		}
 		event, ok := eventFromQueryHiveMessage(message)
 		if !ok {
+			return false
+		}
+		if !mediaBudget.accept(event) {
 			return false
 		}
 		events = append(events, event)
