@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -25,10 +26,58 @@ func TestPythonRequestHints(t *testing.T) {
 	if RequestContext(nil, RequestContextOptions{}) != nil || BuildLocation(LocationOptions{}) != nil {
 		t.Fatal("empty hints")
 	}
+	withoutPipeline := RequestContext(base, RequestContextOptions{STTLang: "fr"})
+	withoutPipeline["session"].(map[string]any)["session_id"] = "changed"
+	if base["session"].(map[string]any)["session_id"] != "kept" {
+		t.Fatal("context helper shared the caller's session map")
+	}
 	for _, pair := range [][2]any{{0, 0}, {91, 0}, {0, 181}, {"NaN", 1}, {"bad", 2}} {
 		if _, ok := BuildLocation(LocationOptions{City: "Toronto", Latitude: pair[0], Longitude: pair[1]})["coordinate"]; ok {
 			t.Fatal(pair)
 		}
+	}
+}
+
+type configSnapshotTransport func(*http.Request) (*http.Response, error)
+
+func (f configSnapshotTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestConfigSnapshotsCompletePayloadBeforeReads(t *testing.T) {
+	config := map[string]any{"nested": map[string]any{"value": "original"}, "number": int64(9007199254740993)}
+	personas := map[string]any{"default": map[string]any{"name": "original"}}
+	writes := 0
+	api := NewControlPlane("https://example.test", "test")
+	api.HTTPClient = &http.Client{Transport: configSnapshotTransport(func(r *http.Request) (*http.Response, error) {
+		status, body := 200, "{}"
+		if r.Method == "GET" {
+			config["nested"].(map[string]any)["value"] = "changed"
+			personas["default"].(map[string]any)["name"] = "changed"
+			body = fmt.Sprintf(`{"config":{},"revision":"%064x"}`, 1)
+		} else {
+			var payload map[string]any
+			decoder := json.NewDecoder(r.Body)
+			decoder.UseNumber()
+			if err := decoder.Decode(&payload); err != nil {
+				t.Fatal(err)
+			}
+			if payload["config"].(map[string]any)["nested"].(map[string]any)["value"] != "original" || payload["personas"].(map[string]any)["default"].(map[string]any)["name"] != "original" {
+				t.Fatal(payload)
+			}
+			if payload["config"].(map[string]any)["number"] != json.Number("9007199254740993") {
+				t.Fatal("lost integer precision", payload)
+			}
+			writes++
+			if writes == 1 {
+				status = 412
+			}
+		}
+		return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+	})}
+	if _, err := api.UpdateRuntimeGroupConfig(context.Background(), "g", config, RuntimeGroupConfigOptions{Personas: personas}); err != nil {
+		t.Fatal(err)
+	}
+	if writes != 2 {
+		t.Fatal(writes)
 	}
 }
 func TestPythonSpeakableRanking(t *testing.T) {
@@ -37,6 +86,26 @@ func TestPythonSpeakableRanking(t *testing.T) {
 	}
 	i := HubIntent{Phrases: map[string][]string{"en-us": {"{x}", "a complete sentence", "[please]", "(x|y)", "x"}}}
 	if got := i.ExamplesWithOptions("en-us", 2, IntentExampleOptions{Speakable: true}); !reflect.DeepEqual(got, []string{"x", "a complete sentence"}) {
+		t.Fatal(got)
+	}
+}
+func TestPythonAudioContractEdgeCases(t *testing.T) {
+	// Python bounds encoded input before decoding; whitespace consumes that budget.
+	if _, err := (Event{Name: EventAudioQueue, Data: Data{"binary_data": "00 "}}).AudioBytesWithLimit(1); err == nil {
+		t.Fatal("encoded upper bound was not enforced")
+	}
+	empty, err := (Event{Name: EventAudioQueue, Data: Data{"binary_data": " \t"}}).AudioBytes()
+	if err != nil || len(empty) != 0 {
+		t.Fatal(empty, err)
+	}
+	var budget replyMediaBudget
+	first := Event{Name: EventAudioQueue, Data: Data{"binary_data": "00"}}
+	second := Event{Name: EventAudioQueue, Data: Data{"binary_data": "00"}}
+	if !budget.accept(first) || !budget.accept(second) || budget.accept(first) || budget.dropped != 0 {
+		t.Fatal("distinct clips must retain repetitions; duplicate object dispatch is ignored")
+	}
+	intent := HubIntent{Phrases: map[string][]string{"en-us": {"{name}", "a complete sentence"}}}
+	if got := intent.ExamplesWithOptions("en-us", 1, IntentExampleOptions{Speakable: true, Slots: map[string]string{"name": "Ada"}}); !reflect.DeepEqual(got, []string{"a complete sentence"}) {
 		t.Fatal(got)
 	}
 }

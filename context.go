@@ -121,6 +121,9 @@ type RequestContextOptions struct {
 // RequestContext copies the context and its session before applying nonempty hints.
 func RequestContext(base Context, opts RequestContextOptions) Context {
 	result := MergeContext(base, nil)
+	if _, ok := result["session"].(map[string]any); ok {
+		result["session"] = sessionFromContext(result)
+	}
 	var stages []string
 	for _, stage := range opts.Pipeline {
 		if stage = strings.TrimSpace(stage); stage != "" {

@@ -721,14 +721,21 @@ func (c *ControlPlane) UpdateRuntimeGroupConfig(ctx context.Context, runtimeGrou
 	if config == nil {
 		config = map[string]any{}
 	}
-	raw, err := json.Marshal(config)
+	input := map[string]any{"config": config}
+	if opts.Personas != nil {
+		input["personas"] = opts.Personas
+	}
+	raw, err := json.Marshal(input)
 	if err != nil {
 		return nil, err
 	}
-	var delta map[string]any
-	if err := json.Unmarshal(raw, &delta); err != nil {
+	var stable map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&stable); err != nil {
 		return nil, err
 	}
+	delta := stable["config"].(map[string]any)
 	for attempt := 0; ; attempt++ {
 		snapshot, err := c.GetRuntimeGroupConfig(ctx, runtimeGroupID)
 		if err != nil {
@@ -740,8 +747,8 @@ func (c *ControlPlane) UpdateRuntimeGroupConfig(ctx context.Context, runtimeGrou
 			return nil, fmt.Errorf("%w: safe configuration merge requires a valid config and revision from the API", ErrAPI)
 		}
 		payload := map[string]any{"config": mergeRuntimeConfig(base, delta), "expected_revision": revision}
-		if opts.Personas != nil {
-			payload["personas"] = opts.Personas
+		if personas, ok := stable["personas"]; ok {
+			payload["personas"] = personas
 		}
 		result, err := c.request(ctx, http.MethodPut, path, payload, nil, true)
 		var apiError *APIError

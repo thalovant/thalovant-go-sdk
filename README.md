@@ -1048,11 +1048,14 @@ reply, err := client.AskWithOptions(ctx, "Quel temps fait-il ?", thalovant.AskOp
 })
 // Check err before reading reply. AudioBytes returns ([]byte, error).
 examples := intent.ExamplesWithOptions("en-us", 2, thalovant.IntentExampleOptions{Speakable: true})
-_, err = api.UpdateRuntimeGroupConfig(ctx, groupID, delta, thalovant.RuntimeGroupConfigOptions{})
+delta := map[string]any{"lang": "en-us"}
+_, err = control.UpdateRuntimeGroupConfig(ctx, groupID, delta, thalovant.RuntimeGroupConfigOptions{})
 // Explicit full replacement:
-_, err = api.ReplaceRuntimeGroupConfig(ctx, groupID, fullConfig, thalovant.RuntimeGroupConfigOptions{})
+fullConfig := map[string]any{"lang": "en-us"}
+_, err = control.ReplaceRuntimeGroupConfig(ctx, groupID, fullConfig, thalovant.RuntimeGroupConfigOptions{})
 ```
 
+Guarded merging requires the `hubs:read` and `hubs:write` scopes and a paid plan.
 Safe merging requires an API whose configuration GET returns a valid `revision`
 and whose configuration PUT checks `expected_revision`. The SDK rereads and
 reapplies the original delta only after HTTP 412, with at most three attempts.
@@ -1066,3 +1069,12 @@ is intended, including when working with an older API. Existing code relying on
 replacement must opt into it when upgrading. Raw intent patterns remain the
 default; speakable examples remove optional parts, choose alternatives, and
 substitute caller-supplied slots while retaining complete-phrase priority.
+
+The audio limits use encoded-length upper bounds before decoding, so formatting
+whitespace consumes budget too. Like Python's `bytes.fromhex`, ASCII whitespace
+alone decodes to zero bytes. Bounded malformed clips remain available as event
+metadata and fail when decoded; they are never fetched or played automatically.
+Distinct audio events may intentionally repeat identical sound content. Only
+repeated delivery of the same event object is suppressed where object identity
+is available, without counting it as a dropped clip. Rendered example ranking
+uses the original pattern's slot presence even when sample values are supplied.
