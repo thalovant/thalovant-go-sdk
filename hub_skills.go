@@ -103,7 +103,7 @@ func (c *ControlPlane) WaitForHubSkillOperation(ctx context.Context, accepted ma
 			if ctx.Err() != nil {
 				return accepted, fmt.Errorf("accepted operation %s: %w", id, ctx.Err())
 			}
-			return accepted, fmt.Errorf("%w: could not read accepted operation %s; resume using its ID", ErrAPI, id)
+			return accepted, fmt.Errorf("%w: could not read accepted operation %s; inspect by ID or resume with the complete accepted response", ErrAPI, id)
 		}
 		switch operation.Status {
 		case OperationReady:
