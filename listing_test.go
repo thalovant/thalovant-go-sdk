@@ -159,3 +159,16 @@ func TestListingNoDataAndRegexBounds(t *testing.T) {
 		t.Fatal("failed regex guessed punctuation")
 	}
 }
+
+func TestListingUnicodeNonBoundary(t *testing.T) {
+	rules, err := NewListingRules(&ListingData{Languages: map[string]ListingLanguage{"xq": {QuestionPatterns: []string{`\Bété\B`}}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for text, want := range map[string]bool{"été": false, "pétéx": true} {
+		got, err := rules.Asks(text, "xq")
+		if err != nil || got != want {
+			t.Fatalf("%q: %v %v", text, got, err)
+		}
+	}
+}

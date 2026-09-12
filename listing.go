@@ -73,6 +73,7 @@ var defaultListing = func() *ListingRules {
 // boundary follows .NET. Translate boundaries without changing escaped literals.
 func listingPattern(expression string) string {
 	const boundary = `(?:(?<![\p{L}\p{N}_])(?=[\p{L}\p{N}_])|(?<=[\p{L}\p{N}_])(?![\p{L}\p{N}_]))`
+	const nonBoundary = `(?:(?=[\s\S])|(?<=[\s\S]))(?:(?<=[\p{L}\p{N}_])(?=[\p{L}\p{N}_])|(?<![\p{L}\p{N}_])(?![\p{L}\p{N}_]))`
 	var out strings.Builder
 	inClass := false
 	for i := 0; i < len(expression); i++ {
@@ -82,6 +83,8 @@ func listingPattern(expression string) string {
 			next := expression[i]
 			if next == 'b' && !inClass {
 				out.WriteString(boundary)
+			} else if next == 'B' && !inClass {
+				out.WriteString(nonBoundary)
 			} else {
 				out.WriteByte(char)
 				out.WriteByte(next)
