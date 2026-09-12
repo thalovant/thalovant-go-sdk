@@ -1079,12 +1079,12 @@ repeated delivery of the same event object is suppressed where object identity
 is available, without counting it as a dropped clip. Rendered example ranking
 uses the original pattern's slot presence even when sample values are supplied.
 
-## Locale-aware intent listings (0.8.0)
+## Locale-aware intent listings (0.8.1)
 
 `intent.ExamplesWithOptions("fr-CA", 2, thalovant.IntentExampleOptions{Sentence: true})`
 returns capitalized sentences using the closest registered locale. Sentence mode
 also renders patterns. `SpeakableWithLanguage(pattern, slots, lang)` fills slots
-from the bundled thalovant-languages 0.1.1 data, then applies explicit overrides.
+from the bundled thalovant-languages 0.2.1 data, then applies explicit overrides.
 `AsSentence("quelle heure est-il", "fr-CA")` returns `"Quelle heure est-il?"`.
 The original two-argument `Speakable` remains available without locale defaults.
 
@@ -1113,3 +1113,13 @@ in the public-package environment specified at the top of that script.
 
 The SDK code, CLDR matching tables and bundled `thalovant-languages` data
 retain their upstream MIT license notices. Both data notices ship with the SDK.
+
+### Language data refresh
+
+The bundled listing data follows `thalovant-languages` 0.2.1: 270 languages
+(290 base and regional entries), with regional rules resolved through the
+public package loader. Sentence marks and trailing words now match Python 0.6.8;
+for example Spanish `qué hora es` becomes `Qué hora es?`, while French
+`coupe le son` remains a complete sentence. Undescribed languages such as
+`tlh` still render bare. The reference fixtures cover 4,652 listing cases and
+990 OVOS language-selection cases.
