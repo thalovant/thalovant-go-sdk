@@ -1026,6 +1026,9 @@ failure, inspect/resume that operation instead of submitting the write again.
 
 ## Request helpers and safe configuration updates (0.7.0)
 
+`AskOptions` and `Reply` gain fields in this release. Use keyed struct literals
+when upgrading code that constructed these types positionally.
+
 Request hints carry a recognized language, ordered intent pipeline, and caller
 location without changing the caller's context. Empty hints are omitted. The
 location helper requires a city and omits invalid or zero/zero coordinates.
