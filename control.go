@@ -737,9 +737,19 @@ func (c *ControlPlane) UpdateRuntimeGroupConfig(ctx context.Context, runtimeGrou
 	}
 	delta := stable["config"].(map[string]any)
 	for attempt := 0; ; attempt++ {
-		snapshot, err := c.GetRuntimeGroupConfig(ctx, runtimeGroupID)
+		status, raw, err := c.send(ctx, http.MethodGet, path, nil, nil, true)
 		if err != nil {
 			return nil, err
+		}
+		if status < 200 || status > 299 {
+			return nil, &APIError{StatusCode: status, Detail: serverErrorDetail(raw)}
+		}
+		// Preserve untouched JSON integers/decimals exactly when writing the snapshot back.
+		var snapshot map[string]any
+		decoder := json.NewDecoder(bytes.NewReader(raw))
+		decoder.UseNumber()
+		if err := decoder.Decode(&snapshot); err != nil || !json.Valid(raw) {
+			return nil, &APIError{StatusCode: status, Detail: "invalid JSON response"}
 		}
 		revision, validRevision := snapshot["revision"].(string)
 		base, validConfig := snapshot["config"].(map[string]any)

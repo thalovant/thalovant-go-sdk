@@ -52,7 +52,7 @@ func TestConfigSnapshotsCompletePayloadBeforeReads(t *testing.T) {
 		if r.Method == "GET" {
 			config["nested"].(map[string]any)["value"] = "changed"
 			personas["default"].(map[string]any)["name"] = "changed"
-			body = fmt.Sprintf(`{"config":{},"revision":"%064x"}`, 1)
+			body = fmt.Sprintf(`{"config":{"stored":9007199254740993},"revision":"%064x"}`, 1)
 		} else {
 			var payload map[string]any
 			decoder := json.NewDecoder(r.Body)
@@ -65,6 +65,9 @@ func TestConfigSnapshotsCompletePayloadBeforeReads(t *testing.T) {
 			}
 			if payload["config"].(map[string]any)["number"] != json.Number("9007199254740993") {
 				t.Fatal("lost integer precision", payload)
+			}
+			if payload["config"].(map[string]any)["stored"] != json.Number("9007199254740993") {
+				t.Fatal("lost stored integer precision", payload)
 			}
 			writes++
 			if writes == 1 {
