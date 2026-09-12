@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0 — 2026-09-12
+
+- Add hub-addressed skill listing, history, install, update and removal.
+- Add optional bounded polling and explicit operation resumption without repeating accepted writes.
+- Document shared-runtime scope, authorization and cancellation behavior.
+
 ## 0.5.4
 
 - Refuse malformed saved Noise pins, including null or empty values, before loading or modifying trust. Preserve corrupt files for explicit diagnosis; never silently treat them as first contact.
