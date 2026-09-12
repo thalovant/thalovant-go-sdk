@@ -1078,3 +1078,34 @@ Distinct audio events may intentionally repeat identical sound content. Only
 repeated delivery of the same event object is suppressed where object identity
 is available, without counting it as a dropped clip. Rendered example ranking
 uses the original pattern's slot presence even when sample values are supplied.
+
+## Locale-aware intent listings (0.8.0)
+
+`intent.ExamplesWithOptions("fr-CA", 2, thalovant.IntentExampleOptions{Sentence: true})`
+returns capitalized sentences using the closest registered locale. Sentence mode
+also renders patterns. `SpeakableWithLanguage(pattern, slots, lang)` fills slots
+from the bundled thalovant-languages 0.1.1 data, then applies explicit overrides.
+`AsSentence("quelle heure est-il", "fr-CA")` returns `"Quelle heure est-il?"`.
+The original two-argument `Speakable` remains available without locale defaults.
+
+Examples rank complete phrases before prefixes and slot patterns, then prefer
+fuller wording up to eight words. Empty and duplicate rendered phrases do not
+consume the limit. Raw unlimited examples preserve registration order. If no
+language is supplied, the selected registration's locale is retained.
+OVOS-compatible distance matching uses versioned langcodes 3.5.1 CLDR tables,
+including Portuguese norm-region behavior; distances above ten do not match.
+
+`NewListingRules(&data)` accepts a complete `ListingData` tree and snapshots it.
+Set `IntentExampleOptions.Listing` or call the returned rules' methods to use it.
+`NewListingRules(nil)` produces bare rendering with slot names and no guessed
+punctuation. Unknown languages behave the same way. Invalid custom patterns
+return a constructor error. Regex matching has a 100ms per-pattern deadline and
+a 65536-entry backtracking stack bound. `Asks` returns matching errors; sentence
+rendering leaves the line unpunctuated on those errors. The rules are safe to
+share between goroutines and perform no runtime file or network access.
+
+Generated data retains its source licenses in `LICENSE-languages` and
+`LICENSE-langcodes`.
+
+Regenerate data and reference cases with `python scripts/sync-listing-data.py`
+in the public-package environment specified at the top of that script.

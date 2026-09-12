@@ -3,6 +3,7 @@ module github.com/thalovant/thalovant-go-sdk
 go 1.26.0
 
 require (
+	github.com/dlclark/regexp2/v2 v2.8.0
 	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/flynn/noise v1.1.0
 	github.com/gofrs/flock v0.13.0

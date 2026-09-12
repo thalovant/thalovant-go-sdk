@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0 — 2026-09-12
+
+- Add locale-aware intent sentence rendering, canonical slot examples, complete-phrase ranking and OVOS-compatible regional language selection.
+- Snapshot custom language rules, preserve the selected locale and count unique rendered examples toward limits.
+- Bound question regex evaluation by deadline and backtracking stack size; failures leave bare lines instead of guessing punctuation.
+
 ## 0.7.0 — 2026-09-12
 
 - Preserve JSON number precision in both caller deltas and stored configuration snapshots during conditional merges.

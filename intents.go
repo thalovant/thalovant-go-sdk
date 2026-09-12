@@ -39,7 +39,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 const (
@@ -282,79 +281,87 @@ func (i HubIntent) ID() string {
 	return i.SkillID + ":" + i.Name
 }
 
-// PhrasesFor returns the sentences that reach the intent in one language,
-// matched with SameLanguage, or nil when the hub registered none.
-func (i HubIntent) PhrasesFor(lang string) []string {
-	for _, candidate := range i.Languages {
-		if SameLanguage(candidate, lang) {
-			return i.Phrases[candidate]
+// listingLanguages preserves manifest order and sorts any caller-provided
+// map-only keys, so fallback never depends on Go map iteration order.
+func (i HubIntent) listingLanguages() []string {
+	var result, extra []string
+	seen := map[string]bool{}
+	for _, tag := range i.Languages {
+		if _, ok := i.Phrases[tag]; ok && !seen[tag] {
+			result = append(result, tag)
+			seen[tag] = true
 		}
 	}
-	for candidate, sentences := range i.Phrases {
-		if SameLanguage(candidate, lang) {
-			return sentences
+	for tag := range i.Phrases {
+		if !seen[tag] {
+			extra = append(extra, tag)
 		}
 	}
-	return nil
+	sort.Strings(extra)
+	return append(result, extra...)
 }
 
-// Examples returns a few sentences worth showing: whole ones before ones
-// with a slot, shorter ones first. An empty lang means the first language
-// the intent has; a limit of zero or less returns the whole pool.
+// PhrasesFor returns the closest OVOS-compatible language registration.
+func (i HubIntent) PhrasesFor(lang string) []string {
+	match, ok := ClosestLanguage(lang, i.listingLanguages())
+	if !ok {
+		return nil
+	}
+	return i.Phrases[match]
+}
+
+// Examples returns complete phrases before prefixes and slots, preferring
+// fuller wording up to eight words. A non-positive limit returns all results.
 func (i HubIntent) Examples(lang string, limit int) []string {
 	return i.ExamplesWithOptions(lang, limit, IntentExampleOptions{})
 }
 
-// IntentExampleOptions renders patterns with optional caller-supplied slot examples.
+// IntentExampleOptions controls locale-aware illustrative rendering.
 type IntentExampleOptions struct {
 	Speakable bool
+	Sentence  bool
 	Slots     map[string]string
+	Listing   *ListingRules
 }
 
 func (i HubIntent) ExamplesWithOptions(lang string, limit int, opts IntentExampleOptions) []string {
-	var pool []string
-	switch {
-	case lang != "":
-		pool = i.PhrasesFor(lang)
-	case len(i.Languages) > 0:
-		pool = i.Phrases[i.Languages[0]]
-	}
-	ranks := map[string]bool{}
-	if opts.Speakable {
-		var rendered []string
-		for _, pattern := range pool {
-			sentence := Speakable(pattern, opts.Slots)
-			if sentence == "" {
-				continue
-			}
-			rank, exists := ranks[sentence]
-			if !exists {
-				rendered = append(rendered, sentence)
-				rank = true
-			}
-			ranks[sentence] = rank && strings.Contains(pattern, "{")
+	if lang == "" {
+		if tags := i.listingLanguages(); len(tags) > 0 {
+			lang = tags[0]
 		}
-		pool = rendered
 	}
-	if limit <= 0 {
+	pool := i.PhrasesFor(lang)
+	if len(pool) == 0 {
 		return pool
 	}
-	ranked := append([]string(nil), pool...)
-	sort.SliceStable(ranked, func(a, b int) bool {
-		slotA := strings.Contains(ranked[a], "{")
-		slotB := strings.Contains(ranked[b], "{")
-		if opts.Speakable {
-			slotA, slotB = ranks[ranked[a]], ranks[ranked[b]]
-		}
-		if slotA != slotB {
-			return !slotA
-		}
-		return utf8.RuneCountInString(ranked[a]) < utf8.RuneCountInString(ranked[b])
-	})
-	if len(ranked) > limit {
-		ranked = ranked[:limit]
+	listing := opts.Listing
+	if listing == nil {
+		listing = defaultListing
 	}
-	return ranked
+	if !opts.Speakable && !opts.Sentence {
+		if limit <= 0 {
+			return pool
+		}
+		ranked := listing.Rank(pool, lang)
+		return ranked[:min(len(ranked), limit)]
+	}
+	var result []string
+	seen := map[string]bool{}
+	for _, pattern := range listing.Rank(pool, lang) {
+		text := listing.Speakable(pattern, opts.Slots, lang)
+		if opts.Sentence {
+			text = listing.AsSentence(text, lang)
+		}
+		if text == "" || seen[text] {
+			continue
+		}
+		seen[text] = true
+		result = append(result, text)
+		if limit > 0 && len(result) >= limit {
+			break
+		}
+	}
+	return result
 }
 
 // HubSkillIntents groups the intents one skill registered.
