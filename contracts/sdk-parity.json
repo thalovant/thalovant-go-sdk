@@ -2,7 +2,7 @@
   "schema_version": 1,
   "reference_digests": [
     "1133ac83dca463a5b7c69c980d1b5db46a1314d08151b31508982ad1cf41b6c6",
-    "47738ba99b2252964314e0c627c790021cc9597eb71c1097ad337535e7251298"
+    "216fafa88e0606baf35976f53392bda9152217d3797cebce5432bc2707c49847"
   ],
   "capabilities": {
     "runtime": {
@@ -68,7 +68,7 @@
     },
     "session": {
       "status": "required",
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. The connected-client factory owns failed connection cleanup; Python performs that dial internally and retains failed retirement before replacement.",
       "implementation": {
         "session.go": "009805208a849e3562d49271f271e2fd737a5781dc2c8d104b745def3d5b224d"
       },
