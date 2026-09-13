@@ -3,21 +3,26 @@
   "reference_digests": [
     "1133ac83dca463a5b7c69c980d1b5db46a1314d08151b31508982ad1cf41b6c6",
     "c13f62bf0c5ff9a8b06808542f89481f961e7c4e24af13928055598b76e2550c",
-    "2440dd10059c468ca5012a3e4e9e057c9bd2df7ef442eba1d5dcdeb4afb3eafd"
+    "2440dd10059c468ca5012a3e4e9e057c9bd2df7ef442eba1d5dcdeb4afb3eafd",
+    "4f17f2e999105c5629defd1c1ea71a197ecf725a9b559ff7b3bf9932638645bd",
+    "676e935e66330f8614d6c23cccddd48e1c4577c3af761775f18e1ea0128b8007"
   ],
   "capabilities": {
     "runtime": {
       "status": "required",
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct.",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs.",
       "implementation": {
         "client.go": "33309fc794ce230c5de4cc5982de2734b6360e7cbc2c406bcf7f1a6024c79325",
         "transport.go": "3a7acae39aad9d6a9fd79946a28e1a6055d22d96f6fe66fe9a723e79b8a4ed92",
-        "transport_noise.go": "e474489cdec5fd12fa2c2c179af33eb503792bb06ea4dce7a0a1c1ba9784819d"
+        "transport_noise.go": "e474489cdec5fd12fa2c2c179af33eb503792bb06ea4dce7a0a1c1ba9784819d",
+        "events.go": "cbe97a25b153f2ace8c9abaf67fb260be9d7c8d46e5797731a3bfc84aaad1b1d"
       },
       "tests": {
         "runtime_parity_test.go": "ae735757282afa9070143663ce0e266b6f660a411f4afd9cfcadede04425b324",
         "reply_deadline_test.go": "1ffc64edc55e7cd2a0d71b4d11cddd464f445c51c530eea01f10cf7f11d4cdab",
-        "transport_noise_test.go": "73da3589603a984c4412267df1450da1596673e494ace019be543a44b8dfa0cc"
+        "transport_noise_test.go": "73da3589603a984c4412267df1450da1596673e494ace019be543a44b8dfa0cc",
+        "reply_claims_test.go": "490dde39855188ccf174d76578ffc6be4f873794afb5f04a2a41cdeadd970ea0",
+        "testdata/reply-claim-vectors.json": "bfcd4a649fa8ecb0cede0ccd495cdbdc1a9881760e4654cd776cf81bed558cb1"
       }
     },
     "control": {

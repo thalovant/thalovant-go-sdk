@@ -29,6 +29,43 @@ type Reply struct {
 	FailureEvent *Event
 }
 
+// PipelineIDs reports nonempty string stage stamps in first-seen order.
+func (r Reply) PipelineIDs() []string { return r.contextIdentifiers("pipeline_id") }
+
+// SkillIDs reports nonempty string skill stamps in first-seen order.
+func (r Reply) SkillIDs() []string { return r.contextIdentifiers("skill_id") }
+
+// Claimed is advisory: an OK reply from any non-fallback stage is claimed.
+// An older hub without stage stamps retains its existing OK behavior.
+func (r Reply) Claimed() bool {
+	if !r.Handled || !r.OK || r.FailureEvent != nil {
+		return false
+	}
+	stages := r.PipelineIDs()
+	if len(stages) == 0 {
+		return true
+	}
+	for _, stage := range stages {
+		if !strings.Contains(stage, "fallback") {
+			return true
+		}
+	}
+	return false
+}
+
+func (r Reply) contextIdentifiers(key string) []string {
+	result := make([]string, 0)
+	seen := make(map[string]bool)
+	for _, event := range r.Events {
+		value, ok := event.Context[key].(string)
+		if ok && value != "" && !seen[value] {
+			seen[value] = true
+			result = append(result, value)
+		}
+	}
+	return result
+}
+
 func (e Event) Text() string {
 	if val, ok := e.Data["utterance"].(string); ok {
 		return val
