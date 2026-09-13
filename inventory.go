@@ -367,11 +367,12 @@ func InventoryCacheKey(mode, identityPath string) string {
 	if host == "" {
 		host = "local"
 	}
+	hostname := host
 	host = regexp.MustCompile(`[^A-Za-z0-9._-]`).ReplaceAllString(host, "-")
 	if len(host) > 40 {
 		host = host[:40]
 	}
-	sum := sha256.Sum256([]byte(mode + "|" + identityPath))
+	sum := sha256.Sum256([]byte(mode + "|" + identityPath + "|" + hostname))
 	return mode + "-" + host + "-" + hex.EncodeToString(sum[:])[:8]
 }
 

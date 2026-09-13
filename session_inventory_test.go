@@ -8,12 +8,14 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 )
 
 type managedFixture struct {
+	closeError    error
 	phase         TransportConnectionPhase
 	closed, asked int
 	ask           func() (Reply, error)
@@ -23,7 +25,7 @@ type managedFixture struct {
 func (f *managedFixture) ConnectionInfo() TransportConnectionInfo {
 	return TransportConnectionInfo{Phase: f.phase}
 }
-func (f *managedFixture) Close(context.Context) error { f.closed++; return nil }
+func (f *managedFixture) Close(context.Context) error { f.closed++; return f.closeError }
 func (f *managedFixture) SubscribeEvents(capacity int) *Subscription[Event] {
 	return f.events.subscribe(capacity)
 }
@@ -221,6 +223,7 @@ func TestInventorySharedReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	var data struct {
+		CacheKey  string `json:"cache_key"`
 		Inventory json.RawMessage
 		Examples  []struct {
 			Language string
@@ -234,6 +237,9 @@ func TestInventorySharedReference(t *testing.T) {
 	}
 	if err := json.Unmarshal(raw, &data); err != nil {
 		t.Fatal(err)
+	}
+	if InventoryCacheKey("hub", "") != data.CacheKey {
+		t.Fatal("default cache key drift")
 	}
 	inventory, err := InventoryFromJSON(data.Inventory)
 	if err != nil {
@@ -272,5 +278,57 @@ func TestOriginCancellationDoesNotFallbackOrStartCooldown(t *testing.T) {
 	_, err = origin.Connect(ctx, build, OriginAttempt{Host: "hub.example"})
 	if !errors.Is(err, context.Canceled) || attempts != 1 {
 		t.Fatal("pre-cancelled call invoked factory")
+	}
+}
+
+func TestInventoryKeysHashFullNormalizedHost(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "identity.json")
+	first, second := strings.Repeat("a", 40)+"one.example", strings.Repeat("a", 40)+"two.example"
+	raw, _ := json.Marshal(map[string]string{"default_master": first})
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	key := InventoryCacheKey("hub", path)
+	if IdentityHost(path) != first {
+		t.Fatal("scheme-less host missing")
+	}
+	raw, _ = json.Marshal(map[string]string{"default_master": second})
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if InventoryCacheKey("hub", path) == key {
+		t.Fatal("truncated hosts shared a key")
+	}
+}
+
+func TestManagedSessionRetainsFailedCleanupBeforeReplacement(t *testing.T) {
+	original, cleanup := errors.New("response lost"), errors.New("disconnect unconfirmed")
+	first := &managedFixture{phase: ConnectionReady, closeError: cleanup, ask: func() (Reply, error) { return Reply{}, original }}
+	builds := 0
+	session, err := NewHubSession(func(context.Context) (HubSessionClient, error) {
+		builds++
+		if builds == 1 {
+			return first, nil
+		}
+		return &managedFixture{phase: ConnectionReady}, nil
+	}, DefaultHubSessionPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	_, err = session.Ask(ctx, "action", AskOptions{})
+	if !errors.Is(err, original) || !errors.Is(err, cleanup) {
+		t.Fatal(err)
+	}
+	_, err = session.Ask(ctx, "status", AskOptions{})
+	if !errors.Is(err, cleanup) || builds != 1 {
+		t.Fatal("replaced transport before cleanup", err, builds)
+	}
+	first.closeError = nil
+	if _, err = session.Ask(ctx, "status", AskOptions{}); err != nil || builds != 2 {
+		t.Fatal(err, builds)
+	}
+	if err = session.Close(ctx); err != nil {
+		t.Fatal(err)
 	}
 }

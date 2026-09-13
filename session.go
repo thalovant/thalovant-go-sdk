@@ -89,6 +89,9 @@ func (s *HubSession) acquire(ctx context.Context) error {
 	}
 }
 func (s *HubSession) release() { <-s.gate }
+
+// A failed close may still own a live transport. Retain it and block a new
+// connection until cleanup succeeds; callers can retry Close with a fresh context.
 func (s *HubSession) cleanup(ctx context.Context) error {
 	if s.retired != nil {
 		if err := s.retired.Close(ctx); err != nil {

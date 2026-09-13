@@ -218,8 +218,8 @@ func (r *ListingRules) Asks(text, lang string) (bool, error) {
 	patterns := r.patterns[r.tag(lang)]
 	if lang == "" {
 		patterns = nil
-		for _, rules := range r.patterns {
-			patterns = append(patterns, rules...)
+		for _, tag := range r.tags {
+			patterns = append(patterns, r.patterns[tag]...)
 		}
 	}
 	for _, pattern := range patterns {
