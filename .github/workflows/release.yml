@@ -18,7 +18,15 @@ permissions:
   artifact-metadata: write
 
 jobs:
+  sdk-parity:
+    uses: ./.github/workflows/sdk-parity.yml
+    permissions:
+      contents: read
+    with:
+      source_ref: ${{ github.ref }}
+
   release:
+    needs: sdk-parity
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7

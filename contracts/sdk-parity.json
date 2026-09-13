@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "reference_digests": [
+    "1133ac83dca463a5b7c69c980d1b5db46a1314d08151b31508982ad1cf41b6c6",
+    "47738ba99b2252964314e0c627c790021cc9597eb71c1097ad337535e7251298"
+  ],
+  "capabilities": {
+    "runtime": {
+      "status": "required",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
+      "implementation": {
+        "client.go": "33309fc794ce230c5de4cc5982de2734b6360e7cbc2c406bcf7f1a6024c79325",
+        "transport.go": "3a7acae39aad9d6a9fd79946a28e1a6055d22d96f6fe66fe9a723e79b8a4ed92",
+        "transport_noise.go": "e474489cdec5fd12fa2c2c179af33eb503792bb06ea4dce7a0a1c1ba9784819d"
+      },
+      "tests": {
+        "runtime_parity_test.go": "ae735757282afa9070143663ce0e266b6f660a411f4afd9cfcadede04425b324",
+        "reply_deadline_test.go": "1ffc64edc55e7cd2a0d71b4d11cddd464f445c51c530eea01f10cf7f11d4cdab",
+        "transport_noise_test.go": "73da3589603a984c4412267df1450da1596673e494ace019be543a44b8dfa0cc"
+      }
+    },
+    "control": {
+      "status": "required",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
+      "implementation": {
+        "control.go": "21a6be0b81cf68c97b3499a8416f3526f615b5cf49a545f217a5f4aeda07e64a",
+        "hub_skills.go": "fedcdfea962817ada46bc8281e4c70458187e2cf80b1081203e33fdd4048fa20"
+      },
+      "tests": {
+        "hub_skills_test.go": "8d051f583ce17605b595ccb58648aee02cbff3d5156105c0c7232f4deadfd6bc",
+        "control_transport_error_test.go": "f82a581388908bb374480bf914446b36dcfa6a9c78377f3c8a090582cca80eaa"
+      }
+    },
+    "identity": {
+      "status": "required",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
+      "implementation": {
+        "identity.go": "74bed01614e65d1b526da7978b6cbf069b0eacb0b5e4c269f4c25eb78f2ed892",
+        "protocols.go": "521de8c63ca7b71d715d0dd0b4a79c7e3152a5afcc3c0918ed871569dca4ea6e"
+      },
+      "tests": {
+        "sdk_test.go": "2b7b45305beb55f0a13ba97d997b8955581d6c0a42397672debee9a6c570a5ae",
+        "python_parity_test.go": "b60d012b384a2ac3d7cd99947331bba581e3ee2e037ea03b9c0f94a585278d2b"
+      }
+    },
+    "listing": {
+      "status": "required",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
+      "implementation": {
+        "listing.go": "088ebc9e10af2c37d4a570f48d6989782c06c6de17bf63d9d5d7664f1abd9b77",
+        "intents.go": "a4e48cca44578160c1133ab034ab4b52bb30d454538e1aa8bb652bdba0c35ca5"
+      },
+      "tests": {
+        "listing_test.go": "66199a97a2f25af2429e95acaeb62ef956c0375b40996bae8b84822ac2d0158b",
+        "testdata/question-vectors.json": "046a163f1340976ae5898da153f080dbdd9326a733c97c4acbe7c2302474286e"
+      }
+    },
+    "inventory": {
+      "status": "required",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
+      "implementation": {
+        "inventory.go": "80ad91a33d0fcee6101420e4c465f117c1ec12a9818b504868c0819b5a4a2061"
+      },
+      "tests": {
+        "session_inventory_test.go": "a210b8141a56c7819380aeaae978278eed3a340c73b75691111165ceee4e379b",
+        "testdata/inventory-vectors.json": "78c7bf51a748dc9b9f66277dc63d83f9cd75a54a341ca630fb8bc55d0b30bcf5"
+      }
+    },
+    "session": {
+      "status": "required",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
+      "implementation": {
+        "session.go": "009805208a849e3562d49271f271e2fd737a5781dc2c8d104b745def3d5b224d"
+      },
+      "tests": {
+        "session_inventory_test.go": "a210b8141a56c7819380aeaae978278eed3a340c73b75691111165ceee4e379b"
+      }
+    },
+    "cli": {
+      "status": "not-applicable",
+      "reason": "Python command line entry point; consumers expose idiomatic language APIs or MCP tools."
+    }
+  }
+}

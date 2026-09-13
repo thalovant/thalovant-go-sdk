@@ -183,3 +183,25 @@ func TestListingManifestLanguageSpellingPreservesOrder(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestQuestionReference(t *testing.T) {
+	raw, err := os.ReadFile("testdata/question-vectors.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data struct {
+		Cases []struct {
+			Text, Lang string
+			Expected   bool
+		}
+	}
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range data.Cases {
+		got, err := DefaultListing().Asks(row.Text, row.Lang)
+		if err != nil || got != row.Expected {
+			t.Fatalf("%+v: %v %v", row, got, err)
+		}
+	}
+}

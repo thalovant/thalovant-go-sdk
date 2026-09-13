@@ -204,7 +204,25 @@ func (r *ListingRules) Dangling(text, lang string) bool {
 
 // Asks recognizes questions and reports bounded regex failures to the caller.
 func (r *ListingRules) Asks(text, lang string) (bool, error) {
-	for _, pattern := range r.patterns[r.tag(lang)] {
+	if !r.available {
+		return false, nil
+	}
+	text = strings.TrimSpace(text)
+	points := []rune(text)
+	if len(points) > 0 {
+		switch points[len(points)-1] {
+		case 0x3f, 0xbf, 0x37e, 0x55e, 0x61f, 0x1367, 0x1945, 0x2047, 0x2049, 0x2753, 0x2754, 0x2a7b, 0x2a7c, 0x2cfa, 0x2cfb, 0x2e2e, 0x2e54, 0xa60f, 0xa6f7, 0xfe16, 0xfe56, 0xff1f, 0x11143, 0x1e95f, 0x1fbc4, 0xe003f:
+			return true, nil
+		}
+	}
+	patterns := r.patterns[r.tag(lang)]
+	if lang == "" {
+		patterns = nil
+		for _, rules := range r.patterns {
+			patterns = append(patterns, rules...)
+		}
+	}
+	for _, pattern := range patterns {
 		matched, err := pattern.MatchString(text)
 		if err != nil {
 			return false, err
