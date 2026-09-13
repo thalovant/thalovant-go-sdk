@@ -55,6 +55,14 @@ jobs:
             subscriptions.go
             listen.go
             noise_store_file.go
+            session.go
+            inventory.go
+            listing.go
+            language_matching.go
+            hub_skills.go
+            data
+            LICENSE-languages
+            LICENSE-langcodes
             README.md
             LICENSE
         run: python .github/scripts/release_guard.py

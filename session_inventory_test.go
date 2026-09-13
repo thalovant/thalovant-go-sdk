@@ -171,7 +171,11 @@ func TestPresentableInventoryAndSafeCache(t *testing.T) {
 	if err := os.WriteFile(outside, []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(outside, filepath.Join(directory, "intents-safe.partial")); err != nil {
+	target, err := cache.Path("safe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, target); err != nil {
 		t.Fatal(err)
 	}
 	var wg sync.WaitGroup
@@ -185,7 +189,7 @@ func TestPresentableInventoryAndSafeCache(t *testing.T) {
 	}
 	contents, _ := os.ReadFile(outside)
 	if string(contents) != "keep" {
-		t.Fatal("followed scratch symlink")
+		t.Fatal("followed final cache symlink")
 	}
 	for _, key := range []string{"x/../../outside", "x\\outside"} {
 		cache.Store(key, value)

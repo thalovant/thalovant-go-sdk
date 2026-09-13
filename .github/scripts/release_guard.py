@@ -84,6 +84,9 @@ def relevant_files(files: list[str], patterns: list[str]) -> list[str]:
     matches: list[str] = []
     normalized = [pattern.strip().rstrip("/") for pattern in patterns if pattern.strip()]
     for file_path in files:
+        if "/" not in file_path and file_path.endswith(".go") and not file_path.endswith("_test.go"):
+            matches.append(file_path)
+            continue
         for pattern in normalized:
             if file_path == pattern or file_path.startswith(f"{pattern}/"):
                 matches.append(file_path)

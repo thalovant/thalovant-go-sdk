@@ -81,6 +81,15 @@ jobs:
               "fallbacks.go",
               "subscriptions.go",
               "noise_store_file.go",
+              "session.go",
+              "inventory.go",
+              "listing.go",
+              "language_matching.go",
+              "hub_skills.go",
+              "listen.go",
+              "data",
+              "LICENSE-languages",
+              "LICENSE-langcodes",
               "README.md",
               "LICENSE",
           )
@@ -146,7 +155,8 @@ jobs:
           relevant = [
               path
               for path in changed
-              if path == "<initial-release>" or path in relevant_paths
+              if path == "<initial-release>" or path in relevant_paths or path.startswith("data/")
+              or ("/" not in path and path.endswith(".go") and not path.endswith("_test.go"))
           ]
           current = version()
           current_tag = f"v{current}"

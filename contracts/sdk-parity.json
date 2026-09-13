@@ -62,7 +62,7 @@
         "inventory.go": "69f9ffeb15c88cc0aa95ace2965ada1bae1695c61817a688b3e21dfb7fdd80c5"
       },
       "tests": {
-        "session_inventory_test.go": "b08db189c735028698b35b674c6836195da5c65c78097f5b34097010693a972d",
+        "session_inventory_test.go": "6eb93a1224971426710707e9ee60479e4f69089afdbf68c9a173f20277d3cc54",
         "testdata/inventory-vectors.json": "4deb456540b8b08aa4b59f8366d4295318b743245e7936febbdb199eb2dcfae0"
       }
     },
@@ -73,7 +73,7 @@
         "session.go": "b8ee8d11c9f03e54b5913945c0610ba5aadde9099da99a00ad22c5e16e9b5535"
       },
       "tests": {
-        "session_inventory_test.go": "b08db189c735028698b35b674c6836195da5c65c78097f5b34097010693a972d"
+        "session_inventory_test.go": "6eb93a1224971426710707e9ee60479e4f69089afdbf68c9a173f20277d3cc54"
       }
     },
     "cli": {
