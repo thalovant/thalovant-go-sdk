@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.9.1 — 2026-09-13
+
+- Expose advisory reply claim status and first-seen pipeline/skill identifiers, with shared conformance for fallback, mixed stages, legacy hubs and malformed stamps. Existing reply construction remains compatible.
+
 ## 0.9.0 — 2026-09-13
 
 - Add managed hub sessions with persistent subscriptions, bounded background retry backoff, terminal close, and no automatic replay of admitted requests. Preferred-origin selection delegates address binding and failed-attempt cleanup to the transport builder.
