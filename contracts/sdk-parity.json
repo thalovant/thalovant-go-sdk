@@ -2,12 +2,13 @@
   "schema_version": 1,
   "reference_digests": [
     "1133ac83dca463a5b7c69c980d1b5db46a1314d08151b31508982ad1cf41b6c6",
-    "c13f62bf0c5ff9a8b06808542f89481f961e7c4e24af13928055598b76e2550c"
+    "c13f62bf0c5ff9a8b06808542f89481f961e7c4e24af13928055598b76e2550c",
+    "2440dd10059c468ca5012a3e4e9e057c9bd2df7ef442eba1d5dcdeb4afb3eafd"
   ],
   "capabilities": {
     "runtime": {
       "status": "required",
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct.",
       "implementation": {
         "client.go": "33309fc794ce230c5de4cc5982de2734b6360e7cbc2c406bcf7f1a6024c79325",
         "transport.go": "3a7acae39aad9d6a9fd79946a28e1a6055d22d96f6fe66fe9a723e79b8a4ed92",
