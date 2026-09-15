@@ -141,8 +141,9 @@ func BeginNativeSignIn(opts NativeSignInOptions) (NativeSignIn, error) {
 // back with. ok is false when it is not an answer to this attempt.
 //
 // A bool rather than an error on a state mismatch, a missing code, or an
-// error= response: all three mean "do not continue", and a caller that handles
-// them alike cannot accidentally treat one of them as success.
+// error= response -- including one that also carries a code: all of those mean
+// "do not continue", and a caller that handles them alike cannot accidentally
+// treat one of them as success.
 func (s NativeSignIn) CodeFrom(redirect string) (code string, ok bool) {
 	parsed, err := url.Parse(redirect)
 	if err != nil {
@@ -153,6 +154,12 @@ func (s NativeSignIn) CodeFrom(redirect string) (code string, ok bool) {
 		return "", false
 	}
 	if found.Get("state") != s.State {
+		return "", false
+	}
+	// A refusal that also carries a code is still a refusal. Checking only for
+	// a missing code accepted that pair and would have started an exchange on
+	// a code the server had just declined to issue.
+	if found.Has("error") {
 		return "", false
 	}
 	value := found.Get("code")
@@ -169,6 +176,9 @@ func (s NativeSignIn) CodeFrom(redirect string) (code string, ok bool) {
 // (RFC 9700), so retrying a failed exchange with the same code destroys the
 // token it is trying to obtain. Start again from BeginNativeSignIn.
 func (c *ControlPlane) CompleteNativeSignIn(ctx context.Context, code string, verifier string, clientID string, redirectURI string) (map[string]any, error) {
+	if err := requireSecureTokenExchange(c.APIURL); err != nil {
+		return nil, err
+	}
 	payload := map[string]any{
 		"grant_type":    "authorization_code",
 		"code":          code,
@@ -186,4 +196,34 @@ func (c *ControlPlane) CompleteNativeSignIn(ctx context.Context, code string, ve
 	}
 	c.AccessToken = accessToken
 	return token, nil
+}
+
+// requireSecureTokenExchange refuses to put an authorization code and its PKCE
+// verifier on the wire in cleartext.
+//
+// The control-plane URL accepts an http scheme -- a self-hosted or local
+// deployment may legitimately be served that way -- and request() hands
+// whatever it is given to the HTTP client without looking. Every other call
+// that would leak over http leaks a bearer token the caller already holds;
+// this one leaks the two secrets that are about to become one, and a code is
+// exchangeable by whoever sees it first.
+//
+// Loopback is allowed: a request that never leaves the machine has no
+// cleartext to observe, and that is how the control plane is run while
+// somebody is working on it.
+func requireSecureTokenExchange(apiURL string) error {
+	parsed, err := url.Parse(apiURL)
+	if err != nil {
+		return fmt.Errorf("%w: API URL could not be read: %s", ErrAPI, apiURL)
+	}
+	if strings.EqualFold(parsed.Scheme, "https") {
+		return nil
+	}
+	switch strings.ToLower(parsed.Hostname()) {
+	case "localhost", "127.0.0.1", "::1":
+		return nil
+	}
+	return fmt.Errorf(
+		"%w: refusing to send an authorization code and PKCE verifier in cleartext to %s; use https, or a loopback address while developing",
+		ErrAPI, parsed.Hostname())
 }

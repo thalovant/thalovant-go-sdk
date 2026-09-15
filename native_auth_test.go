@@ -154,3 +154,30 @@ func TestAThalovantURLIsRecognisedBySchemeAndHost(t *testing.T) {
 		}
 	}
 }
+
+func TestARefusalThatAlsoCarriesACodeIsStillARefusal(t *testing.T) {
+	// CodeRabbit caught this: checking only for a missing code accepted
+	// error=access_denied&code=... and would have started an exchange on a
+	// code the authorization server had just declined to issue.
+	begun := begin(t, NativeSignInOptions{ClientID: "app", RedirectURI: "app://auth"})
+	for _, redirect := range []string{
+		"app://auth?error=access_denied&code=abc&state=" + begun.State,
+		"app://auth?code=abc&error=server_error&state=" + begun.State,
+	} {
+		if _, ok := begun.CodeFrom(redirect); ok {
+			t.Fatalf("%q was treated as success", redirect)
+		}
+	}
+}
+
+func TestTheTokenExchangeRefusesCleartextAndAllowsLoopback(t *testing.T) {
+	if err := requireSecureTokenExchange("http://control.example.test"); err == nil {
+		t.Fatal("cleartext to a remote host was allowed")
+	}
+	// Loopback has no cleartext to observe, and is how the API is run locally.
+	for _, allowed := range []string{"http://localhost:8080", "http://127.0.0.1:8080", "https://api.thalovant.com"} {
+		if err := requireSecureTokenExchange(allowed); err != nil {
+			t.Fatalf("%s was refused: %v", allowed, err)
+		}
+	}
+}
