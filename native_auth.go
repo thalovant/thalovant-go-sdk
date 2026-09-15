@@ -88,6 +88,12 @@ func IsThalovantURL(raw string) bool {
 	if err != nil || !strings.EqualFold(parsed.Scheme, "https") {
 		return false
 	}
+	// Reject embedded credentials: https://evil.test@dash.thalovant.com/ has a
+	// host that passes, and a URL somebody is about to be sent to should not
+	// read as one host and resolve to another.
+	if parsed.User != nil {
+		return false
+	}
 	host := strings.ToLower(parsed.Hostname())
 	return host == "thalovant.com" || strings.HasSuffix(host, ".thalovant.com")
 }

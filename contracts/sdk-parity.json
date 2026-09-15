@@ -9,7 +9,7 @@
         "control.go": "21a6be0b81cf68c97b3499a8416f3526f615b5cf49a545f217a5f4aeda07e64a",
         "hub_skills.go": "fedcdfea962817ada46bc8281e4c70458187e2cf80b1081203e33fdd4048fa20",
         "hubs.go": "90066310c05b5cb77fad093bac82387925259ae6d858b7376591d2ef93bcaff7",
-        "native_auth.go": "57736267017560b1004b8a3e79213d1ddc27a8a7f226dd670034e17021c9a606"
+        "native_auth.go": "3c280656a354767aaed8731994abfc0c19f55a1bae8376d1a2b750b4126156fb"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. The authorization-code grant with PKCE is covered here alongside the device grant: the challenge is checked to be S256 of the verifier, the verifier never to reach the browser, a redirect answering a different attempt or carrying error= to be refused, and the token exchange to refuse cleartext to a non-loopback host.",
       "status": "required",
@@ -17,7 +17,7 @@
         "control_transport_error_test.go": "f82a581388908bb374480bf914446b36dcfa6a9c78377f3c8a090582cca80eaa",
         "hub_skills_test.go": "8d051f583ce17605b595ccb58648aee02cbff3d5156105c0c7232f4deadfd6bc",
         "hubs_test.go": "6d9834ead8fefe333116eb6112c11c3c863a523e2f3d95063b47a6a72834c70e",
-        "native_auth_test.go": "06b84a64e018bbf83656910d0ba8c7eccb60cb58473ec9804f87c2928d3d5a94"
+        "native_auth_test.go": "4f375ba9203dc0e9f384e174990a13b081dfcc670acd571488ce26f58d30e861"
       }
     },
     "identity": {
@@ -91,7 +91,8 @@
     "676e935e66330f8614d6c23cccddd48e1c4577c3af761775f18e1ea0128b8007",
     "8b71292c815a4b7219be7b1a7a5d01e9500faaa23e7c97c6a48683fc0411e1d0",
     "e1a17c218e70eb278e4a06161314076269c6d7f3fd24afc522711e1eedb2c2e8",
-    "c1b37fdf37eba918c14fcbd234d02a4c80ffd6a72a55c3db5566cd8ed59e7a5b"
+    "c1b37fdf37eba918c14fcbd234d02a4c80ffd6a72a55c3db5566cd8ed59e7a5b",
+    "c18d57ee45159a53773222e64586c9d36769ebc55475d1a283dc483296bb9107"
   ],
   "schema_version": 1
 }

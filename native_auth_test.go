@@ -146,6 +146,8 @@ func TestAThalovantURLIsRecognisedBySchemeAndHost(t *testing.T) {
 		"http://dash.thalovant.com",
 		// The one that matters: a lookalike host ending in the same letters.
 		"https://dash.thalovant.com.evil.test",
+		// A host that passes, reached through credentials reading as another.
+		"https://evil.test@dash.thalovant.com",
 		"https://notthalovant.com",
 		"nonsense",
 	} {
