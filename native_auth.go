@@ -275,6 +275,12 @@ func requireSafeDashboard(raw string) error {
 	if parsed.User != nil {
 		return fmt.Errorf("%w: DashboardURL must not carry credentials", ErrAPI)
 	}
+	// A query or a fragment breaks the address this builds: "<dash>#x" becomes
+	// "<dash>#x/authorize?client_id=..." and every parameter lands in the
+	// fragment, which a browser never sends. A query mangles the path likewise.
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("%w: DashboardURL must not carry a query or a fragment", ErrAPI)
+	}
 	if strings.EqualFold(parsed.Scheme, "https") {
 		return nil
 	}

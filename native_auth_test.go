@@ -202,7 +202,14 @@ func TestACallbackArrivingSomewhereElseIsRefused(t *testing.T) {
 }
 
 func TestADashboardThatIsNotSafeIsRefused(t *testing.T) {
-	for _, bad := range []string{"http://dash.example.test", "https://evil.test@dash.thalovant.com", "ftp://dash.thalovant.com"} {
+	for _, bad := range []string{
+		"http://dash.example.test",
+		"https://evil.test@dash.thalovant.com",
+		"ftp://dash.thalovant.com",
+		// A fragment puts every parameter somewhere a browser never sends.
+		"https://dash.example.test#section",
+		"https://dash.example.test?next=/x",
+	} {
 		if _, err := BeginNativeSignIn(NativeSignInOptions{
 			ClientID: "app", RedirectURI: "app://auth", DashboardURL: bad,
 		}); err == nil {
