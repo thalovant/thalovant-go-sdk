@@ -8,16 +8,16 @@
       "implementation": {
         "control.go": "21a6be0b81cf68c97b3499a8416f3526f615b5cf49a545f217a5f4aeda07e64a",
         "hub_skills.go": "fedcdfea962817ada46bc8281e4c70458187e2cf80b1081203e33fdd4048fa20",
-        "hubs.go": "90066310c05b5cb77fad093bac82387925259ae6d858b7376591d2ef93bcaff7",
-        "native_auth.go": "c0f86e90f26563ad7af31554b5178485a1eb67fa36040da0ac2ec40cde0219eb"
+        "hubs.go": "52433966442f363e691a12d973dfb3df9fdffd75fc8c3772f8fb91b937293a34",
+        "native_auth.go": "dd9761807b3fba0daf214ad396d82ec70f75c1606bdb0cb43465735871957f1f"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. The authorization-code grant with PKCE is covered here alongside the device grant: the challenge is checked to be S256 of the verifier, the verifier never to reach the browser, a redirect answering a different attempt or carrying error= to be refused, and the token exchange to refuse cleartext to a non-loopback host.",
       "status": "required",
       "tests": {
         "control_transport_error_test.go": "f82a581388908bb374480bf914446b36dcfa6a9c78377f3c8a090582cca80eaa",
         "hub_skills_test.go": "8d051f583ce17605b595ccb58648aee02cbff3d5156105c0c7232f4deadfd6bc",
-        "hubs_test.go": "6d9834ead8fefe333116eb6112c11c3c863a523e2f3d95063b47a6a72834c70e",
-        "native_auth_test.go": "4f375ba9203dc0e9f384e174990a13b081dfcc670acd571488ce26f58d30e861"
+        "hubs_test.go": "bb80646387925ed283dd99ad69c67d06059dcc8cac5856c941baad557cb3e26c",
+        "native_auth_test.go": "adbb049a3fdbeb05737d6d7ff607913fc2dac3e9fbd9f02a0458f350c6a62c72"
       }
     },
     "identity": {
@@ -93,7 +93,8 @@
     "e1a17c218e70eb278e4a06161314076269c6d7f3fd24afc522711e1eedb2c2e8",
     "c1b37fdf37eba918c14fcbd234d02a4c80ffd6a72a55c3db5566cd8ed59e7a5b",
     "c18d57ee45159a53773222e64586c9d36769ebc55475d1a283dc483296bb9107",
-    "d02b21380724ae606673f1b7e74b57f7962c2dea1b0640fe642856c2f2be97e2"
+    "d02b21380724ae606673f1b7e74b57f7962c2dea1b0640fe642856c2f2be97e2",
+    "8c8c6d952c7d86633eb65eee20415f06ee114389b3cd5efc138e59a858ffdbab"
   ],
   "schema_version": 1
 }

@@ -48,3 +48,13 @@ func TestAHubDescribedWithNothingStillSaysSomething(t *testing.T) {
 		}
 	}
 }
+
+func TestASlugIsCapitalisedByRuneNotByByte(t *testing.T) {
+	// word[:1] takes the first BYTE, which cuts a multi-byte character in half.
+	if got := HubDisplayName(map[string]any{"slug": "école-du-soir"}); got != "École Du Soir" {
+		t.Fatalf("HubDisplayName = %q, want École Du Soir", got)
+	}
+	if got := HubDisplayName(map[string]any{"slug": "日本-hub"}); got != "日本 Hub" {
+		t.Fatalf("HubDisplayName = %q", got)
+	}
+}

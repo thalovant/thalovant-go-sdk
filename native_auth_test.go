@@ -183,3 +183,38 @@ func TestTheTokenExchangeRefusesCleartextAndAllowsLoopback(t *testing.T) {
 		}
 	}
 }
+
+func TestACallbackArrivingSomewhereElseIsRefused(t *testing.T) {
+	// CodeRabbit: state proves the answer belongs to this request; it does not
+	// prove it came back to the app that made it.
+	begun := begin(t, NativeSignInOptions{ClientID: "app", RedirectURI: "app://auth"})
+	if code, ok := begun.CodeFrom("app://auth?code=abc&state=" + begun.State); !ok || code != "abc" {
+		t.Fatalf("the right callback was refused: %q %v", code, ok)
+	}
+	for _, elsewhere := range []string{
+		"app://elsewhere?code=abc&state=" + begun.State,
+		"https://evil.test/auth?code=abc&state=" + begun.State,
+	} {
+		if _, ok := begun.CodeFrom(elsewhere); ok {
+			t.Fatalf("%q was accepted", elsewhere)
+		}
+	}
+}
+
+func TestADashboardThatIsNotSafeIsRefused(t *testing.T) {
+	for _, bad := range []string{"http://dash.example.test", "https://evil.test@dash.thalovant.com", "ftp://dash.thalovant.com"} {
+		if _, err := BeginNativeSignIn(NativeSignInOptions{
+			ClientID: "app", RedirectURI: "app://auth", DashboardURL: bad,
+		}); err == nil {
+			t.Fatalf("%s was accepted", bad)
+		}
+	}
+	// A self-hosted https dashboard is real, and loopback never leaves the machine.
+	for _, good := range []string{"https://dash.example.test", "http://localhost:9000", "http://127.0.0.1:9000"} {
+		if _, err := BeginNativeSignIn(NativeSignInOptions{
+			ClientID: "app", RedirectURI: "app://auth", DashboardURL: good,
+		}); err != nil {
+			t.Fatalf("%s was refused: %v", good, err)
+		}
+	}
+}

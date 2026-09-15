@@ -37,7 +37,11 @@ func HubDisplayName(hub map[string]any) string {
 	}
 	words := strings.FieldsFunc(identifier, func(r rune) bool { return r == '-' || r == '_' })
 	for i, word := range words {
-		words[i] = strings.ToUpper(word[:1]) + word[1:]
+		// By rune, not by byte: word[:1] takes the first BYTE, which cuts a
+		// multi-byte character in half and produces mojibake for any hub
+		// somebody named in their own language.
+		runes := []rune(word)
+		words[i] = strings.ToUpper(string(runes[0])) + string(runes[1:])
 	}
 	readable := strings.Join(words, " ")
 	if readable == "" {

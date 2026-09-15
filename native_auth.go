@@ -57,6 +57,9 @@ type NativeSignIn struct {
 	State string
 	// Verifier is never sent to the browser. Exchanged with the code, once.
 	Verifier string
+	// RedirectURI is what this attempt asked the callback to arrive at. One
+	// that lands anywhere else is not this attempt's, however good its state.
+	RedirectURI string
 }
 
 func base64URL(raw []byte) string {
@@ -109,6 +112,9 @@ func BeginNativeSignIn(opts NativeSignInOptions) (NativeSignIn, error) {
 	if redirectURI == "" {
 		return NativeSignIn{}, fmt.Errorf("%w: RedirectURI is required to start a sign-in", ErrAPI)
 	}
+	if err := requireSafeDashboard(opts.DashboardURL); err != nil {
+		return NativeSignIn{}, err
+	}
 	verifier, err := NewVerifier()
 	if err != nil {
 		return NativeSignIn{}, err
@@ -140,6 +146,7 @@ func BeginNativeSignIn(opts NativeSignInOptions) (NativeSignIn, error) {
 		AuthorizationURL: dashboard + "/authorize?" + query.Encode(),
 		State:            state,
 		Verifier:         verifier,
+		RedirectURI:      redirectURI,
 	}, nil
 }
 
@@ -153,6 +160,12 @@ func BeginNativeSignIn(opts NativeSignInOptions) (NativeSignIn, error) {
 func (s NativeSignIn) CodeFrom(redirect string) (code string, ok bool) {
 	parsed, err := url.Parse(redirect)
 	if err != nil {
+		return "", false
+	}
+	// The callback has to arrive where this attempt asked it to. State proves
+	// the answer belongs to this request; the address proves it came back to
+	// the app that made it, and not to some other page handed the same query.
+	if !sameTarget(parsed, s.RedirectURI) {
 		return "", false
 	}
 	found, err := url.ParseQuery(parsed.RawQuery)
@@ -231,4 +244,47 @@ func requireSecureTokenExchange(apiURL string) error {
 	return fmt.Errorf(
 		"%w: refusing to send an authorization code and PKCE verifier in cleartext to %s; use https, or a loopback address while developing",
 		ErrAPI, parsed.Hostname())
+}
+
+func sameTarget(got *url.URL, expected string) bool {
+	want, err := url.Parse(expected)
+	if err != nil {
+		return false
+	}
+	return strings.EqualFold(got.Scheme, want.Scheme) &&
+		strings.EqualFold(got.Host, want.Host) &&
+		strings.TrimRight(got.Path, "/") == strings.TrimRight(want.Path, "/")
+}
+
+// requireSafeDashboard refuses to hand the authorization request to a
+// dashboard that cannot be trusted with it.
+//
+// The request carries the challenge, the scopes and the state. A caller may
+// point this at their own dashboard -- a self-hosted control plane is a real
+// thing -- but not at a cleartext one, and not at one whose address reads as a
+// different host than it resolves to. Loopback is allowed: it never leaves the
+// machine.
+func requireSafeDashboard(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil // the default is used instead
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("%w: DashboardURL is not a URL: %s", ErrAPI, raw)
+	}
+	if parsed.User != nil {
+		return fmt.Errorf("%w: DashboardURL must not carry credentials", ErrAPI)
+	}
+	if strings.EqualFold(parsed.Scheme, "https") {
+		return nil
+	}
+	if strings.EqualFold(parsed.Scheme, "http") {
+		switch strings.ToLower(parsed.Hostname()) {
+		case "localhost", "127.0.0.1", "::1":
+			return nil
+		}
+	}
+	return fmt.Errorf(
+		"%w: DashboardURL must be https (or a loopback address while developing), not %s",
+		ErrAPI, raw)
 }
