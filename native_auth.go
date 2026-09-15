@@ -186,7 +186,6 @@ func (c *ControlPlane) CompleteNativeSignIn(ctx context.Context, code string, ve
 		return nil, err
 	}
 	payload := map[string]any{
-		"grant_type":    "authorization_code",
 		"code":          code,
 		"code_verifier": verifier,
 		"client_id":     clientID,
