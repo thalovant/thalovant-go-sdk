@@ -192,6 +192,17 @@ func carriedValue(value any) bool {
 		return len(typed) > 0
 	case map[string]any:
 		return len(typed) > 0
+	case string:
+		// An empty scalar is not carried state. Keeping `response_mode: ""`
+		// spent one of the entries the bound allows on a cleared session, so
+		// eviction could drop a session that still had state to carry.
+		return typed != ""
+	case bool:
+		return typed
+	case float64:
+		return typed != 0
+	case int:
+		return typed != 0
 	default:
 		return true
 	}
