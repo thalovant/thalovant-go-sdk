@@ -156,3 +156,30 @@ func TestConversationAliasesAreBounded(t *testing.T) {
 		t.Fatalf("aliases: got %d, want <= %d", len(entry.group), maxConversationAliases)
 	}
 }
+
+func TestAWhitespaceHubAliasIsNotAKey(t *testing.T) {
+	// " " is a key unrelated conversations would all share, so storing it
+	// merges their carried state. A hub answering with whitespace has told us
+	// nothing; only a real id becomes an alias.
+	c := &Client{}
+	first := Context{"session": map[string]any{
+		"session_id": "a", "converse_handlers": []any{"skill.a"},
+	}}
+	second := Context{"session": map[string]any{
+		"session_id": "b", "converse_handlers": []any{"skill.b"},
+	}}
+	c.rememberConversation([]string{"sat-1", " "}, first)
+	c.rememberConversation([]string{"sat-2", " "}, second)
+
+	if _, shared := c.conversations[" "]; shared {
+		t.Fatal("whitespace must not be stored as an alias")
+	}
+	for id, want := range map[string]string{"sat-1": "skill.a", "sat-2": "skill.b"} {
+		next := c.continueConversation(Context{}, id)
+		session, _ := next["session"].(map[string]any)
+		handlers, _ := session["converse_handlers"].([]any)
+		if len(handlers) != 1 || handlers[0] != want {
+			t.Fatalf("%s carried %#v, want %s", id, handlers, want)
+		}
+	}
+}

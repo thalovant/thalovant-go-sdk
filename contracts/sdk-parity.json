@@ -38,13 +38,13 @@
     },
     "conversation": {
       "implementation": {
-        "client.go": "ca703d5a1727eaaa576466d6720263949aca6e125c506e06a028794c06261efb",
+        "client.go": "4716e725134c226726523951ec57f9ce40aadf5cdd24ef47c85fff2a56cd5222",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc"
       },
       "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
       "status": "required",
       "tests": {
-        "conversation_carry_test.go": "a27d048f72abe3af80e3214f7a6348baf5705ea85c56b7f4b58e4dc9c1dc1b81"
+        "conversation_carry_test.go": "9d3f459e89a35693d479e7978a1fa8f1308517621ec9c739a6880a9c615d7a24"
       },
       "vectors": {
         "conversation-vectors.json": "testdata/conversation-vectors.json"
@@ -100,7 +100,7 @@
       "status": "required",
       "tests": {
         "binary_frames_test.go": "539d36a1586700dcd03354f3461d8fc2c4811d119fa9893092fb3f31a4442dba",
-        "conversation_carry_test.go": "a27d048f72abe3af80e3214f7a6348baf5705ea85c56b7f4b58e4dc9c1dc1b81"
+        "conversation_carry_test.go": "9d3f459e89a35693d479e7978a1fa8f1308517621ec9c739a6880a9c615d7a24"
       },
       "vectors": {
         "mesh-vectors.json": "testdata/mesh-vectors.json"
@@ -108,7 +108,7 @@
     },
     "runtime": {
       "implementation": {
-        "client.go": "ca703d5a1727eaaa576466d6720263949aca6e125c506e06a028794c06261efb",
+        "client.go": "4716e725134c226726523951ec57f9ce40aadf5cdd24ef47c85fff2a56cd5222",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc",
         "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4",
         "transport_noise.go": "e474489cdec5fd12fa2c2c179af33eb503792bb06ea4dce7a0a1c1ba9784819d"

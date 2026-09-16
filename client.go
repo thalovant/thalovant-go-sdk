@@ -62,6 +62,12 @@ func (c *Client) rememberConversation(sessionIDs []string, eventContext Context)
 	keys := make([]string, 0, len(sessionIDs))
 	seen := make(map[string]bool, len(sessionIDs))
 	for _, id := range sessionIDs {
+		// Guarded here and not only at the call site: " " is a key every
+		// conversation would share, so one blank alias merges unrelated
+		// carried state. A hub that answers with whitespace has said nothing.
+		if strings.TrimSpace(id) == "" && id != "" {
+			continue
+		}
 		if seen[id] {
 			continue
 		}
@@ -596,7 +602,12 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 			// storing the second could evict the first -- leaving the next Ask
 			// with the request id and no carry.
 			keys := []string{askSessionID}
-			if answeredWith := event.SessionID(); answeredWith != "" && answeredWith != askSessionID {
+			// Trimmed only to test emptiness: a hub answering with whitespace
+			// has told us nothing, and " " as an alias is a key unrelated
+			// conversations would share -- merging their carried state. The
+			// raw value is what a caller would send back, so when it does say
+			// something that is the key.
+			if answeredWith := event.SessionID(); strings.TrimSpace(answeredWith) != "" && answeredWith != askSessionID {
 				keys = append(keys, answeredWith)
 			}
 			c.rememberConversation(keys, event.Context)
