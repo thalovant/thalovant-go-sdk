@@ -22,9 +22,9 @@ type Client struct {
 	// for a named session, so what the last turn activated comes back on
 	// ovos.utterance.handled and has to be sent again with the next utterance
 	// or it is gone.
-	conversationsMu  sync.Mutex
-	conversations    map[string]*conversationEntry
-	conversationSeq  uint64
+	conversationsMu sync.Mutex
+	conversations   map[string]*conversationEntry
+	conversationSeq uint64
 }
 
 // conversationEntry is one conversation, however many session ids reach it.
