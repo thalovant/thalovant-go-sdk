@@ -22,8 +22,19 @@ type Client struct {
 	// for a named session, so what the last turn activated comes back on
 	// ovos.utterance.handled and has to be sent again with the next utterance
 	// or it is gone.
-	conversationsMu sync.Mutex
-	conversations   map[string]map[string]any
+	conversationsMu  sync.Mutex
+	conversations    map[string]*conversationEntry
+	conversationSeq  uint64
+}
+
+// conversationEntry is one conversation, however many session ids reach it.
+// Filed as separate entries per id they aged and were evicted separately, so
+// a caller using the evicted alias lost the carry while one using its partner
+// kept it -- and the bound counted names rather than conversations.
+type conversationEntry struct {
+	group []string
+	kept  map[string]any
+	seq   uint64
 }
 
 // maxRememberedConversations bounds the map above: a long-lived client handed
@@ -31,9 +42,15 @@ type Client struct {
 // A satellite runs one session for its whole life.
 const maxRememberedConversations = 32
 
+// maxConversationAliases bounds the names one conversation answers to. A hub
+// free to answer under a fresh translated id (HIVEMIND-BRIDGE-1 §4) adds one
+// alias per turn, and the group counts once, so without this the bound above
+// limits conversations but not names.
+const maxConversationAliases = 8
+
 // rememberConversation keeps the session a hub returned, to send with the next
 // utterance in that session.
-func (c *Client) rememberConversation(sessionID string, eventContext Context) {
+func (c *Client) rememberConversation(sessionIDs []string, eventContext Context) {
 	session := sessionFromContext(eventContext)
 	kept := make(map[string]any)
 	for _, field := range ConversationSessionFields {
@@ -41,37 +58,105 @@ func (c *Client) rememberConversation(sessionID string, eventContext Context) {
 			kept[field] = value
 		}
 	}
-	c.conversationsMu.Lock()
-	defer c.conversationsMu.Unlock()
-	// Forgetting is the state, not the absence of one: a turn that ended with
-	// nothing active must not leave the old entry behind to resurrect it.
-	delete(c.conversations, sessionID)
-	if len(kept) == 0 {
+
+	keys := make([]string, 0, len(sessionIDs))
+	seen := make(map[string]bool, len(sessionIDs))
+	for _, id := range sessionIDs {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		keys = append(keys, id)
+	}
+	if len(keys) == 0 {
 		return
 	}
-	if c.conversations == nil {
-		c.conversations = make(map[string]map[string]any)
+
+	c.conversationsMu.Lock()
+	defer c.conversationsMu.Unlock()
+	// Take over every id these already reach rather than dropping them: a turn
+	// the caller continued under the hub's id must not forget the id a
+	// satellite still uses for the same conversation.
+	for i := 0; i < len(keys); i++ {
+		previous, ok := c.conversations[keys[i]]
+		if !ok {
+			continue
+		}
+		for _, sibling := range previous.group {
+			delete(c.conversations, sibling)
+			if !seen[sibling] {
+				seen[sibling] = true
+				keys = append(keys, sibling)
+			}
+		}
+		delete(c.conversations, keys[i])
 	}
-	if len(c.conversations) >= maxRememberedConversations {
-		for key := range c.conversations {
+	// Forgetting is the state, not the absence of one: a turn that ended with
+	// nothing active must not leave the old entry behind to resurrect it.
+	if len(kept) == 0 {
+		for _, key := range keys {
 			delete(c.conversations, key)
-			break
+		}
+		return
+	}
+	if len(keys) > maxConversationAliases {
+		// This turn's ids come first, inherited ones after, so the tail is the
+		// stalest and the id the next turn will send is kept.
+		keys = keys[:maxConversationAliases]
+	}
+	if c.conversations == nil {
+		c.conversations = make(map[string]*conversationEntry)
+	}
+	c.conversationSeq++
+	entry := &conversationEntry{group: keys, kept: kept, seq: c.conversationSeq}
+	for _, key := range keys {
+		c.conversations[key] = entry
+	}
+	c.evictOldestConversationsLocked()
+}
+
+// evictOldestConversationsLocked drops whole conversations, oldest first, until
+// the bound holds. Ranging a Go map to pick a victim evicted an *arbitrary*
+// entry -- iteration order is randomised -- so storing a second alias could
+// delete the first and the next turn found no carry.
+func (c *Client) evictOldestConversationsLocked() {
+	for {
+		distinct := make(map[uint64]*conversationEntry, len(c.conversations))
+		for _, entry := range c.conversations {
+			distinct[entry.seq] = entry
+		}
+		if len(distinct) <= maxRememberedConversations {
+			return
+		}
+		var oldest *conversationEntry
+		for _, entry := range distinct {
+			if oldest == nil || entry.seq < oldest.seq {
+				oldest = entry
+			}
+		}
+		for _, key := range oldest.group {
+			delete(c.conversations, key)
 		}
 	}
-	c.conversations[sessionID] = kept
 }
 
 // continueConversation puts the last turn's conversation state back into this
 // turn's context.
 func (c *Client) continueConversation(eventContext Context, sessionID string) Context {
 	c.conversationsMu.Lock()
-	previous, ok := c.conversations[sessionID]
+	entry, ok := c.conversations[sessionID]
+	if ok {
+		// Most recently used: a client juggling more conversations than the
+		// bound keeps the ones it is actually using.
+		c.conversationSeq++
+		entry.seq = c.conversationSeq
+	}
 	c.conversationsMu.Unlock()
 	if !ok {
 		return eventContext
 	}
 	next := MergeContext(eventContext, nil)
-	next["session"] = CarryConversation(previous, sessionFromContext(next))
+	next["session"] = CarryConversation(entry.kept, sessionFromContext(next))
 	return next
 }
 
@@ -504,14 +589,17 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 		case EventUtteranceHandled:
 			// The end of the turn is the one place a hub states what the
 			// conversation now is, and it keeps none of it for a named session.
-			c.rememberConversation(askSessionID, event.Context)
-			// And under the id the hub answered with, when it differs.
-			// Reply.SessionID hands the caller the first non-empty *event*
-			// session id, so a caller that passes it to the next Ask looked up
-			// a key nothing was filed under and sent no carried state at all.
+			// Both ids in one call: the id the request used, which a
+			// satellite reuses, and the one the hub answered with, which is
+			// what Reply.SessionID hands an ordinary caller. Filed separately
+			// they aged and were evicted separately, and with the store full
+			// storing the second could evict the first -- leaving the next Ask
+			// with the request id and no carry.
+			keys := []string{askSessionID}
 			if answeredWith := event.SessionID(); answeredWith != "" && answeredWith != askSessionID {
-				c.rememberConversation(answeredWith, event.Context)
+				keys = append(keys, answeredWith)
 			}
+			c.rememberConversation(keys, event.Context)
 			if !emptyStarted && !settleStarted {
 				emptyStarted = true
 				schedule(emptyWait)
@@ -627,7 +715,7 @@ func (c *Client) Query(ctx context.Context, text string, opts QueryOptions) (Rep
 	var mediaBudget replyMediaBudget
 	fragments := []string{}
 	var failure, softFailure *Event
-	sub := subscribeHiveMessages(transport)
+	sub := subscribeHiveMessages(transport, 256)
 	defer sub.Close()
 	messages := sub.C
 	inner := HiveMessage{

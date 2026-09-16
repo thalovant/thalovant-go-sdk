@@ -153,7 +153,7 @@ func listenHiveFrames(ctx context.Context, c *Client, options ListenOptions, kee
 		cancel()
 		return nil, fmt.Errorf("%w: this transport does not carry hive frames", ErrRuntime)
 	}
-	source := subscribeHiveMessages(transport)
+	source := subscribeHiveMessages(transport, capacity)
 	// Retain frames relayed immediately before Connect returns.
 	if err := c.Connect(ctx); err != nil {
 		source.Close()

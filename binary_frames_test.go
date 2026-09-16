@@ -118,7 +118,13 @@ func TestEveryCaseTheBinaryVectorsDescribeDecodesAsItSays(t *testing.T) {
 		if !known {
 			t.Fatalf("%v: the vectors describe a case the frames do not carry", test["name"])
 		}
-		raw, _ := base64.StdEncoding.DecodeString(frame["frame"].(string))
+		// Not discarded: DecodeString returns the bytes it managed before the
+		// fault, so a malformed fixture would otherwise surface as a confusing
+		// frame-decode failure instead of naming the bad vector.
+		raw, decodeErr := base64.StdEncoding.DecodeString(frame["frame"].(string))
+		if decodeErr != nil {
+			t.Fatalf("%v: frame is not valid base64: %v", test["name"], decodeErr)
+		}
 		message, err := DecodeHiveBinaryFrame(raw)
 		if err != nil {
 			t.Fatalf("%v: %v", test["name"], err)

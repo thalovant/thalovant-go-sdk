@@ -13,6 +13,7 @@ package thalovant
 // something a machine checks rather than something a digest asserts.
 
 import (
+	"fmt"
 	"encoding/json"
 	"os"
 	"reflect"
@@ -99,5 +100,59 @@ func TestOwnTrafficIsNotAHiveKind(t *testing.T) {
 				t.Fatalf("%s must not be a hive kind", refused)
 			}
 		}
+	}
+}
+
+func TestBothSessionAliasesSurviveAFullConversationStore(t *testing.T) {
+	// With the store full, filing the two ids as separate entries let the
+	// second evict the first -- and because ranging a Go map picks an
+	// arbitrary key, which one it dropped was not even predictable. A caller
+	// continuing under the request id then found no carry.
+	c := &Client{}
+	carried := Context{"session": map[string]any{
+		"session_id": "x", "converse_handlers": []any{"skill.a"},
+	}}
+	for i := 0; i < maxRememberedConversations; i++ {
+		c.rememberConversation([]string{fmt.Sprintf("filler-%d", i)}, carried)
+	}
+	if got := len(c.conversations); got != maxRememberedConversations {
+		t.Fatalf("filler entries: got %d, want %d", got, maxRememberedConversations)
+	}
+
+	c.rememberConversation([]string{"sat-1", "hub:sat-1"}, carried)
+
+	for _, id := range []string{"sat-1", "hub:sat-1"} {
+		next := c.continueConversation(Context{}, id)
+		session, _ := next["session"].(map[string]any)
+		if session == nil || session["converse_handlers"] == nil {
+			t.Fatalf("%s lost its carry: %#v", id, next)
+		}
+	}
+	// One conversation, two names: the bound counts conversations.
+	seen := map[uint64]bool{}
+	for _, entry := range c.conversations {
+		seen[entry.seq] = true
+	}
+	if len(seen) > maxRememberedConversations {
+		t.Fatalf("distinct conversations: got %d, want <= %d", len(seen), maxRememberedConversations)
+	}
+}
+
+func TestConversationAliasesAreBounded(t *testing.T) {
+	// A hub that answers under a fresh translated id every turn would
+	// otherwise grow one group for ever.
+	c := &Client{}
+	carried := Context{"session": map[string]any{
+		"session_id": "x", "converse_handlers": []any{"skill.a"},
+	}}
+	for i := 0; i < maxConversationAliases*3; i++ {
+		c.rememberConversation([]string{"sat-1", fmt.Sprintf("hub-%d", i)}, carried)
+	}
+	entry := c.conversations["sat-1"]
+	if entry == nil {
+		t.Fatal("the request id must always survive: it is what the next turn sends")
+	}
+	if len(entry.group) > maxConversationAliases {
+		t.Fatalf("aliases: got %d, want <= %d", len(entry.group), maxConversationAliases)
 	}
 }
