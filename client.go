@@ -505,6 +505,13 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 			// The end of the turn is the one place a hub states what the
 			// conversation now is, and it keeps none of it for a named session.
 			c.rememberConversation(askSessionID, event.Context)
+			// And under the id the hub answered with, when it differs.
+			// Reply.SessionID hands the caller the first non-empty *event*
+			// session id, so a caller that passes it to the next Ask looked up
+			// a key nothing was filed under and sent no carried state at all.
+			if answeredWith := event.SessionID(); answeredWith != "" && answeredWith != askSessionID {
+				c.rememberConversation(answeredWith, event.Context)
+			}
 			if !emptyStarted && !settleStarted {
 				emptyStarted = true
 				schedule(emptyWait)

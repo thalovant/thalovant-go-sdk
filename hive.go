@@ -201,9 +201,22 @@ func listenHiveFrames(ctx context.Context, c *Client, options ListenOptions, kee
 				if !keep(message) {
 					continue
 				}
+				// Under the same lock finish() takes, and re-checking done
+				// inside it: Close can call finish -- and close(output) --
+				// between the select above and this send, and a send on a
+				// closed channel panics. Listen guards its send the same way.
+				stream.mu.Lock()
+				select {
+				case <-done:
+					stream.mu.Unlock()
+					return
+				default:
+				}
 				select {
 				case output <- message:
+					stream.mu.Unlock()
 				default:
+					stream.mu.Unlock()
 					finish(ErrEventOverflow)
 					return
 				}
