@@ -1,5 +1,21 @@
 {
   "capabilities": {
+    "binary": {
+      "implementation": {
+        "hive.go": "def23f2bf2bd0dd8907de62ca913b94edb85d70c026a3f9a2a67d9685eebd1c3",
+        "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4",
+        "wire.go": "99e462abd91a540571e0467e458d05dab75dbed38e14cbc146b1b6d7949bf0dd"
+      },
+      "reason": "DecodeHiveBinaryFrame branches on BINARY: four bits of payload type, then the clip itself, never parsed or inflated. ListenBinary delivers it. Run against the shared binary vectors and against binary-frames.json, which is hivemind-bus-client's own encoder output rather than frames this SDK built for itself.",
+      "status": "required",
+      "tests": {
+        "binary_frames_test.go": "539d36a1586700dcd03354f3461d8fc2c4811d119fa9893092fb3f31a4442dba"
+      },
+      "vectors": {
+        "binary-frames.json": "testdata/binary-frames.json",
+        "binary-vectors.json": "testdata/binary-vectors.json"
+      }
+    },
     "cli": {
       "reason": "Python command line entry point; consumers expose idiomatic language APIs or MCP tools.",
       "status": "not-applicable"
@@ -18,6 +34,20 @@
         "hub_skills_test.go": "8d051f583ce17605b595ccb58648aee02cbff3d5156105c0c7232f4deadfd6bc",
         "hubs_test.go": "bb80646387925ed283dd99ad69c67d06059dcc8cac5856c941baad557cb3e26c",
         "native_auth_test.go": "e9c73e06668eb916f6d7287d88a9fdd3de7cd32abb98802418de6e47dfa43083"
+      }
+    },
+    "conversation": {
+      "implementation": {
+        "client.go": "4716e725134c226726523951ec57f9ce40aadf5cdd24ef47c85fff2a56cd5222",
+        "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc"
+      },
+      "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
+      "status": "required",
+      "tests": {
+        "conversation_carry_test.go": "9d3f459e89a35693d479e7978a1fa8f1308517621ec9c739a6880a9c615d7a24"
+      },
+      "vectors": {
+        "conversation-vectors.json": "testdata/conversation-vectors.json"
       }
     },
     "identity": {
@@ -40,7 +70,10 @@
       "status": "required",
       "tests": {
         "session_inventory_test.go": "6eb93a1224971426710707e9ee60479e4f69089afdbf68c9a173f20277d3cc54",
-        "testdata/inventory-vectors.json": "4deb456540b8b08aa4b59f8366d4295318b743245e7936febbdb199eb2dcfae0"
+        "testdata/inventory-vectors.json": "f631ce993a84b21ae17d43f65ad4e062ebbd997ca7b9c02de4056c11ec73b1d0"
+      },
+      "vectors": {
+        "inventory-vectors.json": "testdata/inventory-vectors.json"
       }
     },
     "listing": {
@@ -52,14 +85,32 @@
       "status": "required",
       "tests": {
         "listing_test.go": "c86ebe7969cac8ee12cd76f8ba23ba4bca0ae0c0c77c97e60e047c66c12dbc90",
-        "testdata/question-vectors.json": "046a163f1340976ae5898da153f080dbdd9326a733c97c4acbe7c2302474286e"
+        "testdata/question-vectors.json": "a6ae21cb27eac6a33cf1026677f0c36be50f0e13faa7ce724bedc9a3b8bb8386"
+      },
+      "vectors": {
+        "question-vectors.json": "testdata/question-vectors.json"
+      }
+    },
+    "mesh": {
+      "implementation": {
+        "hive.go": "def23f2bf2bd0dd8907de62ca913b94edb85d70c026a3f9a2a67d9685eebd1c3",
+        "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4"
+      },
+      "reason": "ListenHive over the five hive kinds, and Propagate/Escalate/Broadcast. The kinds used to fall off the end of dispatchNoiseMessage with no case and no log line. Run against the shared mesh vectors.",
+      "status": "required",
+      "tests": {
+        "binary_frames_test.go": "539d36a1586700dcd03354f3461d8fc2c4811d119fa9893092fb3f31a4442dba",
+        "conversation_carry_test.go": "9d3f459e89a35693d479e7978a1fa8f1308517621ec9c739a6880a9c615d7a24"
+      },
+      "vectors": {
+        "mesh-vectors.json": "testdata/mesh-vectors.json"
       }
     },
     "runtime": {
       "implementation": {
-        "client.go": "33309fc794ce230c5de4cc5982de2734b6360e7cbc2c406bcf7f1a6024c79325",
-        "events.go": "cbe97a25b153f2ace8c9abaf67fb260be9d7c8d46e5797731a3bfc84aaad1b1d",
-        "transport.go": "3a7acae39aad9d6a9fd79946a28e1a6055d22d96f6fe66fe9a723e79b8a4ed92",
+        "client.go": "4716e725134c226726523951ec57f9ce40aadf5cdd24ef47c85fff2a56cd5222",
+        "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc",
+        "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4",
         "transport_noise.go": "e474489cdec5fd12fa2c2c179af33eb503792bb06ea4dce7a0a1c1ba9784819d"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs.",
@@ -68,8 +119,11 @@
         "reply_claims_test.go": "490dde39855188ccf174d76578ffc6be4f873794afb5f04a2a41cdeadd970ea0",
         "reply_deadline_test.go": "1ffc64edc55e7cd2a0d71b4d11cddd464f445c51c530eea01f10cf7f11d4cdab",
         "runtime_parity_test.go": "ae735757282afa9070143663ce0e266b6f660a411f4afd9cfcadede04425b324",
-        "testdata/reply-claim-vectors.json": "bfcd4a649fa8ecb0cede0ccd495cdbdc1a9881760e4654cd776cf81bed558cb1",
+        "testdata/reply-claim-vectors.json": "45f2731589e612d5a849376d94073c57b0fef426a92e1d065c58c48442b1ffdc",
         "transport_noise_test.go": "73da3589603a984c4412267df1450da1596673e494ace019be543a44b8dfa0cc"
+      },
+      "vectors": {
+        "reply-claim-vectors.json": "testdata/reply-claim-vectors.json"
       }
     },
     "session": {
@@ -84,25 +138,13 @@
     }
   },
   "reference_digests": [
-    "1133ac83dca463a5b7c69c980d1b5db46a1314d08151b31508982ad1cf41b6c6",
-    "c13f62bf0c5ff9a8b06808542f89481f961e7c4e24af13928055598b76e2550c",
-    "2440dd10059c468ca5012a3e4e9e057c9bd2df7ef442eba1d5dcdeb4afb3eafd",
-    "4f17f2e999105c5629defd1c1ea71a197ecf725a9b559ff7b3bf9932638645bd",
-    "676e935e66330f8614d6c23cccddd48e1c4577c3af761775f18e1ea0128b8007",
-    "8b71292c815a4b7219be7b1a7a5d01e9500faaa23e7c97c6a48683fc0411e1d0",
-    "e1a17c218e70eb278e4a06161314076269c6d7f3fd24afc522711e1eedb2c2e8",
-    "c1b37fdf37eba918c14fcbd234d02a4c80ffd6a72a55c3db5566cd8ed59e7a5b",
-    "c18d57ee45159a53773222e64586c9d36769ebc55475d1a283dc483296bb9107",
-    "d02b21380724ae606673f1b7e74b57f7962c2dea1b0640fe642856c2f2be97e2",
-    "8c8c6d952c7d86633eb65eee20415f06ee114389b3cd5efc138e59a858ffdbab",
-    "20cc677bf3ca8d61c32f0f2d3fbf6562899cf83f951685d57a2bdd10e8d30a45",
-    "9ef680aa6e5dd5519ade3954b16ac14219117df45a87ca7112dca961fad7486d",
-    "c4973d48241c9f14e0aaf6aab6b4b1c7e798b81099d0c5783079af7b4a138392",
-    "a6fe69439f14c75a2cf37d14a2d2ad1e2426639def8e1757a738a3ec6683af17",
-    "8669034d6987af946303913780cce419efaff2a9181de7d46fbffe7092d7be9e",
-    "c0d883e69ee7fa301c6e4c1b1a5c433ed290d63f79a3e6b397fdb0a988d111fa",
     "49bab2a8922b69b5cd886e7acadf217cdaa78bd94bfb48374e2f4b1cde85dfc0",
-    "003cdf02562e53bd24cc58ac8eb44411cc7ac42d06ba3bbfa46e82386ea92ef7"
+    "003cdf02562e53bd24cc58ac8eb44411cc7ac42d06ba3bbfa46e82386ea92ef7",
+    "9af92bcafd77385cd7c9cfede859eeb3586f65d0b24c9dbff36352089e94821c",
+    "ed8b30df32ee8b385608cee8ebda39ccb04eb5079b73e8ccc23dca0c48d62449",
+    "083b2da8b256cd970b3050218d8d51f13e7355633913d086c9f4147d8790165b",
+    "1e8b76b34b755207bb754e5f4c7364334f14476dee70fce1d2687bfdc1545f30",
+    "f6a74ead44d53658228da3f4457334f3e922b67dd1e33b43c3ba8b6f7c066bf9"
   ],
   "schema_version": 1
 }

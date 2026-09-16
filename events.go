@@ -153,6 +153,85 @@ func MergeContext(base, extra Context) Context {
 	return merged
 }
 
+// HiveKinds are the hive's own frame kinds, which a client may subscribe to.
+//
+// query and cascade are deliberately absent: they are this client's own
+// request/response traffic and Ask already owns them, so subscribing to one
+// would quietly compete for the same replies.
+var HiveKinds = []string{"broadcast", "propagate", "escalate", "intercom", "rendezvous"}
+
+// ConversationSessionFields are the session fields a client carries from one
+// turn of a conversation to the next.
+//
+// A hub keeps nothing for a named session: OVOS-SESSION-2 §2.2 makes the
+// orchestrator stateless for those, so the carrier a client sends is the whole
+// snapshot and whatever the last turn activated is discarded the moment it
+// ends. Without converse_handlers the converse pipeline has no skill to poll
+// and every follow-up reaches the fallback instead of the skill that just
+// answered.
+//
+// An allow-list, not a deny-list. Deliberately absent: the caller's own
+// per-turn settings (lang, pipeline, site_id), because a client that decides
+// the language per utterance would otherwise be pinned to whichever one the
+// conversation opened in; and the live device flags, which describe a moment
+// that has passed by the time the next turn is sent.
+var ConversationSessionFields = []string{
+	"converse_handlers",
+	"active_handlers",
+	"active_skills",
+	"context",
+	"utterance_states",
+	"response_mode",
+}
+
+func carriedValue(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case []any:
+		return len(typed) > 0
+	case map[string]any:
+		return len(typed) > 0
+	case string:
+		// An empty scalar is not carried state. Keeping `response_mode: ""`
+		// spent one of the entries the bound allows on a cleared session, so
+		// eviction could drop a session that still had state to carry.
+		return typed != ""
+	case bool:
+		return typed
+	case float64:
+		return typed != 0
+	case int:
+		return typed != 0
+	default:
+		return true
+	}
+}
+
+// CarryConversation fills the conversation fields of session from the hub's
+// last reply.
+//
+// This turn's own values win: a field the caller set is never overwritten, only
+// one it left out is taken from the turn before.
+func CarryConversation(previous, session map[string]any) map[string]any {
+	carried := make(map[string]any, len(session)+len(ConversationSessionFields))
+	for key, value := range session {
+		carried[key] = value
+	}
+	if previous == nil {
+		return carried
+	}
+	for _, field := range ConversationSessionFields {
+		if _, present := carried[field]; present {
+			continue
+		}
+		if value, ok := previous[field]; ok && carriedValue(value) {
+			carried[field] = value
+		}
+	}
+	return carried
+}
+
 func ContextWithCorrelation(raw Context, sessionID, siteID, lang, requestID string) Context {
 	next := MergeContext(raw, nil)
 	session := sessionFromContext(next)

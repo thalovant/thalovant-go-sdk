@@ -46,14 +46,16 @@ type TransportConnectionInfo struct {
 }
 
 type HiveMessage struct {
-	MsgType      string         `json:"msg_type"`
-	Payload      map[string]any `json:"payload"`
-	Metadata     map[string]any `json:"metadata"`
-	Route        []any          `json:"route"`
-	Node         any            `json:"node"`
-	TargetSiteID any            `json:"target_site_id"`
-	TargetPubKey any            `json:"target_pubkey"`
-	SourcePeer   any            `json:"source_peer"`
+	MsgType string         `json:"msg_type"`
+	Payload map[string]any `json:"payload"`
+	// Binary is set only on a BINARY frame, whose payload is bytes, not JSON.
+	Binary       *ThalovantBinary `json:"-"`
+	Metadata     map[string]any   `json:"metadata"`
+	Route        []any            `json:"route"`
+	Node         any              `json:"node"`
+	TargetSiteID any              `json:"target_site_id"`
+	TargetPubKey any              `json:"target_pubkey"`
+	SourcePeer   any              `json:"source_peer"`
 }
 
 type RuntimeTransport interface {
@@ -501,7 +503,10 @@ func dispatchNoiseMessage(bus chan Event, hive chan HiveMessage, message HiveMes
 		case bus <- event:
 		default:
 		}
-	case "query", "cascade":
+	case "query", "cascade", "bin", "broadcast", "propagate", "escalate", "intercom", "rendezvous":
+		// The five mesh kinds and BINARY used to fall off the end of this
+		// switch with no case and no log line: a hub relaying them had nobody
+		// listening. ListenHive and ListenBinary filter this stream.
 		streams.hive.publish(message)
 		select {
 		case hive <- message:

@@ -104,6 +104,34 @@ func DecodeHiveBinaryFrame(payload []byte) (HiveMessage, error) {
 	if err != nil {
 		return HiveMessage{}, err
 	}
+	var metadata map[string]any
+	if err := json.Unmarshal([]byte(metaText), &metadata); err != nil {
+		return HiveMessage{}, err
+	}
+	msgType := hiveIntToType[byte(typeID)]
+	if msgType == "" {
+		msgType = "3rdparty"
+	}
+	if msgType == "bin" {
+		// A BINARY frame does not carry JSON. Four bits name the payload type,
+		// and everything after them is the clip itself: raw, misaligned because
+		// the padding goes on the front, and never parsed or decompressed.
+		kind, err := reader.readUint(4)
+		if err != nil {
+			return HiveMessage{}, err
+		}
+		clip, err := reader.readRemainingBytes()
+		if err != nil {
+			return HiveMessage{}, err
+		}
+		return HiveMessage{
+			MsgType:  msgType,
+			Payload:  map[string]any{},
+			Binary:   BinaryFrame(BinaryKindName(int(kind)), clip, metadata),
+			Metadata: metadata,
+			Route:    []any{},
+		}, nil
+	}
 	payloadBytes, err := reader.readRemainingBytes()
 	if err != nil {
 		return HiveMessage{}, err
@@ -112,17 +140,9 @@ func DecodeHiveBinaryFrame(payload []byte) (HiveMessage, error) {
 	if err != nil {
 		return HiveMessage{}, err
 	}
-	var metadata map[string]any
-	if err := json.Unmarshal([]byte(metaText), &metadata); err != nil {
-		return HiveMessage{}, err
-	}
 	var messagePayload map[string]any
 	if err := json.Unmarshal([]byte(payloadText), &messagePayload); err != nil {
 		return HiveMessage{}, err
-	}
-	msgType := hiveIntToType[byte(typeID)]
-	if msgType == "" {
-		msgType = "3rdparty"
 	}
 	return HiveMessage{
 		MsgType:      msgType,

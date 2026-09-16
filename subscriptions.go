@@ -117,9 +117,12 @@ func (c *Client) SubscribeEvents(capacity int) *Subscription[Event] {
 	return &Subscription[Event]{C: c.Transport.Events()}
 }
 
-func subscribeHiveMessages(transport hiveMessageTransport) *Subscription[HiveMessage] {
+// subscribeHiveMessages takes the capacity the caller sized its own output
+// for. Pinning the source at 256 let a bounded source overflow and set
+// ErrEventOverflow while the listener's own buffer still had room.
+func subscribeHiveMessages(transport hiveMessageTransport, capacity int) *Subscription[HiveMessage] {
 	if source, ok := transport.(HiveMessageSubscriber); ok {
-		return source.SubscribeHiveMessages(256)
+		return source.SubscribeHiveMessages(capacity)
 	}
 	return &Subscription[HiveMessage]{C: transport.HiveMessages()}
 }
