@@ -2,7 +2,7 @@
   "capabilities": {
     "binary": {
       "implementation": {
-        "hive.go": "070e06fd097c3af2929175b75433b69491b02d59adf2050a64e0e86c6940745c",
+        "hive.go": "d2276277241a77c7acd1ec70be8ef405f0a4be98ecf400f57ddcc8583ca79685",
         "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4",
         "wire.go": "99e462abd91a540571e0467e458d05dab75dbed38e14cbc146b1b6d7949bf0dd"
       },
@@ -38,7 +38,7 @@
     },
     "conversation": {
       "implementation": {
-        "client.go": "06396e183bad2b99e4b67271bf4cc605a0b151914f04d00a345d92cc0fb9142b",
+        "client.go": "2aa80132c76860d3061d11e7346dcafe591e640099b0d6fb0dbf71d7fade1e29",
         "events.go": "e059c7360e76cc25d8de5ad67471c5e22a175b57a40cc453eecb8b4a3e902a3a"
       },
       "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
@@ -93,7 +93,7 @@
     },
     "mesh": {
       "implementation": {
-        "hive.go": "070e06fd097c3af2929175b75433b69491b02d59adf2050a64e0e86c6940745c",
+        "hive.go": "d2276277241a77c7acd1ec70be8ef405f0a4be98ecf400f57ddcc8583ca79685",
         "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4"
       },
       "reason": "ListenHive over the five hive kinds, and Propagate/Escalate/Broadcast. The kinds used to fall off the end of dispatchNoiseMessage with no case and no log line. Run against the shared mesh vectors.",
@@ -108,7 +108,7 @@
     },
     "runtime": {
       "implementation": {
-        "client.go": "06396e183bad2b99e4b67271bf4cc605a0b151914f04d00a345d92cc0fb9142b",
+        "client.go": "2aa80132c76860d3061d11e7346dcafe591e640099b0d6fb0dbf71d7fade1e29",
         "events.go": "e059c7360e76cc25d8de5ad67471c5e22a175b57a40cc453eecb8b4a3e902a3a",
         "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4",
         "transport_noise.go": "e474489cdec5fd12fa2c2c179af33eb503792bb06ea4dce7a0a1c1ba9784819d"
@@ -142,7 +142,8 @@
     "003cdf02562e53bd24cc58ac8eb44411cc7ac42d06ba3bbfa46e82386ea92ef7",
     "9af92bcafd77385cd7c9cfede859eeb3586f65d0b24c9dbff36352089e94821c",
     "ed8b30df32ee8b385608cee8ebda39ccb04eb5079b73e8ccc23dca0c48d62449",
-    "083b2da8b256cd970b3050218d8d51f13e7355633913d086c9f4147d8790165b"
+    "083b2da8b256cd970b3050218d8d51f13e7355633913d086c9f4147d8790165b",
+    "1e8b76b34b755207bb754e5f4c7364334f14476dee70fce1d2687bfdc1545f30"
   ],
   "schema_version": 1
 }
