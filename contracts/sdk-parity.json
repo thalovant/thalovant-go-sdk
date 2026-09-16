@@ -1,5 +1,11 @@
 {
   "capabilities": {
+    "binary": {
+      "implementation": {},
+      "reason": "wire.go has a full WIRE-1 codec (DecodeHiveBinaryFrame), but nothing surfaces a BINARY frame's payload type or bytes to a caller. No hub emits one today: hivemind-core listen never wires the audio protocol.",
+      "status": "planned",
+      "tests": {}
+    },
     "cli": {
       "reason": "Python command line entry point; consumers expose idiomatic language APIs or MCP tools.",
       "status": "not-applicable"
@@ -18,6 +24,17 @@
         "hub_skills_test.go": "8d051f583ce17605b595ccb58648aee02cbff3d5156105c0c7232f4deadfd6bc",
         "hubs_test.go": "bb80646387925ed283dd99ad69c67d06059dcc8cac5856c941baad557cb3e26c",
         "native_auth_test.go": "e9c73e06668eb916f6d7287d88a9fdd3de7cd32abb98802418de6e47dfa43083"
+      }
+    },
+    "conversation": {
+      "implementation": {
+        "client.go": "06396e183bad2b99e4b67271bf4cc605a0b151914f04d00a345d92cc0fb9142b",
+        "events.go": "e059c7360e76cc25d8de5ad67471c5e22a175b57a40cc453eecb8b4a3e902a3a"
+      },
+      "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
+      "status": "required",
+      "tests": {
+        "conversation_carry_test.go": "ddd67602e0f59e5e09d60a649fa7902b7e28db4f9af204b5853ea2900a4a000f"
       }
     },
     "identity": {
@@ -55,10 +72,16 @@
         "testdata/question-vectors.json": "046a163f1340976ae5898da153f080dbdd9326a733c97c4acbe7c2302474286e"
       }
     },
+    "mesh": {
+      "implementation": {},
+      "reason": "HiveKinds is declared and checked against the shared mesh vectors, but RuntimeTransport surfaces only bus Events: there is no channel for a relayed frame and no SendHiveMessage on the interface, so subscribing and sending need an interface change first.",
+      "status": "planned",
+      "tests": {}
+    },
     "runtime": {
       "implementation": {
-        "client.go": "33309fc794ce230c5de4cc5982de2734b6360e7cbc2c406bcf7f1a6024c79325",
-        "events.go": "cbe97a25b153f2ace8c9abaf67fb260be9d7c8d46e5797731a3bfc84aaad1b1d",
+        "client.go": "06396e183bad2b99e4b67271bf4cc605a0b151914f04d00a345d92cc0fb9142b",
+        "events.go": "e059c7360e76cc25d8de5ad67471c5e22a175b57a40cc453eecb8b4a3e902a3a",
         "transport.go": "3a7acae39aad9d6a9fd79946a28e1a6055d22d96f6fe66fe9a723e79b8a4ed92",
         "transport_noise.go": "e474489cdec5fd12fa2c2c179af33eb503792bb06ea4dce7a0a1c1ba9784819d"
       },
@@ -102,7 +125,8 @@
     "8669034d6987af946303913780cce419efaff2a9181de7d46fbffe7092d7be9e",
     "c0d883e69ee7fa301c6e4c1b1a5c433ed290d63f79a3e6b397fdb0a988d111fa",
     "49bab2a8922b69b5cd886e7acadf217cdaa78bd94bfb48374e2f4b1cde85dfc0",
-    "003cdf02562e53bd24cc58ac8eb44411cc7ac42d06ba3bbfa46e82386ea92ef7"
+    "003cdf02562e53bd24cc58ac8eb44411cc7ac42d06ba3bbfa46e82386ea92ef7",
+    "9af92bcafd77385cd7c9cfede859eeb3586f65d0b24c9dbff36352089e94821c"
   ],
   "schema_version": 1
 }

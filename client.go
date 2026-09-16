@@ -17,6 +17,62 @@ type Client struct {
 	connectionGate contextMutex
 	replyIDsMu     sync.Mutex
 	replyIDs       map[replyCorrelation]struct{}
+
+	// The conversation each session id is in the middle of. A hub is stateless
+	// for a named session, so what the last turn activated comes back on
+	// ovos.utterance.handled and has to be sent again with the next utterance
+	// or it is gone.
+	conversationsMu sync.Mutex
+	conversations   map[string]map[string]any
+}
+
+// maxRememberedConversations bounds the map above: a long-lived client handed
+// a fresh session id per turn must not accumulate one entry per turn for ever.
+// A satellite runs one session for its whole life.
+const maxRememberedConversations = 32
+
+// rememberConversation keeps the session a hub returned, to send with the next
+// utterance in that session.
+func (c *Client) rememberConversation(sessionID string, eventContext Context) {
+	session := sessionFromContext(eventContext)
+	kept := make(map[string]any)
+	for _, field := range ConversationSessionFields {
+		if value, ok := session[field]; ok && carriedValue(value) {
+			kept[field] = value
+		}
+	}
+	c.conversationsMu.Lock()
+	defer c.conversationsMu.Unlock()
+	// Forgetting is the state, not the absence of one: a turn that ended with
+	// nothing active must not leave the old entry behind to resurrect it.
+	delete(c.conversations, sessionID)
+	if len(kept) == 0 {
+		return
+	}
+	if c.conversations == nil {
+		c.conversations = make(map[string]map[string]any)
+	}
+	if len(c.conversations) >= maxRememberedConversations {
+		for key := range c.conversations {
+			delete(c.conversations, key)
+			break
+		}
+	}
+	c.conversations[sessionID] = kept
+}
+
+// continueConversation puts the last turn's conversation state back into this
+// turn's context.
+func (c *Client) continueConversation(eventContext Context, sessionID string) Context {
+	c.conversationsMu.Lock()
+	previous, ok := c.conversations[sessionID]
+	c.conversationsMu.Unlock()
+	if !ok {
+		return eventContext
+	}
+	next := MergeContext(eventContext, nil)
+	next["session"] = CarryConversation(previous, sessionFromContext(next))
+	return next
 }
 
 // Ask request IDs and cascade query IDs are independent matching namespaces.
@@ -360,7 +416,11 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 		return Reply{}, err
 	}
 	defer releaseID()
-	eventContext := ContextWithCorrelation(RequestContext(opts.Context, RequestContextOptions{STTLang: opts.STTLang, Pipeline: opts.Pipeline, Location: opts.Location}), opts.SessionID, c.Identity.SiteID, lang, requestID)
+	askSessionID := opts.SessionID
+	if askSessionID == "" {
+		askSessionID = NewSessionID()
+	}
+	eventContext := ContextWithCorrelation(c.continueConversation(RequestContext(opts.Context, RequestContextOptions{STTLang: opts.STTLang, Pipeline: opts.Pipeline, Location: opts.Location}), askSessionID), askSessionID, c.Identity.SiteID, lang, requestID)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := c.Connect(ctx); err != nil {
@@ -442,6 +502,9 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 				schedule(emptyWait)
 			}
 		case EventUtteranceHandled:
+			// The end of the turn is the one place a hub states what the
+			// conversation now is, and it keeps none of it for a named session.
+			c.rememberConversation(askSessionID, event.Context)
 			if !emptyStarted && !settleStarted {
 				emptyStarted = true
 				schedule(emptyWait)
