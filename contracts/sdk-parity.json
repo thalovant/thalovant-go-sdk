@@ -44,7 +44,7 @@
       "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
       "status": "required",
       "tests": {
-        "conversation_carry_test.go": "9f00ead8a8be9845c9655dfc47752d93ded23589ea29c8f1581a41d0a1835a5e"
+        "conversation_carry_test.go": "a27d048f72abe3af80e3214f7a6348baf5705ea85c56b7f4b58e4dc9c1dc1b81"
       },
       "vectors": {
         "conversation-vectors.json": "testdata/conversation-vectors.json"
@@ -100,7 +100,7 @@
       "status": "required",
       "tests": {
         "binary_frames_test.go": "539d36a1586700dcd03354f3461d8fc2c4811d119fa9893092fb3f31a4442dba",
-        "conversation_carry_test.go": "9f00ead8a8be9845c9655dfc47752d93ded23589ea29c8f1581a41d0a1835a5e"
+        "conversation_carry_test.go": "a27d048f72abe3af80e3214f7a6348baf5705ea85c56b7f4b58e4dc9c1dc1b81"
       },
       "vectors": {
         "mesh-vectors.json": "testdata/mesh-vectors.json"
