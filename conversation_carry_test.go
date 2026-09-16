@@ -13,8 +13,8 @@ package thalovant
 // something a machine checks rather than something a digest asserts.
 
 import (
-	"fmt"
 	"encoding/json"
+	"fmt"
 	"os"
 	"reflect"
 	"sort"
