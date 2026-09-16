@@ -129,6 +129,13 @@ func TestEveryCaseTheBinaryVectorsDescribeDecodesAsItSays(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%v: %v", test["name"], err)
 		}
+		// Recorded before the assert, for the same reason as the carry.
+		recordConformance(t, "binary-vectors.json", test["name"].(string), map[string]any{
+			"kind":      message.Binary.Kind,
+			"utterance": absentIfEmpty(message.Binary.Utterance),
+			"lang":      absentIfEmpty(message.Binary.Lang),
+			"file_name": absentIfEmpty(message.Binary.FileName),
+		})
 		expected := test["expected"].(map[string]any)
 		if message.Binary.Kind != expected["kind"].(string) {
 			t.Fatalf("%v: kind %q, want %q", test["name"], message.Binary.Kind, expected["kind"])

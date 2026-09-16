@@ -41,7 +41,11 @@ func TestCarryMatchesConversationVectors(t *testing.T) {
 		previous, _ := test["previous"].(map[string]any)
 		session, _ := test["session"].(map[string]any)
 		expected, _ := test["expected"].(map[string]any)
-		if got := CarryConversation(previous, session); !reflect.DeepEqual(got, expected) {
+		got := CarryConversation(previous, session)
+		// Recorded before the assert: what this SDK produced, not a
+		// restatement of what the vector says it should have.
+		recordConformance(t, "conversation-vectors.json", test["name"].(string), got)
+		if !reflect.DeepEqual(got, expected) {
 			t.Fatalf("%v: got %v, want %v", test["name"], got, expected)
 		}
 	}
