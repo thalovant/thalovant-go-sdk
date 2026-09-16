@@ -2,14 +2,14 @@
   "capabilities": {
     "binary": {
       "implementation": {
-        "hive.go": "d2276277241a77c7acd1ec70be8ef405f0a4be98ecf400f57ddcc8583ca79685",
+        "hive.go": "def23f2bf2bd0dd8907de62ca913b94edb85d70c026a3f9a2a67d9685eebd1c3",
         "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4",
         "wire.go": "99e462abd91a540571e0467e458d05dab75dbed38e14cbc146b1b6d7949bf0dd"
       },
       "reason": "DecodeHiveBinaryFrame branches on BINARY: four bits of payload type, then the clip itself, never parsed or inflated. ListenBinary delivers it. Run against the shared binary vectors and against binary-frames.json, which is hivemind-bus-client's own encoder output rather than frames this SDK built for itself.",
       "status": "required",
       "tests": {
-        "binary_frames_test.go": "dca266e2e03fa105c6827edff8acda7ab47b156cc018d3338d9d75f70900b2f8"
+        "binary_frames_test.go": "539d36a1586700dcd03354f3461d8fc2c4811d119fa9893092fb3f31a4442dba"
       },
       "vectors": {
         "binary-frames.json": "testdata/binary-frames.json",
@@ -38,13 +38,13 @@
     },
     "conversation": {
       "implementation": {
-        "client.go": "2aa80132c76860d3061d11e7346dcafe591e640099b0d6fb0dbf71d7fade1e29",
-        "events.go": "e059c7360e76cc25d8de5ad67471c5e22a175b57a40cc453eecb8b4a3e902a3a"
+        "client.go": "ca703d5a1727eaaa576466d6720263949aca6e125c506e06a028794c06261efb",
+        "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc"
       },
       "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
       "status": "required",
       "tests": {
-        "conversation_carry_test.go": "ddd67602e0f59e5e09d60a649fa7902b7e28db4f9af204b5853ea2900a4a000f"
+        "conversation_carry_test.go": "9f00ead8a8be9845c9655dfc47752d93ded23589ea29c8f1581a41d0a1835a5e"
       },
       "vectors": {
         "conversation-vectors.json": "testdata/conversation-vectors.json"
@@ -93,14 +93,14 @@
     },
     "mesh": {
       "implementation": {
-        "hive.go": "d2276277241a77c7acd1ec70be8ef405f0a4be98ecf400f57ddcc8583ca79685",
+        "hive.go": "def23f2bf2bd0dd8907de62ca913b94edb85d70c026a3f9a2a67d9685eebd1c3",
         "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4"
       },
       "reason": "ListenHive over the five hive kinds, and Propagate/Escalate/Broadcast. The kinds used to fall off the end of dispatchNoiseMessage with no case and no log line. Run against the shared mesh vectors.",
       "status": "required",
       "tests": {
-        "binary_frames_test.go": "dca266e2e03fa105c6827edff8acda7ab47b156cc018d3338d9d75f70900b2f8",
-        "conversation_carry_test.go": "ddd67602e0f59e5e09d60a649fa7902b7e28db4f9af204b5853ea2900a4a000f"
+        "binary_frames_test.go": "539d36a1586700dcd03354f3461d8fc2c4811d119fa9893092fb3f31a4442dba",
+        "conversation_carry_test.go": "9f00ead8a8be9845c9655dfc47752d93ded23589ea29c8f1581a41d0a1835a5e"
       },
       "vectors": {
         "mesh-vectors.json": "testdata/mesh-vectors.json"
@@ -108,8 +108,8 @@
     },
     "runtime": {
       "implementation": {
-        "client.go": "2aa80132c76860d3061d11e7346dcafe591e640099b0d6fb0dbf71d7fade1e29",
-        "events.go": "e059c7360e76cc25d8de5ad67471c5e22a175b57a40cc453eecb8b4a3e902a3a",
+        "client.go": "ca703d5a1727eaaa576466d6720263949aca6e125c506e06a028794c06261efb",
+        "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc",
         "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4",
         "transport_noise.go": "e474489cdec5fd12fa2c2c179af33eb503792bb06ea4dce7a0a1c1ba9784819d"
       },
