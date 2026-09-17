@@ -9,7 +9,8 @@
       "reason": "DecodeHiveBinaryFrame branches on BINARY: four bits of payload type, then the clip itself, never parsed or inflated. ListenBinary delivers it. Run against the shared binary vectors and against binary-frames.json, which is hivemind-bus-client's own encoder output rather than frames this SDK built for itself.",
       "status": "required",
       "tests": {
-        "binary_frames_test.go": "539d36a1586700dcd03354f3461d8fc2c4811d119fa9893092fb3f31a4442dba"
+        "binary_frames_test.go": "39a72c18cc89c54ca90b7a3905ef6059e11161bb22021482c4ae16798e3c942a",
+        "conformance_record_test.go": "e31df0b8dd216e750764df20938252bc2cdbc64a7ec061d60e58742fb32c1bbc"
       },
       "vectors": {
         "binary-frames.json": "testdata/binary-frames.json",
@@ -44,7 +45,8 @@
       "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
       "status": "required",
       "tests": {
-        "conversation_carry_test.go": "9d3f459e89a35693d479e7978a1fa8f1308517621ec9c739a6880a9c615d7a24"
+        "conformance_record_test.go": "e31df0b8dd216e750764df20938252bc2cdbc64a7ec061d60e58742fb32c1bbc",
+        "conversation_carry_test.go": "637108a92a200e358b775164b836169150346a0a439ba3a8bf72ec0e70e12909"
       },
       "vectors": {
         "conversation-vectors.json": "testdata/conversation-vectors.json"
@@ -99,8 +101,9 @@
       "reason": "ListenHive over the five hive kinds, and Propagate/Escalate/Broadcast. The kinds used to fall off the end of dispatchNoiseMessage with no case and no log line. Run against the shared mesh vectors.",
       "status": "required",
       "tests": {
-        "binary_frames_test.go": "539d36a1586700dcd03354f3461d8fc2c4811d119fa9893092fb3f31a4442dba",
-        "conversation_carry_test.go": "9d3f459e89a35693d479e7978a1fa8f1308517621ec9c739a6880a9c615d7a24"
+        "binary_frames_test.go": "39a72c18cc89c54ca90b7a3905ef6059e11161bb22021482c4ae16798e3c942a",
+        "conformance_record_test.go": "e31df0b8dd216e750764df20938252bc2cdbc64a7ec061d60e58742fb32c1bbc",
+        "conversation_carry_test.go": "637108a92a200e358b775164b836169150346a0a439ba3a8bf72ec0e70e12909"
       },
       "vectors": {
         "mesh-vectors.json": "testdata/mesh-vectors.json"
@@ -144,7 +147,8 @@
     "ed8b30df32ee8b385608cee8ebda39ccb04eb5079b73e8ccc23dca0c48d62449",
     "083b2da8b256cd970b3050218d8d51f13e7355633913d086c9f4147d8790165b",
     "1e8b76b34b755207bb754e5f4c7364334f14476dee70fce1d2687bfdc1545f30",
-    "f6a74ead44d53658228da3f4457334f3e922b67dd1e33b43c3ba8b6f7c066bf9"
+    "f6a74ead44d53658228da3f4457334f3e922b67dd1e33b43c3ba8b6f7c066bf9",
+    "6f5f697b07eb86da6877faf8aa27138430f886495ac965d08a28fba780e411cd"
   ],
   "schema_version": 1
 }
