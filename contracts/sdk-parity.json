@@ -9,7 +9,8 @@
       "reason": "DecodeHiveBinaryFrame branches on BINARY: four bits of payload type, then the clip itself, never parsed or inflated. ListenBinary delivers it. Run against the shared binary vectors and against binary-frames.json, which is hivemind-bus-client's own encoder output rather than frames this SDK built for itself.",
       "status": "required",
       "tests": {
-        "binary_frames_test.go": "39a72c18cc89c54ca90b7a3905ef6059e11161bb22021482c4ae16798e3c942a"
+        "binary_frames_test.go": "39a72c18cc89c54ca90b7a3905ef6059e11161bb22021482c4ae16798e3c942a",
+        "conformance_record_test.go": "e31df0b8dd216e750764df20938252bc2cdbc64a7ec061d60e58742fb32c1bbc"
       },
       "vectors": {
         "binary-frames.json": "testdata/binary-frames.json",
@@ -44,6 +45,7 @@
       "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
       "status": "required",
       "tests": {
+        "conformance_record_test.go": "e31df0b8dd216e750764df20938252bc2cdbc64a7ec061d60e58742fb32c1bbc",
         "conversation_carry_test.go": "637108a92a200e358b775164b836169150346a0a439ba3a8bf72ec0e70e12909"
       },
       "vectors": {
@@ -100,6 +102,7 @@
       "status": "required",
       "tests": {
         "binary_frames_test.go": "39a72c18cc89c54ca90b7a3905ef6059e11161bb22021482c4ae16798e3c942a",
+        "conformance_record_test.go": "e31df0b8dd216e750764df20938252bc2cdbc64a7ec061d60e58742fb32c1bbc",
         "conversation_carry_test.go": "637108a92a200e358b775164b836169150346a0a439ba3a8bf72ec0e70e12909"
       },
       "vectors": {

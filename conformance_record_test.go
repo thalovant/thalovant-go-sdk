@@ -25,6 +25,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,6 +44,7 @@ func canonicalDigest(value any) string {
 	if raw, ok := value.([]byte); ok {
 		return "bytes:" + hex.EncodeToString(sha256Sum(raw))
 	}
+	mustBeSpellableEverywhere(value)
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
 	// Without this, "a & b" is written as "a & b" and no other language
@@ -67,6 +70,33 @@ func absentIfEmpty(value string) any {
 		return nil
 	}
 	return value
+}
+
+// mustBeSpellableEverywhere refuses a number this cannot spell portably.
+//
+// Unmarshalling into any gives every number as float64, and encoding/json
+// writes a whole one without its fractional part -- which is what the other
+// SDKs do. A number that is not whole, or is outside 2^53, has a spelling that
+// differs per language, and recording it would be a digest for a value nobody
+// produced. No vector contains one, and if one ever does this should stop
+// rather than lie.
+func mustBeSpellableEverywhere(value any) {
+	switch typed := value.(type) {
+	case float64:
+		if typed != math.Trunc(typed) || math.IsInf(typed, 0) || math.IsNaN(typed) ||
+			math.Abs(typed) > 9007199254740992 {
+			panic(fmt.Sprintf("conformance: cannot canonicalise %v: only whole numbers "+
+				"within 2^53 are spelled the same way in every language", typed))
+		}
+	case []any:
+		for _, item := range typed {
+			mustBeSpellableEverywhere(item)
+		}
+	case map[string]any:
+		for _, item := range typed {
+			mustBeSpellableEverywhere(item)
+		}
+	}
 }
 
 func sha256Sum(raw []byte) []byte {
