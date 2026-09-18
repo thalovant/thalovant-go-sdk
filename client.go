@@ -172,6 +172,21 @@ type replyCorrelation struct {
 	id    string
 }
 
+// utterancesInFlight counts the asks and queries this client has out, for a
+// denial that carries no request id.
+func (c *Client) utterancesInFlight() (asks, queries int) {
+	c.replyIDsMu.Lock()
+	defer c.replyIDsMu.Unlock()
+	for key := range c.replyIDs {
+		if key.query {
+			queries++
+		} else {
+			asks++
+		}
+	}
+	return asks, queries
+}
+
 func (c *Client) reserveReplyID(query bool, id string) (func(), error) {
 	c.replyIDsMu.Lock()
 	defer c.replyIDsMu.Unlock()
@@ -551,7 +566,10 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 			failure = softFailure
 		}
 		if failure != nil && len(fragments) == 0 {
-			return Reply{}, fmt.Errorf("%w: %s", ErrRuntime, failure.Name)
+			// Typed, and still errors.Is(err, ErrRuntime): a refusal, a
+			// question the hub has nothing for, and a fault need three
+			// different sentences.
+			return Reply{}, failureError(*failure)
 		}
 		if len(fragments) == 0 {
 			if err := ctx.Err(); err != nil {
@@ -569,7 +587,17 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 		return Reply{Text: strings.Join(fragments, " "), Utterances: fragments, Handled: failure == nil, OK: failure == nil, SessionID: sessionID, RequestID: requestID, Events: events, DroppedMedia: mediaBudget.dropped, FailureEvent: failure}, nil
 	}
 	accept := func(event Event) bool {
-		if event.RequestID() != requestID {
+		if event.Name == EventPolicyDenied {
+			// The one reply the hub cannot correlate. A denial carries no
+			// request id, only the type it refused, and dropping it here
+			// turned a refusal the hub made at once into a full timeout:
+			// "your hub did not answer in time", about a question it had
+			// refused and explained.
+			asks, queries := c.utterancesInFlight()
+			if !refusalBelongsToAsk(event.RequestID(), requestID, stringValue(event.Data["denied_type"]), asks, queries) {
+				return false
+			}
+		} else if event.RequestID() != requestID {
 			return false
 		}
 		if !mediaBudget.accept(event) {

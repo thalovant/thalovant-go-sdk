@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.10.1 — 2026-09-18
+
+- A refusal ends an ask at once instead of letting it run to the deadline. The hub sends `hive.policy.denied` the instant it refuses, with no request id, and the request-id gate dropped it: the ask waited out its whole budget, and a caller told somebody their hub "did not answer in time" about a question it had refused and explained. A denial with no request id is now taken when it names the type this ask sent and this ask is the only utterance the client has out; with a second ask or a query in flight either could be the one refused, so neither takes it.
+- An ask returns `*PolicyDeniedError` rather than a bare `ErrRuntime` wrap, with `Quota` -- `Period`, `Limit`, `Used`, `ResetAfter` -- for a spent `intent_quota_exceeded` and a message that fits the refusal. `PolicyCodeACL`, `PolicyCodeQuotaExceeded` and `PolicyCodeBackendUnavailable` name the three codes. Both new errors still match `errors.Is(err, ErrRuntime)`.
+- An unmatched intent returns the new `*UnansweredError`: the hub understood and has nothing for it, which is not a failure.
+- `Allowed` holds only non-blank, trimmed strings.
+- Declares the parity contract's new `refusal` capability, run against the Python reference's `refusal-vectors.json`.
+
 ## 0.10.0 — 2026-09-16
 
 - Speak the rest of the HiveMind protocol. A hub relays more than this client's conversation, and the five hive kinds -- `broadcast`, `propagate`, `escalate`, `intercom`, `rendezvous` -- fell off the end of `dispatchNoiseMessage` with no case and no log line. `ListenHive` subscribes to one kind, and `Propagate`, `Escalate` and `Broadcast` send. A refusal is a disconnection rather than an error: a hub's HELLO says nothing about what a client may do, so nothing can check first.
