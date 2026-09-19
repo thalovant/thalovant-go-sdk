@@ -19,7 +19,8 @@ import (
 )
 
 type refusalVectors struct {
-	Classification []struct {
+	UntrackedGraceSeconds int `json:"untracked_grace_seconds"`
+	Classification        []struct {
 		Name  string `json:"name"`
 		Event struct {
 			Type    string         `json:"type"`
@@ -32,6 +33,7 @@ type refusalVectors struct {
 		Name            string  `json:"name"`
 		AsksInFlight    int     `json:"asks_in_flight"`
 		QueriesInFlight int     `json:"queries_in_flight"`
+		SendsInFlight   int     `json:"sends_in_flight"`
 		DeniedType      string  `json:"denied_type"`
 		RequestID       *string `json:"request_id"`
 		Taken           bool    `json:"taken"`
@@ -97,11 +99,18 @@ func TestRefusalCorrelationMatchesTheSharedVectors(t *testing.T) {
 			if vector.RequestID != nil {
 				requestID = map[string]string{"own": "req-own", "other": "req-other"}[*vector.RequestID]
 			}
-			got := refusalBelongsToAsk(requestID, "req-own", vector.DeniedType, vector.AsksInFlight, vector.QueriesInFlight)
+			got := refusalBelongsToAsk(requestID, "req-own", vector.DeniedType, vector.AsksInFlight, vector.QueriesInFlight, vector.SendsInFlight)
 			if got != vector.Taken {
 				t.Fatalf("taken = %v, want %v", got, vector.Taken)
 			}
 		})
+	}
+}
+
+func TestTheGraceWindowIsTheOneTheVectorsName(t *testing.T) {
+	vectors := loadRefusalVectors(t, "refusal-vectors.json")
+	if want := time.Duration(vectors.UntrackedGraceSeconds) * time.Second; untrackedUtteranceGrace != want {
+		t.Fatalf("grace %v, vectors say %v", untrackedUtteranceGrace, want)
 	}
 }
 
@@ -194,5 +203,28 @@ func TestWithTwoAsksInFlightAnUncorrelatedDenialFailsNeither(t *testing.T) {
 		if err := <-errs; !errors.Is(err, ErrTimeout) {
 			t.Fatalf("an ask took a denial that could have been the other's: %T %v", err, err)
 		}
+	}
+}
+
+func TestAnAskDoesNotTakeADenialAFireAndForgetSendCouldOwn(t *testing.T) {
+	// SendUtterance has no reply and no id, but the hub can refuse it, and
+	// that refusal names only the type. Arriving while an ask waits, it could
+	// be either message's -- so the ask is left to its own deadline.
+	transport := newBlockedClientTransport()
+	transport.ready.Store(true)
+	client := &Client{Transport: transport}
+	if err := client.SendUtterance(context.Background(), "turn the lights off", RequestOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	<-transport.emitted
+	errs := make(chan error, 1)
+	go func() {
+		_, err := client.AskWithOptions(context.Background(), "what time is it", AskOptions{RequestOptions: RequestOptions{Timeout: 300 * time.Millisecond}})
+		errs <- err
+	}()
+	<-transport.emitted
+	transport.streams.bus.publish(Event{Name: EventPolicyDenied, Data: quotaDenial, Context: Context{"source": "hivemind-core"}})
+	if err := <-errs; !errors.Is(err, ErrTimeout) {
+		t.Fatalf("the ask took a denial the send could own: %T %v", err, err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var (
@@ -46,8 +47,8 @@ const (
 // app showed somebody who had simply used up the day.
 type Quota struct {
 	Period string
-	Limit  int
-	Used   int
+	Limit  int64
+	Used   int64
 	// ResetAfter is seconds until the counter resets, or 0 when the hub did
 	// not say.
 	ResetAfter int64
@@ -166,8 +167,8 @@ func policyDeniedFromEvent(event Event) *PolicyDeniedError {
 		period, _ := inner["period"].(string)
 		quota = &Quota{
 			Period:     period,
-			Limit:      int(wholeCount(inner["limit"])),
-			Used:       int(wholeCount(inner["used"])),
+			Limit:      wholeCount(inner["limit"]),
+			Used:       wholeCount(inner["used"]),
 			ResetAfter: wholeCount(inner["reset_after"]),
 		}
 	}
@@ -180,10 +181,16 @@ func policyDeniedFromEvent(event Event) *PolicyDeniedError {
 	}
 }
 
-// wholeCount reads a count from the wire, or 0: never a bool, never a guess.
-// encoding/json decodes every number in a map[string]any as float64, so a
-// whole float is a count and a fractional one is not.
+// wholeCount reads a whole, non-negative count from the wire, or 0: never a
+// bool, never a guess. encoding/json decodes every number in a map[string]any
+// as float64, so a whole float is a count and a fractional one is not. A
+// negative limit, usage or reset time is not something a policy can mean, and
+// passing one through would have an app say "-1 of -5 questions used".
 func wholeCount(raw any) int64 {
+	return max(signedCount(raw), 0)
+}
+
+func signedCount(raw any) int64 {
 	switch value := raw.(type) {
 	case float64:
 		if value == math.Trunc(value) && !math.IsInf(value, 0) {
@@ -227,14 +234,24 @@ func failureError(event Event) error {
 // hub builds its denials with source and destination context only, so the
 // usual one carries none and names the refused type instead: enough when this
 // ask is the only utterance the client has out, a guess otherwise -- and a
-// wrong guess ends a question the hub never refused. The shared refusal
-// vectors pin every case.
-func refusalBelongsToAsk(requestID, ownRequestID, deniedType string, asksInFlight, queriesInFlight int) bool {
+// wrong guess ends a question the hub never refused. sendsInFlight counts
+// fire-and-forget utterances still inside untrackedUtteranceGrace: they have
+// nothing to wait on, but a refusal of one could land while this ask waits.
+// The shared refusal vectors pin every case.
+func refusalBelongsToAsk(requestID, ownRequestID, deniedType string, asksInFlight, queriesInFlight, sendsInFlight int) bool {
 	if requestID != "" {
 		return requestID == ownRequestID
 	}
-	return deniedType == EventRecognizerLoopUtterance && asksInFlight == 1 && queriesInFlight == 0
+	return deniedType == EventRecognizerLoopUtterance && asksInFlight == 1 && queriesInFlight == 0 && sendsInFlight == 0
 }
+
+// untrackedUtteranceGrace is how long a fire-and-forget utterance counts as
+// possibly still being refused. Denials come back as fast as the hub admits a
+// message -- milliseconds -- so this is generous on purpose: a wrong "in
+// flight" only costs an ask the deadline it always had, where a wrong "not in
+// flight" ends a question the hub never refused. The shared refusal vectors
+// name it (untracked_grace_seconds), so every SDK uses the same window.
+const untrackedUtteranceGrace = 10 * time.Second
 
 // APIError preserves the HTTP status while continuing to match ErrAPI.
 type APIError struct {

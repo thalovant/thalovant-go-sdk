@@ -17,6 +17,9 @@ type Client struct {
 	connectionGate contextMutex
 	replyIDsMu     sync.Mutex
 	replyIDs       map[replyCorrelation]struct{}
+	// untrackedSends records when each fire-and-forget utterance went out;
+	// see utterancesInFlight.
+	untrackedSends []time.Time
 
 	// The conversation each session id is in the middle of. A hub is stateless
 	// for a named session, so what the last turn activated comes back on
@@ -172,9 +175,11 @@ type replyCorrelation struct {
 	id    string
 }
 
-// utterancesInFlight counts the asks and queries this client has out, for a
-// denial that carries no request id.
-func (c *Client) utterancesInFlight() (asks, queries int) {
+// utterancesInFlight counts the utterances this client may still have
+// refused, for a denial that carries no request id: asks and queries while
+// they wait, and a fire-and-forget utterance for untrackedUtteranceGrace
+// after it was sent -- its refusal could land while an ask is waiting.
+func (c *Client) utterancesInFlight() (asks, queries, sends int) {
 	c.replyIDsMu.Lock()
 	defer c.replyIDsMu.Unlock()
 	for key := range c.replyIDs {
@@ -184,7 +189,15 @@ func (c *Client) utterancesInFlight() (asks, queries int) {
 			asks++
 		}
 	}
-	return asks, queries
+	cutoff := time.Now().Add(-untrackedUtteranceGrace)
+	kept := c.untrackedSends[:0]
+	for _, sent := range c.untrackedSends {
+		if sent.After(cutoff) {
+			kept = append(kept, sent)
+		}
+	}
+	c.untrackedSends = kept
+	return asks, queries, len(kept)
 }
 
 func (c *Client) reserveReplyID(query bool, id string) (func(), error) {
@@ -400,6 +413,22 @@ func (c *Client) Healthcheck() TransportHealth {
 }
 
 func (c *Client) Emit(ctx context.Context, eventType string, data Data, eventContext Context) error {
+	if eventType == EventRecognizerLoopUtterance {
+		// A fire-and-forget utterance: nothing will wait on it, but the hub
+		// may refuse it, and that refusal carries no request id.
+		c.replyIDsMu.Lock()
+		c.untrackedSends = append(c.untrackedSends, time.Now())
+		if len(c.untrackedSends) > 1024 {
+			c.untrackedSends = c.untrackedSends[len(c.untrackedSends)-1024:]
+		}
+		c.replyIDsMu.Unlock()
+	}
+	return c.emit(ctx, eventType, data, eventContext)
+}
+
+// emit publishes without recording a fire-and-forget utterance: the ask uses
+// it for its own, which it tracks for as long as it waits.
+func (c *Client) emit(ctx context.Context, eventType string, data Data, eventContext Context) error {
 	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	return c.runOwned(sendCtx, true, func() error {
@@ -593,8 +622,8 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 			// turned a refusal the hub made at once into a full timeout:
 			// "your hub did not answer in time", about a question it had
 			// refused and explained.
-			asks, queries := c.utterancesInFlight()
-			if !refusalBelongsToAsk(event.RequestID(), requestID, stringValue(event.Data["denied_type"]), asks, queries) {
+			asks, queries, sends := c.utterancesInFlight()
+			if !refusalBelongsToAsk(event.RequestID(), requestID, stringValue(event.Data["denied_type"]), asks, queries, sends) {
 				return false
 			}
 		} else if event.RequestID() != requestID {
@@ -650,7 +679,7 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 	// retains transport ownership even when this caller has already finished.
 	sendResult := make(chan error, 1)
 	go func() {
-		sendResult <- c.Emit(ctx, EventRecognizerLoopUtterance, UtterancePayload(prompt, lang), eventContext)
+		sendResult <- c.emit(ctx, EventRecognizerLoopUtterance, UtterancePayload(prompt, lang), eventContext)
 	}()
 	drain := func() error {
 		// Snapshot the backlog so a continuing producer cannot postpone a

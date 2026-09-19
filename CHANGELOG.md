@@ -6,6 +6,8 @@
 - An ask returns `*PolicyDeniedError` rather than a bare `ErrRuntime` wrap, with `Quota` -- `Period`, `Limit`, `Used`, `ResetAfter` -- for a spent `intent_quota_exceeded` and a message that fits the refusal. `PolicyCodeACL`, `PolicyCodeQuotaExceeded` and `PolicyCodeBackendUnavailable` name the three codes. Both new errors still match `errors.Is(err, ErrRuntime)`.
 - An unmatched intent returns the new `*UnansweredError`: the hub understood and has nothing for it, which is not a failure.
 - `Allowed` holds only non-blank, trimmed strings.
+- A fire-and-forget utterance -- `SendUtterance`, `SendAction`, `SendCode`, or `Emit` of `recognizer_loop:utterance` -- counts as in flight for 10 s after it is sent, so a refusal of it cannot end an unrelated ask. The ask publishes its own through an internal path, so it never counts itself.
+- `Quota` counts are `int64` and never negative: no narrowing conversion, and a negative limit, usage or reset time reads as 0.
 - Declares the parity contract's new `refusal` capability, run against the Python reference's `refusal-vectors.json`.
 
 ## 0.10.0 — 2026-09-16
