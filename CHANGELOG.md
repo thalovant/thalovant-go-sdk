@@ -6,6 +6,11 @@
 - An ask returns `*PolicyDeniedError` rather than a bare `ErrRuntime` wrap, with `Quota` -- `Period`, `Limit`, `Used`, `ResetAfter` -- for a spent `intent_quota_exceeded` and a message that fits the refusal. `PolicyCodeACL`, `PolicyCodeQuotaExceeded` and `PolicyCodeBackendUnavailable` name the three codes. Both new errors still match `errors.Is(err, ErrRuntime)`.
 - An unmatched intent returns the new `*UnansweredError`: the hub understood and has nothing for it, which is not a failure.
 - `Allowed` holds only non-blank, trimmed strings.
+- `UnansweredError.Said` carries what the person said. Both event names put the input in the event's text; the old read of `reason`/`error` left it empty.
+- A fire-and-forget utterance whose publish never happened is dropped again, rather than suppressing a real refusal for the rest of the grace window.
+- A refusal on a quota the hub sent no numbers for says a quota has run out, rather than claiming "all questions used".
+- A float count outside the `int64` range reads as 0 rather than being converted.
+- README documents the refusal surface: the three codes, `Quota`, `UnansweredError`, and when an uncorrelated denial is this ask's.
 - A fire-and-forget utterance -- `SendUtterance`, `SendAction`, `SendCode`, or `Emit` of `recognizer_loop:utterance` -- counts as in flight for 10 s after it is sent, so a refusal of it cannot end an unrelated ask. The ask publishes its own through an internal path, so it never counts itself.
 - `Quota` counts are `int64` and never negative: no narrowing conversion, and a negative limit, usage or reset time reads as 0.
 - Declares the parity contract's new `refusal` capability, run against the Python reference's `refusal-vectors.json`.

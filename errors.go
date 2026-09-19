@@ -87,6 +87,11 @@ func (e *PolicyDeniedError) Error() string {
 	// day to "allow this connection to publish recognizer_loop:utterance"
 	// sent them to a settings page that could not help.
 	if q := e.Quota; q != nil {
+		if q.Limit == 0 && q.Used == 0 && q.ResetAfter == 0 && q.Period == "" {
+			// Refused on a quota, with none of the numbers. "All questions
+			// used" would be inventing one.
+			return fmt.Sprintf("%v: the hub refused %q: a quota has run out.", ErrRuntime, e.DeniedType)
+		}
 		used := "all"
 		if q.Limit > 0 {
 			used = fmt.Sprintf("%d of %d", q.Used, q.Limit)
@@ -193,7 +198,10 @@ func wholeCount(raw any) int64 {
 func signedCount(raw any) int64 {
 	switch value := raw.(type) {
 	case float64:
-		if value == math.Trunc(value) && !math.IsInf(value, 0) {
+		// Whole, and inside what an int64 holds: 1e20 is neither a count a
+		// policy can have meant nor a number this conversion can survive.
+		if value == math.Trunc(value) && !math.IsInf(value, 0) &&
+			value >= math.MinInt64 && value <= math.MaxInt64 {
 			return int64(value)
 		}
 	case int:
@@ -220,11 +228,10 @@ func failureError(event Event) error {
 	case EventPolicyDenied:
 		return policyDeniedFromEvent(event)
 	case EventIntentUnmatched, EventIntentFailure:
-		said := stringValue(event.Data["reason"])
-		if said == "" {
-			said = stringValue(event.Data["error"])
-		}
-		return &UnansweredError{Said: strings.TrimSpace(said)}
+		// What the person said: both names carry the input, and that is what a
+		// caller shows. `reason` is not on these events at all, so reading it
+		// left Said empty.
+		return &UnansweredError{Said: strings.TrimSpace(event.Text())}
 	}
 	return fmt.Errorf("%w: %s", ErrRuntime, event.Name)
 }

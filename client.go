@@ -413,17 +413,34 @@ func (c *Client) Healthcheck() TransportHealth {
 }
 
 func (c *Client) Emit(ctx context.Context, eventType string, data Data, eventContext Context) error {
-	if eventType == EventRecognizerLoopUtterance {
-		// A fire-and-forget utterance: nothing will wait on it, but the hub
-		// may refuse it, and that refusal carries no request id.
+	if eventType != EventRecognizerLoopUtterance {
+		return c.emit(ctx, eventType, data, eventContext)
+	}
+	// A fire-and-forget utterance: nothing will wait on it, but the hub may
+	// refuse it, and that refusal carries no request id. Recorded before the
+	// publish so a denial cannot beat the record, and dropped again if the
+	// publish never happened -- a send that failed to leave leaves nothing for
+	// the hub to refuse, and a phantom would suppress a real refusal for the
+	// whole grace window.
+	sentAt := time.Now()
+	c.replyIDsMu.Lock()
+	c.untrackedSends = append(c.untrackedSends, sentAt)
+	if len(c.untrackedSends) > 1024 {
+		c.untrackedSends = c.untrackedSends[len(c.untrackedSends)-1024:]
+	}
+	c.replyIDsMu.Unlock()
+	if err := c.emit(ctx, eventType, data, eventContext); err != nil {
 		c.replyIDsMu.Lock()
-		c.untrackedSends = append(c.untrackedSends, time.Now())
-		if len(c.untrackedSends) > 1024 {
-			c.untrackedSends = c.untrackedSends[len(c.untrackedSends)-1024:]
+		for i, sent := range c.untrackedSends {
+			if sent.Equal(sentAt) {
+				c.untrackedSends = append(c.untrackedSends[:i], c.untrackedSends[i+1:]...)
+				break
+			}
 		}
 		c.replyIDsMu.Unlock()
+		return err
 	}
-	return c.emit(ctx, eventType, data, eventContext)
+	return nil
 }
 
 // emit publishes without recording a fire-and-forget utterance: the ask uses

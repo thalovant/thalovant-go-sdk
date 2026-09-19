@@ -67,6 +67,10 @@ func TestRefusalClassificationMatchesTheSharedVectors(t *testing.T) {
 				if !errors.As(err, &unanswered) {
 					t.Fatalf("want UnansweredError, got %T %v", err, err)
 				}
+				// What the person said, which is what a caller shows.
+				if unanswered.Said != vector.Expect["said"] {
+					t.Fatalf("said = %q, want %v", unanswered.Said, vector.Expect["said"])
+				}
 				return
 			}
 			var refused *PolicyDeniedError
@@ -226,5 +230,43 @@ func TestAnAskDoesNotTakeADenialAFireAndForgetSendCouldOwn(t *testing.T) {
 	transport.streams.bus.publish(Event{Name: EventPolicyDenied, Data: quotaDenial, Context: Context{"source": "hivemind-core"}})
 	if err := <-errs; !errors.Is(err, ErrTimeout) {
 		t.Fatalf("the ask took a denial the send could own: %T %v", err, err)
+	}
+}
+
+type refusingTransport struct {
+	*blockedClientTransport
+	breaking bool
+}
+
+func (t *refusingTransport) EmitBus(ctx context.Context, eventType string, data Data, eventContext Context) error {
+	if t.breaking {
+		return errors.New("no route to the hub")
+	}
+	return t.blockedClientTransport.EmitBus(ctx, eventType, data, eventContext)
+}
+
+func TestASendThatNeverLeftIsNotInFlight(t *testing.T) {
+	// A phantom would suppress a real refusal for the whole grace window.
+	transport := &refusingTransport{blockedClientTransport: newBlockedClientTransport(), breaking: true}
+	transport.ready.Store(true)
+	client := &Client{Transport: transport}
+	if err := client.SendUtterance(context.Background(), "turn the lights off", RequestOptions{}); err == nil {
+		t.Fatal("the send should have failed")
+	}
+	if _, _, sends := client.utterancesInFlight(); sends != 0 {
+		t.Fatalf("a send that never left is in flight: %d", sends)
+	}
+	// And the next ask still takes a refusal that can only be its own.
+	transport.breaking = false
+	errs := make(chan error, 1)
+	go func() {
+		_, err := client.AskWithOptions(context.Background(), "what time is it", AskOptions{RequestOptions: RequestOptions{Timeout: 5 * time.Second}})
+		errs <- err
+	}()
+	<-transport.emitted
+	transport.streams.bus.publish(Event{Name: EventPolicyDenied, Data: quotaDenial, Context: Context{"source": "hivemind-core"}})
+	var refused *PolicyDeniedError
+	if err := <-errs; !errors.As(err, &refused) {
+		t.Fatalf("want a refusal, got %T %v", err, err)
 	}
 }
