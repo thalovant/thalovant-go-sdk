@@ -790,6 +790,60 @@ for _, item := range items {
 }
 ```
 
+## When A Hub Refuses Or Cannot Answer
+
+The hub answers a refusal the instant it makes one, so an ask ends there
+rather than running to its deadline. Three different things arrive as
+`hive.policy.denied`, and each needs something different said to whoever is
+waiting; a fourth is not a refusal at all.
+
+```go
+var (
+	denied     *thalovant.PolicyDeniedError
+	unanswered *thalovant.UnansweredError
+)
+
+reply, err := client.Ask(ctx, "what is the weather", thalovant.AskOptions{})
+switch {
+case err == nil:
+	fmt.Println(reply.Text)
+
+case errors.As(err, &denied):
+	switch denied.Code {
+	case thalovant.PolicyCodeQuotaExceeded:
+		// A spent allowance, not a policy. denied.Quota has the numbers:
+		// "you have used 50 of 50 daily questions; they come back in 10h".
+		q := denied.Quota
+		fmt.Printf("%d of %d %s questions used, back in %ds\n", q.Used, q.Limit, q.Period, q.ResetAfter)
+	case thalovant.PolicyCodeBackendUnavailable:
+		// The hub could not reach its own assistant. Nothing to change here.
+		fmt.Println("the hub is not able to answer right now")
+	default:
+		// An allow-list refusal: denied.Allowed is what this connection may
+		// publish, and denied.DeniedType is what it may not.
+		fmt.Println("ask whoever manages this connection to allow", denied.DeniedType)
+	}
+
+case errors.As(err, &unanswered):
+	// Not a refusal and not a fault: the hub understood and has no skill for
+	// it. unanswered.Said is what the person said.
+	fmt.Printf("nothing here answers %q\n", unanswered.Said)
+
+case errors.Is(err, thalovant.ErrTimeout):
+	fmt.Println("the hub did not answer in time")
+}
+```
+
+Both new errors wrap `ErrRuntime`, so `errors.Is(err, thalovant.ErrRuntime)`
+still holds for anything that was a runtime failure before.
+
+A denial the hub could not correlate (it builds them with source and
+destination context only, so they carry no request id) is taken by an ask
+only when it names the type that ask sent **and** that ask is the only
+utterance the client has out. A second ask, a query, or a fire-and-forget
+`SendUtterance` within the last ten seconds all make it ambiguous, and a
+wrong guess would end a question the hub never refused.
+
 ## What A Hub Can Be Asked
 
 A connected client can ask its hub what can be said, over its own session and

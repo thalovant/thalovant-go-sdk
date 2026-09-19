@@ -39,7 +39,7 @@
     },
     "conversation": {
       "implementation": {
-        "client.go": "4716e725134c226726523951ec57f9ce40aadf5cdd24ef47c85fff2a56cd5222",
+        "client.go": "89f8df3b19a9140b473e7ab999543aa8b5fff6c9a70af865794c21321cfb6b4a",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc"
       },
       "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
@@ -109,9 +109,24 @@
         "mesh-vectors.json": "testdata/mesh-vectors.json"
       }
     },
+    "refusal": {
+      "implementation": {
+        "client.go": "89f8df3b19a9140b473e7ab999543aa8b5fff6c9a70af865794c21321cfb6b4a",
+        "errors.go": "f87b6060fcf0c4a65ac11ee07ecc540031bbff5263a5859664d34f15ce1b8f96"
+      },
+      "reason": "refusalBelongsToAsk() and failureError() in errors.go, used by AskWithOptions() in client.go, which counts asks, queries and fire-and-forget utterances inside the shared grace window -- recorded immediately before the publish and kept when the publish errors, since the transport can fail after the hub holds the frame. PolicyDeniedError carries Quota and UnansweredError is new, both still errors.Is ErrRuntime. Run against the shared refusal vectors, decoded as map[string]any so numbers arrive as float64, plus five end-to-end asks.",
+      "status": "required",
+      "tests": {
+        "refusal_vectors_test.go": "d48de1612af1146db75cd256854202185833346c077642a206a64b0f7e23b301",
+        "testdata/refusal-vectors.json": "6b0f4128f1cc9fd8a54944410ce93c6515bac6cde9257284e313a4fea825bfcb"
+      },
+      "vectors": {
+        "refusal-vectors.json": "testdata/refusal-vectors.json"
+      }
+    },
     "runtime": {
       "implementation": {
-        "client.go": "4716e725134c226726523951ec57f9ce40aadf5cdd24ef47c85fff2a56cd5222",
+        "client.go": "89f8df3b19a9140b473e7ab999543aa8b5fff6c9a70af865794c21321cfb6b4a",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc",
         "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4",
         "transport_noise.go": "e474489cdec5fd12fa2c2c179af33eb503792bb06ea4dce7a0a1c1ba9784819d"
@@ -148,7 +163,8 @@
     "083b2da8b256cd970b3050218d8d51f13e7355633913d086c9f4147d8790165b",
     "1e8b76b34b755207bb754e5f4c7364334f14476dee70fce1d2687bfdc1545f30",
     "f6a74ead44d53658228da3f4457334f3e922b67dd1e33b43c3ba8b6f7c066bf9",
-    "6f5f697b07eb86da6877faf8aa27138430f886495ac965d08a28fba780e411cd"
+    "6f5f697b07eb86da6877faf8aa27138430f886495ac965d08a28fba780e411cd",
+    "2377330566e575bb3fda77998d943667bf0795940f9d569a5b8bc7f4f0e5e486"
   ],
   "schema_version": 1
 }

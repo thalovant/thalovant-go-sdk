@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.1 — 2026-09-18
+
+- A refusal ends an ask at once instead of letting it run to the deadline. The hub sends `hive.policy.denied` the instant it refuses, with no request id, and the request-id gate dropped it: the ask waited out its whole budget, and a caller told somebody their hub "did not answer in time" about a question it had refused and explained. A denial with no request id is now taken when it names the type this ask sent and this ask is the only utterance the client has out; with a second ask or a query in flight either could be the one refused, so neither takes it.
+- An ask returns `*PolicyDeniedError` rather than a bare `ErrRuntime` wrap, with `Quota` -- `Period`, `Limit`, `Used`, `ResetAfter` -- for a spent `intent_quota_exceeded` and a message that fits the refusal. `PolicyCodeACL`, `PolicyCodeQuotaExceeded` and `PolicyCodeBackendUnavailable` name the three codes. Both new errors still match `errors.Is(err, ErrRuntime)`.
+- An unmatched intent returns the new `*UnansweredError`: the hub understood and has nothing for it, which is not a failure.
+- `Allowed` holds only non-blank, trimmed strings.
+- `UnansweredError.Said` carries what the person said. Both event names put the input in the event's text; the old read of `reason`/`error` left it empty.
+- A fire-and-forget utterance is recorded immediately before the publish, so the grace window is not spent waiting for transport ownership; a publish that errors keeps its record, because the transport can fail after the hub already holds the frame. The slice is pruned as entries are added, so a client that only ever sends does not keep them for its lifetime.
+- A refusal on a quota the hub sent no numbers for says a quota has run out, rather than claiming "all questions used".
+- A float count outside the `int64` range reads as 0 rather than being converted, with an exclusive upper bound: `math.MaxInt64` as a `float64` rounds up to 1<<63, which `int64` cannot represent and Go leaves to the implementation.
+- README documents the refusal surface: the three codes, `Quota`, `UnansweredError`, and when an uncorrelated denial is this ask's.
+- A fire-and-forget utterance -- `SendUtterance`, `SendAction`, `SendCode`, or `Emit` of `recognizer_loop:utterance` -- counts as in flight for 10 s after it is sent, so a refusal of it cannot end an unrelated ask. The ask publishes its own through an internal path, so it never counts itself.
+- `Quota` counts are `int64` and never negative: no narrowing conversion, and a negative limit, usage or reset time reads as 0.
+- Declares the parity contract's new `refusal` capability, run against the Python reference's `refusal-vectors.json`.
+
 ## 0.10.0 — 2026-09-16
 
 - Speak the rest of the HiveMind protocol. A hub relays more than this client's conversation, and the five hive kinds -- `broadcast`, `propagate`, `escalate`, `intercom`, `rendezvous` -- fell off the end of `dispatchNoiseMessage` with no case and no log line. `ListenHive` subscribes to one kind, and `Propagate`, `Escalate` and `Broadcast` send. A refusal is a disconnection rather than an error: a hub's HELLO says nothing about what a client may do, so nothing can check first.

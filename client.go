@@ -17,6 +17,9 @@ type Client struct {
 	connectionGate contextMutex
 	replyIDsMu     sync.Mutex
 	replyIDs       map[replyCorrelation]struct{}
+	// untrackedSends records when each fire-and-forget utterance went out;
+	// see utterancesInFlight.
+	untrackedSends []time.Time
 
 	// The conversation each session id is in the middle of. A hub is stateless
 	// for a named session, so what the last turn activated comes back on
@@ -170,6 +173,50 @@ func (c *Client) continueConversation(eventContext Context, sessionID string) Co
 type replyCorrelation struct {
 	query bool
 	id    string
+}
+
+// utterancesInFlight counts the utterances this client may still have
+// refused, for a denial that carries no request id: asks and queries while
+// they wait, and a fire-and-forget utterance for untrackedUtteranceGrace
+// after it was sent -- its refusal could land while an ask is waiting.
+// recordUntrackedSend notes a fire-and-forget utterance, pruning as it goes: a
+// client that only ever sends and never asks would otherwise keep one entry per
+// send for as long as it lives.
+func (c *Client) recordUntrackedSend() {
+	c.replyIDsMu.Lock()
+	defer c.replyIDsMu.Unlock()
+	c.untrackedSends = append(c.untrackedSends, time.Now())
+	c.pruneUntrackedSendsLocked()
+}
+
+// pruneUntrackedSendsLocked drops what is past the grace window, and any excess
+// beyond the cap. The caller holds replyIDsMu.
+func (c *Client) pruneUntrackedSendsLocked() {
+	cutoff := time.Now().Add(-untrackedUtteranceGrace)
+	kept := c.untrackedSends[:0]
+	for _, sent := range c.untrackedSends {
+		if sent.After(cutoff) {
+			kept = append(kept, sent)
+		}
+	}
+	if len(kept) > 1024 {
+		kept = kept[len(kept)-1024:]
+	}
+	c.untrackedSends = kept
+}
+
+func (c *Client) utterancesInFlight() (asks, queries, sends int) {
+	c.replyIDsMu.Lock()
+	defer c.replyIDsMu.Unlock()
+	for key := range c.replyIDs {
+		if key.query {
+			queries++
+		} else {
+			asks++
+		}
+	}
+	c.pruneUntrackedSendsLocked()
+	return asks, queries, len(c.untrackedSends)
 }
 
 func (c *Client) reserveReplyID(query bool, id string) (func(), error) {
@@ -385,6 +432,33 @@ func (c *Client) Healthcheck() TransportHealth {
 }
 
 func (c *Client) Emit(ctx context.Context, eventType string, data Data, eventContext Context) error {
+	if eventType != EventRecognizerLoopUtterance {
+		return c.emit(ctx, eventType, data, eventContext)
+	}
+	// A fire-and-forget utterance: nothing will wait on it, but the hub may
+	// refuse it, and that refusal carries no request id.
+	//
+	// Recorded once the connection is up and immediately before the publish.
+	// Connecting can wait on a transport and its handshake, and starting the
+	// window there would spend the grace on it -- leaving a denial to land
+	// after it, where an unrelated ask would take it. A connect that fails
+	// publishes nothing, so it records nothing.
+	//
+	// A publish that errors keeps its record: the transport can fail after the
+	// hub already holds the frame, and the hub refuses what it holds. A record
+	// that need not have been there costs an ask its deadline; a missing one
+	// ends a question the hub never refused.
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	return c.runOwned(sendCtx, true, func() error {
+		c.recordUntrackedSend()
+		return c.Transport.EmitBus(sendCtx, eventType, data, c.contextWithIdentityMetadata(eventContext))
+	})
+}
+
+// emit publishes without recording a fire-and-forget utterance: the ask uses
+// it for its own, which it tracks for as long as it waits.
+func (c *Client) emit(ctx context.Context, eventType string, data Data, eventContext Context) error {
 	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	return c.runOwned(sendCtx, true, func() error {
@@ -551,7 +625,10 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 			failure = softFailure
 		}
 		if failure != nil && len(fragments) == 0 {
-			return Reply{}, fmt.Errorf("%w: %s", ErrRuntime, failure.Name)
+			// Typed, and still errors.Is(err, ErrRuntime): a refusal, a
+			// question the hub has nothing for, and a fault need three
+			// different sentences.
+			return Reply{}, failureError(*failure)
 		}
 		if len(fragments) == 0 {
 			if err := ctx.Err(); err != nil {
@@ -569,7 +646,17 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 		return Reply{Text: strings.Join(fragments, " "), Utterances: fragments, Handled: failure == nil, OK: failure == nil, SessionID: sessionID, RequestID: requestID, Events: events, DroppedMedia: mediaBudget.dropped, FailureEvent: failure}, nil
 	}
 	accept := func(event Event) bool {
-		if event.RequestID() != requestID {
+		if event.Name == EventPolicyDenied {
+			// The one reply the hub cannot correlate. A denial carries no
+			// request id, only the type it refused, and dropping it here
+			// turned a refusal the hub made at once into a full timeout:
+			// "your hub did not answer in time", about a question it had
+			// refused and explained.
+			asks, queries, sends := c.utterancesInFlight()
+			if !refusalBelongsToAsk(event.RequestID(), requestID, stringValue(event.Data["denied_type"]), asks, queries, sends) {
+				return false
+			}
+		} else if event.RequestID() != requestID {
 			return false
 		}
 		if !mediaBudget.accept(event) {
@@ -622,7 +709,7 @@ func (c *Client) AskWithOptions(ctx context.Context, text string, opts AskOption
 	// retains transport ownership even when this caller has already finished.
 	sendResult := make(chan error, 1)
 	go func() {
-		sendResult <- c.Emit(ctx, EventRecognizerLoopUtterance, UtterancePayload(prompt, lang), eventContext)
+		sendResult <- c.emit(ctx, EventRecognizerLoopUtterance, UtterancePayload(prompt, lang), eventContext)
 	}()
 	drain := func() error {
 		// Snapshot the backlog so a continuing producer cannot postpone a
