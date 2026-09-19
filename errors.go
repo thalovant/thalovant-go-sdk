@@ -200,8 +200,11 @@ func signedCount(raw any) int64 {
 	case float64:
 		// Whole, and inside what an int64 holds: 1e20 is neither a count a
 		// policy can have meant nor a number this conversion can survive.
+		// Exclusive at the top: math.MaxInt64 as a float64 rounds up to 1<<63,
+		// which int64 cannot represent, and Go leaves that conversion's result
+		// to the implementation.
 		if value == math.Trunc(value) && !math.IsInf(value, 0) &&
-			value >= math.MinInt64 && value <= math.MaxInt64 {
+			value >= math.MinInt64 && value < -float64(math.MinInt64) {
 			return int64(value)
 		}
 	case int:

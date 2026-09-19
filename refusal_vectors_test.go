@@ -235,38 +235,23 @@ func TestAnAskDoesNotTakeADenialAFireAndForgetSendCouldOwn(t *testing.T) {
 
 type refusingTransport struct {
 	*blockedClientTransport
-	breaking bool
 }
 
-func (t *refusingTransport) EmitBus(ctx context.Context, eventType string, data Data, eventContext Context) error {
-	if t.breaking {
-		return errors.New("no route to the hub")
-	}
-	return t.blockedClientTransport.EmitBus(ctx, eventType, data, eventContext)
+func (t *refusingTransport) EmitBus(context.Context, string, Data, Context) error {
+	return errors.New("the write reported a failure")
 }
 
-func TestASendThatNeverLeftIsNotInFlight(t *testing.T) {
-	// A phantom would suppress a real refusal for the whole grace window.
-	transport := &refusingTransport{blockedClientTransport: newBlockedClientTransport(), breaking: true}
+func TestAPublishThatErroredStillCountsBecauseTheHubMayHoldIt(t *testing.T) {
+	// The transport can fail after the hub already has the frame, and the hub
+	// refuses what it holds. Forgetting the send would leave the next ask as
+	// the only candidate for a denial that was never its own.
+	transport := &refusingTransport{blockedClientTransport: newBlockedClientTransport()}
 	transport.ready.Store(true)
 	client := &Client{Transport: transport}
 	if err := client.SendUtterance(context.Background(), "turn the lights off", RequestOptions{}); err == nil {
 		t.Fatal("the send should have failed")
 	}
-	if _, _, sends := client.utterancesInFlight(); sends != 0 {
-		t.Fatalf("a send that never left is in flight: %d", sends)
-	}
-	// And the next ask still takes a refusal that can only be its own.
-	transport.breaking = false
-	errs := make(chan error, 1)
-	go func() {
-		_, err := client.AskWithOptions(context.Background(), "what time is it", AskOptions{RequestOptions: RequestOptions{Timeout: 5 * time.Second}})
-		errs <- err
-	}()
-	<-transport.emitted
-	transport.streams.bus.publish(Event{Name: EventPolicyDenied, Data: quotaDenial, Context: Context{"source": "hivemind-core"}})
-	var refused *PolicyDeniedError
-	if err := <-errs; !errors.As(err, &refused) {
-		t.Fatalf("want a refusal, got %T %v", err, err)
+	if _, _, sends := client.utterancesInFlight(); sends != 1 {
+		t.Fatalf("a send the hub may hold is not in flight: %d", sends)
 	}
 }

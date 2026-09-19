@@ -179,6 +179,32 @@ type replyCorrelation struct {
 // refused, for a denial that carries no request id: asks and queries while
 // they wait, and a fire-and-forget utterance for untrackedUtteranceGrace
 // after it was sent -- its refusal could land while an ask is waiting.
+// recordUntrackedSend notes a fire-and-forget utterance, pruning as it goes: a
+// client that only ever sends and never asks would otherwise keep one entry per
+// send for as long as it lives.
+func (c *Client) recordUntrackedSend() {
+	c.replyIDsMu.Lock()
+	defer c.replyIDsMu.Unlock()
+	c.untrackedSends = append(c.untrackedSends, time.Now())
+	c.pruneUntrackedSendsLocked()
+}
+
+// pruneUntrackedSendsLocked drops what is past the grace window, and any excess
+// beyond the cap. The caller holds replyIDsMu.
+func (c *Client) pruneUntrackedSendsLocked() {
+	cutoff := time.Now().Add(-untrackedUtteranceGrace)
+	kept := c.untrackedSends[:0]
+	for _, sent := range c.untrackedSends {
+		if sent.After(cutoff) {
+			kept = append(kept, sent)
+		}
+	}
+	if len(kept) > 1024 {
+		kept = kept[len(kept)-1024:]
+	}
+	c.untrackedSends = kept
+}
+
 func (c *Client) utterancesInFlight() (asks, queries, sends int) {
 	c.replyIDsMu.Lock()
 	defer c.replyIDsMu.Unlock()
@@ -189,15 +215,8 @@ func (c *Client) utterancesInFlight() (asks, queries, sends int) {
 			asks++
 		}
 	}
-	cutoff := time.Now().Add(-untrackedUtteranceGrace)
-	kept := c.untrackedSends[:0]
-	for _, sent := range c.untrackedSends {
-		if sent.After(cutoff) {
-			kept = append(kept, sent)
-		}
-	}
-	c.untrackedSends = kept
-	return asks, queries, len(kept)
+	c.pruneUntrackedSendsLocked()
+	return asks, queries, len(c.untrackedSends)
 }
 
 func (c *Client) reserveReplyID(query bool, id string) (func(), error) {
@@ -417,30 +436,24 @@ func (c *Client) Emit(ctx context.Context, eventType string, data Data, eventCon
 		return c.emit(ctx, eventType, data, eventContext)
 	}
 	// A fire-and-forget utterance: nothing will wait on it, but the hub may
-	// refuse it, and that refusal carries no request id. Recorded before the
-	// publish so a denial cannot beat the record, and dropped again if the
-	// publish never happened -- a send that failed to leave leaves nothing for
-	// the hub to refuse, and a phantom would suppress a real refusal for the
-	// whole grace window.
-	sentAt := time.Now()
-	c.replyIDsMu.Lock()
-	c.untrackedSends = append(c.untrackedSends, sentAt)
-	if len(c.untrackedSends) > 1024 {
-		c.untrackedSends = c.untrackedSends[len(c.untrackedSends)-1024:]
-	}
-	c.replyIDsMu.Unlock()
-	if err := c.emit(ctx, eventType, data, eventContext); err != nil {
-		c.replyIDsMu.Lock()
-		for i, sent := range c.untrackedSends {
-			if sent.Equal(sentAt) {
-				c.untrackedSends = append(c.untrackedSends[:i], c.untrackedSends[i+1:]...)
-				break
-			}
-		}
-		c.replyIDsMu.Unlock()
-		return err
-	}
-	return nil
+	// refuse it, and that refusal carries no request id.
+	//
+	// Recorded once the connection is up and immediately before the publish.
+	// Connecting can wait on a transport and its handshake, and starting the
+	// window there would spend the grace on it -- leaving a denial to land
+	// after it, where an unrelated ask would take it. A connect that fails
+	// publishes nothing, so it records nothing.
+	//
+	// A publish that errors keeps its record: the transport can fail after the
+	// hub already holds the frame, and the hub refuses what it holds. A record
+	// that need not have been there costs an ask its deadline; a missing one
+	// ends a question the hub never refused.
+	sendCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	return c.runOwned(sendCtx, true, func() error {
+		c.recordUntrackedSend()
+		return c.Transport.EmitBus(sendCtx, eventType, data, c.contextWithIdentityMetadata(eventContext))
+	})
 }
 
 // emit publishes without recording a fire-and-forget utterance: the ask uses

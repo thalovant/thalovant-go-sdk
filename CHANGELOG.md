@@ -7,9 +7,9 @@
 - An unmatched intent returns the new `*UnansweredError`: the hub understood and has nothing for it, which is not a failure.
 - `Allowed` holds only non-blank, trimmed strings.
 - `UnansweredError.Said` carries what the person said. Both event names put the input in the event's text; the old read of `reason`/`error` left it empty.
-- A fire-and-forget utterance whose publish never happened is dropped again, rather than suppressing a real refusal for the rest of the grace window.
+- A fire-and-forget utterance is recorded immediately before the publish, so the grace window is not spent waiting for transport ownership; a publish that errors keeps its record, because the transport can fail after the hub already holds the frame. The slice is pruned as entries are added, so a client that only ever sends does not keep them for its lifetime.
 - A refusal on a quota the hub sent no numbers for says a quota has run out, rather than claiming "all questions used".
-- A float count outside the `int64` range reads as 0 rather than being converted.
+- A float count outside the `int64` range reads as 0 rather than being converted, with an exclusive upper bound: `math.MaxInt64` as a `float64` rounds up to 1<<63, which `int64` cannot represent and Go leaves to the implementation.
 - README documents the refusal surface: the three codes, `Quota`, `UnansweredError`, and when an uncorrelated denial is this ask's.
 - A fire-and-forget utterance -- `SendUtterance`, `SendAction`, `SendCode`, or `Emit` of `recognizer_loop:utterance` -- counts as in flight for 10 s after it is sent, so a refusal of it cannot end an unrelated ask. The ask publishes its own through an internal path, so it never counts itself.
 - `Quota` counts are `int64` and never negative: no narrowing conversion, and a negative limit, usage or reset time reads as 0.

@@ -798,6 +798,11 @@ rather than running to its deadline. Three different things arrive as
 waiting; a fourth is not a refusal at all.
 
 ```go
+var (
+	denied     *thalovant.PolicyDeniedError
+	unanswered *thalovant.UnansweredError
+)
+
 reply, err := client.Ask(ctx, "what is the weather", thalovant.AskOptions{})
 switch {
 case err == nil:

@@ -39,7 +39,7 @@
     },
     "conversation": {
       "implementation": {
-        "client.go": "982e4db9f75697e4185c5bda7b8409bb7ff349e096e4570ea1bc5f071f16ed26",
+        "client.go": "89f8df3b19a9140b473e7ab999543aa8b5fff6c9a70af865794c21321cfb6b4a",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc"
       },
       "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
@@ -111,14 +111,14 @@
     },
     "refusal": {
       "implementation": {
-        "client.go": "982e4db9f75697e4185c5bda7b8409bb7ff349e096e4570ea1bc5f071f16ed26",
-        "errors.go": "7c7b147d3738c5a12144b36af6b05774cd0ed75428bbd050cf657b8d0bb0fff4"
+        "client.go": "89f8df3b19a9140b473e7ab999543aa8b5fff6c9a70af865794c21321cfb6b4a",
+        "errors.go": "755df55bae10ff79713e72145db0d1870c71b2e3a8f7e11e3fc41a2715bae2fe"
       },
-      "reason": "refusalBelongsToAsk() and failureError() in errors.go, used by AskWithOptions() in client.go, which counts asks, queries and fire-and-forget utterances inside the shared grace window and drops a send whose publish never happened. PolicyDeniedError carries Quota and UnansweredError is new, both still errors.Is ErrRuntime. Run against the shared refusal vectors -- decoded as map[string]any so numbers arrive as float64 -- plus five end-to-end asks.",
+      "reason": "refusalBelongsToAsk() and failureError() in errors.go, used by AskWithOptions() in client.go, which counts asks, queries and fire-and-forget utterances inside the shared grace window -- recorded immediately before the publish and kept when the publish errors, since the transport can fail after the hub holds the frame. PolicyDeniedError carries Quota and UnansweredError is new, both still errors.Is ErrRuntime. Run against the shared refusal vectors, decoded as map[string]any so numbers arrive as float64, plus five end-to-end asks.",
       "status": "required",
       "tests": {
-        "refusal_vectors_test.go": "3c277c484de0000da21ebbf41ef286c15f0fb3063cae02354a5a3c53065fde75",
-        "testdata/refusal-vectors.json": "8795fcd9d8b5ac790176c13ea077b701a5dc1fd584a717ed08744bcab8d21c82"
+        "refusal_vectors_test.go": "d48de1612af1146db75cd256854202185833346c077642a206a64b0f7e23b301",
+        "testdata/refusal-vectors.json": "08a55b252514427ea7123294685f1f6dd72306ee274cff77013590870d8fde7e"
       },
       "vectors": {
         "refusal-vectors.json": "testdata/refusal-vectors.json"
@@ -126,7 +126,7 @@
     },
     "runtime": {
       "implementation": {
-        "client.go": "982e4db9f75697e4185c5bda7b8409bb7ff349e096e4570ea1bc5f071f16ed26",
+        "client.go": "89f8df3b19a9140b473e7ab999543aa8b5fff6c9a70af865794c21321cfb6b4a",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc",
         "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4",
         "transport_noise.go": "e474489cdec5fd12fa2c2c179af33eb503792bb06ea4dce7a0a1c1ba9784819d"
@@ -164,7 +164,7 @@
     "1e8b76b34b755207bb754e5f4c7364334f14476dee70fce1d2687bfdc1545f30",
     "f6a74ead44d53658228da3f4457334f3e922b67dd1e33b43c3ba8b6f7c066bf9",
     "6f5f697b07eb86da6877faf8aa27138430f886495ac965d08a28fba780e411cd",
-    "4c7780ced5bb3e011d10a0ac502bba61c08eaebfd27de6c827c5d47351ac2b4e"
+    "e0de5ebc373fcec60d083651e4001e22da8978419ad0d24a24d326db1e4e8e2a"
   ],
   "schema_version": 1
 }
