@@ -191,8 +191,18 @@ func policyDeniedFromEvent(event Event) *PolicyDeniedError {
 // as float64, so a whole float is a count and a fractional one is not. A
 // negative limit, usage or reset time is not something a policy can mean, and
 // passing one through would have an app say "-1 of -5 questions used".
+// maxCount is the largest whole number every JSON decoder carries exactly.
+// Above it a decoder backed by a double can no longer tell one whole number
+// from the next, so two SDKs would report different allowances for the same
+// denial -- and a count nobody can agree on is worse than none.
+const maxCount int64 = 1<<53 - 1
+
 func wholeCount(raw any) int64 {
-	return max(signedCount(raw), 0)
+	value := signedCount(raw)
+	if value < 0 || value > maxCount {
+		return 0
+	}
+	return value
 }
 
 func signedCount(raw any) int64 {

@@ -112,13 +112,13 @@
     "refusal": {
       "implementation": {
         "client.go": "89f8df3b19a9140b473e7ab999543aa8b5fff6c9a70af865794c21321cfb6b4a",
-        "errors.go": "755df55bae10ff79713e72145db0d1870c71b2e3a8f7e11e3fc41a2715bae2fe"
+        "errors.go": "f87b6060fcf0c4a65ac11ee07ecc540031bbff5263a5859664d34f15ce1b8f96"
       },
       "reason": "refusalBelongsToAsk() and failureError() in errors.go, used by AskWithOptions() in client.go, which counts asks, queries and fire-and-forget utterances inside the shared grace window -- recorded immediately before the publish and kept when the publish errors, since the transport can fail after the hub holds the frame. PolicyDeniedError carries Quota and UnansweredError is new, both still errors.Is ErrRuntime. Run against the shared refusal vectors, decoded as map[string]any so numbers arrive as float64, plus five end-to-end asks.",
       "status": "required",
       "tests": {
         "refusal_vectors_test.go": "d48de1612af1146db75cd256854202185833346c077642a206a64b0f7e23b301",
-        "testdata/refusal-vectors.json": "08a55b252514427ea7123294685f1f6dd72306ee274cff77013590870d8fde7e"
+        "testdata/refusal-vectors.json": "6b0f4128f1cc9fd8a54944410ce93c6515bac6cde9257284e313a4fea825bfcb"
       },
       "vectors": {
         "refusal-vectors.json": "testdata/refusal-vectors.json"
@@ -164,7 +164,7 @@
     "1e8b76b34b755207bb754e5f4c7364334f14476dee70fce1d2687bfdc1545f30",
     "f6a74ead44d53658228da3f4457334f3e922b67dd1e33b43c3ba8b6f7c066bf9",
     "6f5f697b07eb86da6877faf8aa27138430f886495ac965d08a28fba780e411cd",
-    "e0de5ebc373fcec60d083651e4001e22da8978419ad0d24a24d326db1e4e8e2a"
+    "2377330566e575bb3fda77998d943667bf0795940f9d569a5b8bc7f4f0e5e486"
   ],
   "schema_version": 1
 }
