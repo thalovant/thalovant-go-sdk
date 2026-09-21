@@ -173,6 +173,51 @@ func languageDistance(wanted, candidate string) int {
 
 // ClosestLanguage returns the nearest OVOS-compatible registration (maximum
 // distance ten). Equal distances preserve the caller's registration order.
+// UsualForm is the form a language is usually written in, when that differs
+// from tag: "en-CA" and "en-AT" both to "en-us", "fr-BE" to "fr-fr", "pt-AO"
+// to "pt-br", from CLDR's likely subtags. The second return is false when
+// there is nothing different to try, so a caller can tell "already the usual
+// form" from "no idea".
+//
+// Listing and asking do not agree about languages, and this closes the gap. A
+// hub matches an utterance to the closest language it knows, so a phone set to
+// "en-CA" is understood by skills registered under "en-US"; its manifest is
+// keyed by exact tag, so the same hub lists nothing for "en-CA".
+//
+// Lower case, because that is how skills register and how the manifest is
+// keyed: an exact lookup with BCP47's "en-US" finds nothing.
+func UsualForm(tag string) (string, bool) {
+	if strings.TrimSpace(tag) == "" {
+		return "", false
+	}
+	base := parseLanguage(tag, true).language
+	// "und" is the tag for "no idea", and parseLanguage produces it for
+	// anything it cannot read. CLDR's guess for an unknown language is
+	// English, so without this a blank tag lists a hub in a language nobody
+	// asked for.
+	if base == "" || base == "und" {
+		return "", false
+	}
+	// maximizeLanguage does not fail on a language it has never heard of: it
+	// walks its probes down to "und" and takes the root locale's region, so
+	// "zzz" comes back "zzz-us". Round-tripping the tag does not catch that,
+	// because the unknown language is carried through unchanged. A direct
+	// entry in the likely table is what says CLDR has heard of this language.
+	if matching.Likely[base] == "" {
+		return "", false
+	}
+	likely := maximizeLanguage(languageTag{language: base})
+	usual := likely.language
+	if likely.region != "" {
+		usual = likely.language + "-" + likely.region
+	}
+	usual = strings.ToLower(usual)
+	if SameLanguage(usual, tag) {
+		return "", false
+	}
+	return usual, true
+}
+
 func ClosestLanguage(target string, available []string) (string, bool) {
 	best, minimum := "", int(^uint(0)>>1)
 	for _, candidate := range available {
