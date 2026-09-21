@@ -80,7 +80,7 @@
     },
     "listing": {
       "implementation": {
-        "intents.go": "a4e48cca44578160c1133ab034ab4b52bb30d454538e1aa8bb652bdba0c35ca5",
+        "intents.go": "c42f815528a4a93cfe0a09e2e1eee41e3d677ceb3a55f4c8af73ce32df4cb03b",
         "listing.go": "b33a452cf4eb5941dc3c2691a2c856b61dcd9017c05592040f6ba9a94a9d6ecf"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
@@ -164,7 +164,8 @@
     "1e8b76b34b755207bb754e5f4c7364334f14476dee70fce1d2687bfdc1545f30",
     "f6a74ead44d53658228da3f4457334f3e922b67dd1e33b43c3ba8b6f7c066bf9",
     "6f5f697b07eb86da6877faf8aa27138430f886495ac965d08a28fba780e411cd",
-    "2377330566e575bb3fda77998d943667bf0795940f9d569a5b8bc7f4f0e5e486"
+    "2377330566e575bb3fda77998d943667bf0795940f9d569a5b8bc7f4f0e5e486",
+    "76bc1eb9957da5a6fdf03e89f3905f8d37d3ef2fe7c841ba751718105ca30a45"
   ],
   "schema_version": 1
 }
