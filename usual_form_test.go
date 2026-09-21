@@ -19,9 +19,14 @@ func TestUsualForm(t *testing.T) {
 		{"de-AT", "de-de", true},
 		// Already the usual form: false rather than the same tag, so a hub
 		// that answered is never asked twice.
-		{"en-US", "", false},
+		// The canonical spelling IS a different string to the manifest, which
+		// is keyed en-us. Suppressing its retry was the bug CodeRabbit caught.
+		{"en-US", "en-us", true},
+		{"en_US", "en-us", true},
+		{"fr-FR", "fr-fr", true},
+		// Only byte-for-byte the usual form has nothing to try.
 		{"en-us", "", false},
-		{"fr-FR", "", false},
+		{"fr-fr", "", false},
 		// maximizeLanguage does not fail on a language it has never heard of:
 		// it walks down to "und" and takes the root locale's region, so "zzz"
 		// would come back "zzz-us" without the likely-table check.
