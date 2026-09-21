@@ -212,7 +212,8 @@ func UsualForm(tag string) (string, bool) {
 		usual = likely.language + "-" + likely.region
 	}
 	usual = strings.ToLower(usual)
-	if SameLanguage(usual, tag) {
+	// Byte comparison, NOT sameLanguage. They are not the same test, and the difference is the whole point: the canonical spelling is en-US, the manifest is keyed en-us, and sameLanguage calls those equal -- so the retry that exists for exactly this case suppressed itself.
+	if usual == strings.TrimSpace(tag) {
 		return "", false
 	}
 	return usual, true
