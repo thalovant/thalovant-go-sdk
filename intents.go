@@ -81,6 +81,11 @@ type IntentOptions struct {
 	Describe           *bool
 	Fallback           *bool
 	IncludeDefinitions bool
+	// Nearest retries an empty listing once in the language's usual form.
+	// Nil means on: a listing that returns nothing from a hub which
+	// demonstrably answers in that language is a fault, not a preference.
+	// See UsualForm.
+	Nearest *bool
 }
 
 func intentOptions(opts []IntentOptions) IntentOptions {
@@ -111,6 +116,13 @@ func (o IntentOptions) describe() bool {
 
 func (o IntentOptions) fallback() bool {
 	return o.Fallback == nil || *o.Fallback
+}
+
+func (o IntentOptions) nearest() bool {
+	if o.Nearest == nil {
+		return true
+	}
+	return *o.Nearest
 }
 
 // SameLanguage reports whether two language tags name the same language:
@@ -411,6 +423,12 @@ type HubIntentInventory struct {
 	Skills    []HubSkillIntents `json:"skills"`
 	Source    string            `json:"source"`
 	Denied    []string          `json:"denied"`
+	// ListedIn is the tag the hub actually listed each requested language
+	// under, in Languages order. Equal to Languages unless a listing came
+	// back empty and the language's usual form answered instead, which is the
+	// only way the two differ. Callers rendering sentences must read them
+	// from the tag that answered.
+	ListedIn []string `json:"listed_in"`
 }
 
 // Intents flattens the inventory: every skill's intents, skills in order.
@@ -474,7 +492,11 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 	}
 
 	listed := make(map[string][]IntentRegistration, len(asked))
-	for _, lang := range asked {
+	// The tag that actually answered for each asked language, in the same
+	// order. Everything downstream reads listed by these rather than by what
+	// was asked for, because that is where the rows are.
+	listedIn := make([]string, len(asked))
+	for index, lang := range asked {
 		rows, err := c.ListIntents(ctx, lang, IntentOptions{
 			Timeout:            options.Timeout,
 			IncludeDefinitions: options.describe(),
@@ -492,11 +514,35 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 			}
 			return inventoryFromNames(names, asked, EventIntentList), nil
 		}
-		listed[lang] = rows
+		tag := lang
+		if len(rows) == 0 && options.nearest() {
+			// Listing and asking do not agree about languages. The hub
+			// matches an utterance to the closest language it knows, so a
+			// phone set to en-CA is understood by skills registered under
+			// en-US; the manifest is keyed by exact tag, so the same hub
+			// lists nothing for en-CA and a person is shown an empty hub by
+			// the hub that is answering them.
+			//
+			// Once only, and only on an empty listing: a hub that answered is
+			// never asked twice, and a language whose usual form is itself
+			// has nothing to retry with.
+			if usual, ok := UsualForm(lang); ok {
+				retried, err := c.ListIntents(ctx, usual, IntentOptions{
+					Timeout:            options.Timeout,
+					IncludeDefinitions: options.describe(),
+				})
+				if err == nil && len(retried) > 0 {
+					rows = retried
+					tag = usual
+				}
+			}
+		}
+		listed[tag] = rows
+		listedIn[index] = tag
 	}
 
 	var wanted []intentKey
-	for _, lang := range asked {
+	for _, lang := range listedIn {
 		for _, row := range listed[lang] {
 			if row.Enabled && row.Definition == nil && row.Method == "template" {
 				wanted = append(wanted, intentKey{row.SkillID, row.IntentName, lang})
@@ -514,7 +560,7 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 
 	byName := map[string]*HubIntent{}
 	var order []string
-	for _, lang := range asked {
+	for _, lang := range listedIn {
 		for _, row := range listed[lang] {
 			id := row.SkillID + ":" + row.IntentName
 			intent, ok := byName[id]
@@ -560,6 +606,7 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 		Skills:    groupBySkill(intents),
 		Source:    IntentSourceManifest,
 		Denied:    []string{},
+		ListedIn:  listedIn,
 	}, nil
 }
 
