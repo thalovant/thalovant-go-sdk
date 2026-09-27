@@ -135,6 +135,13 @@ type HubCreateOptions struct {
 // apply. Every field is optional and an unset field is omitted from the request
 // body, so the API falls back to the workspace release policy for it. Setting
 // Images switches the target to "custom" mode unless Mode is also set.
+//
+// Unless the caller is a platform administrator, Images may name only
+// platform images: a catalog, current or recommended image, or any tag or
+// digest of the platform's own repository for that key
+// (ghcr.io/thalovant/ovos-core for a runtime group's "core",
+// ghcr.io/thalovant/hivemind-listener for a hub's "listener"). The API
+// refuses anything else with HTTP 403 "platform_image_required".
 type ReleaseOptions struct {
 	Channel string
 	Mode    string

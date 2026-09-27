@@ -998,7 +998,7 @@ the dashboard for per-plan limits and reset times. See also
 - `control.CreateHub(ctx, payload, HubCreateOptions{IdempotencyKey: ...})`
 - `control.UpdateHub(ctx, hubID, payload, etag)`
 - `control.DeleteHub(ctx, hubID, etag)`
-- `control.ReleaseHub(ctx, hubID, ReleaseOptions{Channel: ..., Mode: ..., Version: ..., Images: ..., Reason: ...})`
+- `control.ReleaseHub(ctx, hubID, ReleaseOptions{Channel: ..., Mode: ..., Version: ..., Images: ..., Reason: ...})` — `Images` must be platform images unless you are a platform administrator; anything else is refused with HTTP 403 `platform_image_required`
 - `control.SetHubRating(ctx, hubID, rating)`
 - `control.ClearHubRating(ctx, hubID)`
 - `control.GetHubRuntimeCapabilities(ctx, hubID)`
