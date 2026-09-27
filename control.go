@@ -136,12 +136,16 @@ type HubCreateOptions struct {
 // body, so the API falls back to the workspace release policy for it. Setting
 // Images switches the target to "custom" mode unless Mode is also set.
 //
-// Unless the caller is a platform administrator, Images may name only
-// platform images: a catalog, current or recommended image, or any tag or
-// digest of the platform's own repository for that key
-// (ghcr.io/thalovant/ovos-core for a runtime group's "core",
-// ghcr.io/thalovant/hivemind-listener for a hub's "listener"). The API
-// refuses anything else with HTTP 403 "platform_image_required".
+// Unless the caller is a platform administrator, each image must be one the
+// platform releases for its key: a catalog pin of the stable or alpha channel,
+// the resource's current, recommended or release-policy image, or the
+// platform's default image. A runtime group's "core" and a hub's "listener"
+// also accept any tag or digest of the platform's own repository
+// (ghcr.io/thalovant/ovos-core, ghcr.io/thalovant/hivemind-listener); "bus" and
+// "preview_bridge" take only the listed images. The API refuses anything else
+// with HTTP 403 "platform_image_required": an *APIError whose Code says so,
+// whose ProblemDetail names what each refused key may be instead, and whose
+// Problem carries refused_images, allowed_images and allowed_repositories.
 type ReleaseOptions struct {
 	Channel string
 	Mode    string
@@ -377,7 +381,7 @@ func (c *ControlPlane) pollDeviceToken(
 		case "expired_token":
 			return nil, fmt.Errorf("%w: the device sign-in code expired before it was approved; call LoginWithBrowser again to request a new code", ErrDeviceCodeExpired)
 		default:
-			return nil, &APIError{StatusCode: status, Detail: serverErrorDetail(raw)}
+			return nil, apiErrorFromResponse(status, raw)
 		}
 		remaining := deadline.Sub(now())
 		if remaining <= 0 {
@@ -749,7 +753,7 @@ func (c *ControlPlane) UpdateRuntimeGroupConfig(ctx context.Context, runtimeGrou
 			return nil, err
 		}
 		if status < 200 || status > 299 {
-			return nil, &APIError{StatusCode: status, Detail: serverErrorDetail(raw)}
+			return nil, apiErrorFromResponse(status, raw)
 		}
 		// Preserve untouched JSON integers/decimals exactly when writing the snapshot back.
 		var snapshot map[string]any
@@ -1176,7 +1180,7 @@ func (c *ControlPlane) request(ctx context.Context, method string, path string, 
 		return nil, err
 	}
 	if status < 200 || status > 299 {
-		return nil, &APIError{StatusCode: status, Detail: serverErrorDetail(raw)}
+		return nil, apiErrorFromResponse(status, raw)
 	}
 	result, decodeErr := decodeControlJSON(raw)
 	if decodeErr != nil {
@@ -1276,6 +1280,35 @@ const serverErrorOmitted = "(server error response omitted)"
 // apiKey/password/cryptoKey under other keys such as "spec".
 var serverErrorDetailFields = []string{"detail", "message", "error", "error_description", "code", "title"}
 
+// apiErrorFromResponse is the error for a response the API answered with a
+// failure status, and the one place every such error is built. The body is
+// decoded once. When it is a JSON object it rides on the error whole, as
+// Problem, with its Code and its unshortened ProblemDetail read out of it; the
+// Detail that Error() prints stays the bounded line it always was.
+func apiErrorFromResponse(status int, raw []byte) *APIError {
+	problem := decodeProblem(raw)
+	code, detail := problemFields(problem)
+	return &APIError{
+		StatusCode:    status,
+		Detail:        serverErrorLine(raw, problem),
+		Code:          code,
+		ProblemDetail: detail,
+		Problem:       problem,
+	}
+}
+
+// decodeProblem is an error body decoded, exactly when it is a JSON object;
+// nil for a body that is empty, not JSON, or JSON that is not an object
+// (null included). It is decoded as UTF-8 whatever the Content-Type says: the
+// API sends application/problem+json with no charset.
+func decodeProblem(raw []byte) map[string]any {
+	var problem map[string]any
+	if err := json.Unmarshal(raw, &problem); err != nil {
+		return nil
+	}
+	return problem
+}
+
 // serverErrorDetail turns a raw non-2xx response body into a short, single-line
 // error detail. It never interpolates arbitrary body text: it decodes the body
 // as a JSON object and surfaces only the allowlisted, non-secret message fields
@@ -1283,12 +1316,18 @@ var serverErrorDetailFields = []string{"detail", "message", "error", "error_desc
 // or that carries none of those fields, is omitted entirely -- a failed
 // POST /v1/clients response can echo the request's apiKey/password/cryptoKey,
 // and truncation alone would not protect a secret near the start of the body.
+// What the API said in full is on the error itself (see apiErrorFromResponse).
 func serverErrorDetail(raw []byte) string {
+	return serverErrorLine(raw, decodeProblem(raw))
+}
+
+// serverErrorLine is serverErrorDetail for a body already decoded by
+// decodeProblem, so the error's line and its fields come from one decode.
+func serverErrorLine(raw []byte, decoded map[string]any) string {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		return "(no response body)"
 	}
-	var decoded map[string]any
-	if err := json.Unmarshal(raw, &decoded); err != nil {
+	if decoded == nil {
 		return serverErrorOmitted
 	}
 	parts := make([]string, 0, len(serverErrorDetailFields))

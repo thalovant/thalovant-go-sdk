@@ -977,12 +977,50 @@ or an agent as is.
   points at the next UTC day or month boundary.
 
 Both 429s apply to token-authenticated control-plane calls and are returned as
-errors wrapping `ErrAPI`, with the status and selected error message fields.
-The SDK does not retry automatically and does not expose the HTTP headers or
-`retry_after_seconds` as structured metadata. When inspecting a direct API
-response, honor its authoritative `Retry-After` value before resending. Check
-the dashboard for per-plan limits and reset times. See also
+a `*APIError` wrapping `ErrAPI`, with the status and selected error message
+fields in its message and the body's `code`, `quota`, `limit`, `used` and
+`retry_after_seconds` in its `Problem` (see
+[Reading An API Error](#reading-an-api-error)). The SDK does not retry
+automatically and does not expose the HTTP headers. When inspecting a direct
+API response, honor its authoritative `Retry-After` value before resending.
+Check the dashboard for per-plan limits and reset times. See also
 <https://docs.thalovant.com/developers/sdks/go/>.
+
+## Reading An API Error
+
+A refused control-plane request returns a `*thalovant.APIError`, which matches
+`errors.Is(err, thalovant.ErrAPI)`. Its message is one line for display and can
+be shortened, so read what the API said from the error itself:
+
+- `StatusCode`: the HTTP status.
+- `Code`: the machine-readable code, such as `platform_image_required` or
+  `plan_limit`, or `""`.
+- `ProblemDetail`: the API's whole sentence, exactly as sent, or `""`. `Detail`
+  is the shortened line `Error()` prints.
+- `Problem`: the whole error body as a `map[string]any` when it is a JSON
+  object, or `nil`. Every structured field the API sends is here, including
+  ones added after this SDK was released. Numbers are `float64`, as anywhere
+  `encoding/json` decodes into a map.
+
+```go
+_, err := control.ReleaseRuntimeGroup(ctx, groupID, thalovant.ReleaseOptions{
+	Images: map[string]string{"core": "docker.io/me/ovos-core:dev"},
+})
+var apiErr *thalovant.APIError
+if errors.As(err, &apiErr) {
+	switch apiErr.Code {
+	case "platform_image_required":
+		fmt.Println(apiErr.ProblemDetail)
+		fmt.Println(apiErr.Problem["allowed_images"])       // per image key
+		fmt.Println(apiErr.Problem["allowed_repositories"]) // any tag or digest of these
+	case "plan_limit":
+		fmt.Println(apiErr.Problem["resource"], apiErr.Problem["used"], apiErr.Problem["limit"])
+	}
+}
+```
+
+A value the body echoes back from your request (a validation error repeats
+what it was sent) is only ever in `Problem`, never in `Error()` or `Detail`.
 
 ## API Shape
 
@@ -998,7 +1036,7 @@ the dashboard for per-plan limits and reset times. See also
 - `control.CreateHub(ctx, payload, HubCreateOptions{IdempotencyKey: ...})`
 - `control.UpdateHub(ctx, hubID, payload, etag)`
 - `control.DeleteHub(ctx, hubID, etag)`
-- `control.ReleaseHub(ctx, hubID, ReleaseOptions{Channel: ..., Mode: ..., Version: ..., Images: ..., Reason: ...})` — `Images` must be platform images unless you are a platform administrator; anything else is refused with HTTP 403 `platform_image_required`
+- `control.ReleaseHub(ctx, hubID, ReleaseOptions{Channel: ..., Mode: ..., Version: ..., Images: ..., Reason: ...})` — unless you are a platform administrator, each image must be a catalog pin of the stable or alpha channel, the hub's current, recommended or release-policy image, the platform's default image, or for `listener` any tag or digest of `ghcr.io/thalovant/hivemind-listener`; anything else is refused with HTTP 403 `platform_image_required`, whose `*APIError` lists the images allowed instead (see [Reading An API Error](#reading-an-api-error))
 - `control.SetHubRating(ctx, hubID, rating)`
 - `control.ClearHubRating(ctx, hubID)`
 - `control.GetHubRuntimeCapabilities(ctx, hubID)`
@@ -1008,7 +1046,7 @@ the dashboard for per-plan limits and reset times. See also
 - `control.UpdateRuntimeGroup(ctx, runtimeGroupID, payload)`
 - `control.GetRuntimeGroupConfig(ctx, runtimeGroupID)`
 - `control.UpdateRuntimeGroupConfig(ctx, runtimeGroupID, config, RuntimeGroupConfigOptions{Personas: ...})`
-- `control.ReleaseRuntimeGroup(ctx, runtimeGroupID, ReleaseOptions{...})`
+- `control.ReleaseRuntimeGroup(ctx, runtimeGroupID, ReleaseOptions{...})` — the same rule for `Images`, except that `core` accepts any tag or digest of `ghcr.io/thalovant/ovos-core` and `bus` only the images the platform releases for it
 - `control.DeleteRuntimeGroup(ctx, runtimeGroupID)`
 - `control.InstallRuntimeGroupSkill(ctx, runtimeGroupID, skillID, RuntimeGroupSkillInstallOptions{MarketplaceSkillID: ..., SourceType: ..., SourceRef: ..., VersionPin: ..., Active: ...})`
 - `control.UninstallRuntimeGroupSkill(ctx, runtimeGroupID, skillID)`
