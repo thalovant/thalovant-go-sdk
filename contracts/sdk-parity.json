@@ -1,5 +1,21 @@
 {
   "capabilities": {
+    "api-errors": {
+      "implementation": {
+        "control.go": "e53105e67f409e8d96fed77b5fdd8b27708c9e3b0f846e6e38f653cfe89c99ca",
+        "errors.go": "e0db797fd317554186d80ba9d67e8fc0f12955ed286408412518fb75444b0a5a"
+      },
+      "reason": "apiErrorFromResponse() in control.go builds every non-2xx control-plane error from one decode of the body, and problemFields() in errors.go reads APIError.Code and ProblemDetail out of it beside the whole body as Problem; StatusCode, Detail and Error() are unchanged. Run against the shared api-error vectors, each served by a loopback httptest server and read back through GetHub, the configuration-merge read and the device-flow token poll, with what GetHub produced recorded.",
+      "status": "required",
+      "tests": {
+        "api_error_vectors_test.go": "e9e77c1286fb59bab2d25857d7f46d598100707efdd5f9ec93d2c4013a43c0c9",
+        "conformance_record_test.go": "e31df0b8dd216e750764df20938252bc2cdbc64a7ec061d60e58742fb32c1bbc",
+        "testdata/api-error-vectors.json": "f0d2d8e6e153811f071dac6e0611f00f3c32ed772b751ccccb31904d7dc936ec"
+      },
+      "vectors": {
+        "api-error-vectors.json": "testdata/api-error-vectors.json"
+      }
+    },
     "binary": {
       "implementation": {
         "hive.go": "def23f2bf2bd0dd8907de62ca913b94edb85d70c026a3f9a2a67d9685eebd1c3",
@@ -23,7 +39,7 @@
     },
     "control": {
       "implementation": {
-        "control.go": "1cf985fbc238cf74fa3352da1e4fb7cbbcdb5a84dfe263df81775c16fc8e2acf",
+        "control.go": "e53105e67f409e8d96fed77b5fdd8b27708c9e3b0f846e6e38f653cfe89c99ca",
         "hub_skills.go": "fedcdfea962817ada46bc8281e4c70458187e2cf80b1081203e33fdd4048fa20",
         "hubs.go": "52433966442f363e691a12d973dfb3df9fdffd75fc8c3772f8fb91b937293a34",
         "native_auth.go": "59bba6733ed0aa40d90fcd6ac2136bf83c247686503f7aa24d02bd9c3a0af078"
@@ -112,7 +128,7 @@
     "refusal": {
       "implementation": {
         "client.go": "89f8df3b19a9140b473e7ab999543aa8b5fff6c9a70af865794c21321cfb6b4a",
-        "errors.go": "f87b6060fcf0c4a65ac11ee07ecc540031bbff5263a5859664d34f15ce1b8f96"
+        "errors.go": "e0db797fd317554186d80ba9d67e8fc0f12955ed286408412518fb75444b0a5a"
       },
       "reason": "refusalBelongsToAsk() and failureError() in errors.go, used by AskWithOptions() in client.go, which counts asks, queries and fire-and-forget utterances inside the shared grace window -- recorded immediately before the publish and kept when the publish errors, since the transport can fail after the hub holds the frame. PolicyDeniedError carries Quota and UnansweredError is new, both still errors.Is ErrRuntime. Run against the shared refusal vectors, decoded as map[string]any so numbers arrive as float64, plus five end-to-end asks.",
       "status": "required",
@@ -166,7 +182,8 @@
     "6f5f697b07eb86da6877faf8aa27138430f886495ac965d08a28fba780e411cd",
     "2377330566e575bb3fda77998d943667bf0795940f9d569a5b8bc7f4f0e5e486",
     "76bc1eb9957da5a6fdf03e89f3905f8d37d3ef2fe7c841ba751718105ca30a45",
-    "34a21f2ad875b220a571613e25b6a6e5f3d8de1a776f4949a7ab63ba93e07b16"
+    "34a21f2ad875b220a571613e25b6a6e5f3d8de1a776f4949a7ab63ba93e07b16",
+    "f79d99e9acd2fe299e3b313102541e47b366751defe5fa0dcfa44053aa7f007d"
   ],
   "schema_version": 1
 }

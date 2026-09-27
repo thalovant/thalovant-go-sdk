@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 )
 
 var (
@@ -273,13 +274,101 @@ func refusalBelongsToAsk(requestID, ownRequestID, deniedType string, asksInFligh
 // name it (untracked_grace_seconds), so every SDK uses the same window.
 const untrackedUtteranceGrace = 10 * time.Second
 
-// APIError preserves the HTTP status while continuing to match ErrAPI.
+// APIError is a control-plane request the API answered with an error status.
+// It preserves the HTTP status while continuing to match ErrAPI.
+//
+// Error() prints one bounded line for display, and that line can be
+// shortened, so it is never where to read what the API said. That rides
+// beside it: Code to branch on, ProblemDetail for the API's whole sentence,
+// and Problem for every structured field of the body.
+//
+//	var apiErr *thalovant.APIError
+//	if errors.As(err, &apiErr) && apiErr.Code == "platform_image_required" {
+//		fmt.Println(apiErr.ProblemDetail)
+//		fmt.Println(apiErr.Problem["allowed_images"])
+//	}
+//
+// An APIError built as a literal with only StatusCode and Detail reads and
+// prints exactly as it always did, with the other fields empty.
 type APIError struct {
+	// StatusCode is the HTTP status the API answered with.
 	StatusCode int
-	Detail     string
+	// Detail is the single line Error() prints: the body's own message
+	// fields joined, whitespace-collapsed and cut at 256 runes, or a stand-in
+	// such as "(no response body)" or "(server error response omitted)". It
+	// never carries a value the body echoed back from the request.
+	Detail string
+	// Code is the body's machine-readable code, such as
+	// "platform_image_required" or "plan_limit", exactly as sent; "" when the
+	// body has none. It is read from the body's "code" member, or from inside
+	// a "detail" member that is itself an object (FastAPI's own envelope), and
+	// a code that is not a string or is only whitespace is no code.
+	Code string
+	// ProblemDetail is the API's whole sentence, exactly as sent: never
+	// trimmed, collapsed or shortened, unlike Detail. It is read the same way
+	// as Code, from the body's "detail" member; "" when the body has none.
+	ProblemDetail string
+	// Problem is the whole error body decoded, when it is a JSON object: the
+	// Problem+JSON document every API refusal is. A structured field is
+	// reachable here without a new SDK release: refused_images,
+	// allowed_images and allowed_repositories on platform_image_required;
+	// resource, limit, used and plan on plan_limit. Numbers are float64, as
+	// everywhere encoding/json decodes into map[string]any. nil for a body
+	// that is empty, not JSON, or JSON that is not an object. It can hold
+	// values the body echoed back from the request, which is why Error()
+	// never prints it.
+	Problem map[string]any
 }
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("%v: HTTP %d: %s", ErrAPI, e.StatusCode, e.Detail)
 }
 func (e *APIError) Unwrap() error { return ErrAPI }
+
+// problemFields reads the code and the sentence out of an API error body.
+//
+// Read from the body's own members first. When "detail" is itself an object,
+// it is FastAPI's envelope around a structured refusal -- what the API sends
+// when its Problem+JSON handler has not lifted that object's members to the
+// top -- so the code and the sentence are read from inside it. Nothing is
+// trimmed or shortened: the detail is the whole sentence.
+func problemFields(problem map[string]any) (code string, detail string) {
+	if problem == nil {
+		return "", ""
+	}
+	// Indexing a nil map reads nothing, so a detail that is not an object
+	// simply has no nested members.
+	nested, _ := problem["detail"].(map[string]any)
+	code = problemText(problem["code"])
+	if code == "" {
+		code = problemText(nested["code"])
+	}
+	detail = problemText(problem["detail"])
+	if detail == "" {
+		detail = problemText(nested["detail"])
+	}
+	return code, detail
+}
+
+// problemText is a string with something in it, exactly as sent; anything
+// else -- a number, an object, a blank string -- is absent, which Go spells "".
+func problemText(value any) string {
+	text, ok := value.(string)
+	if !ok {
+		return ""
+	}
+	for _, r := range text {
+		if !problemBlank(r) {
+			return text
+		}
+	}
+	return ""
+}
+
+// problemBlank is the whitespace the reference's str.strip() removes:
+// unicode.IsSpace, plus the four information separators U+001C..U+001F that
+// Python counts as whitespace and Go does not. A code made of those alone is
+// no code in the reference, so it is none here either.
+func problemBlank(r rune) bool {
+	return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f)
+}
