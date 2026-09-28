@@ -474,16 +474,30 @@ func TestConnectionAdmissionVectors(t *testing.T) {
 	}
 }
 
-// closedPort is a loopback port nothing listens on.
-func closedPort(t *testing.T) int {
+// unreachablePort is a loopback port that never answers an HTTP request: it
+// accepts each connection and resets it at once. A closed port would do on
+// Linux and macOS, but Windows retries a refused connect for about two
+// seconds, the whole budget of the case.
+func unreachablePort(t *testing.T) int {
 	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
-	_ = listener.Close()
-	return port
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			if tcp, ok := conn.(*net.TCPConn); ok {
+				_ = tcp.SetLinger(0) // close with a reset, not a FIN
+			}
+			_ = conn.Close()
+		}
+	}()
+	return listener.Addr().(*net.TCPAddr).Port
 }
 
 // placed is a case's value with {api_host} and {api_port} filled in.
@@ -505,7 +519,7 @@ func runAdmissionCase(t *testing.T, api *scriptedAPI, call, expect map[string]an
 	t.Helper()
 	apiURL := api.server.URL
 	if call["api"] == "unreachable" {
-		apiURL = fmt.Sprintf("http://127.0.0.1:%d", closedPort(t))
+		apiURL = fmt.Sprintf("http://127.0.0.1:%d", unreachablePort(t))
 	}
 	host, port, err := net.SplitHostPort(strings.TrimPrefix(api.server.URL, "http://"))
 	if err != nil {

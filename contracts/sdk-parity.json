@@ -48,7 +48,7 @@
       "tests": {
         "conformance_record_test.go": "a12d62d75c6a8f6ff7f606d9941bc7e81fe1658d95b6547b9934f4437b970db5",
         "home_link_test.go": "8cfcc1c82403e0ebe2c78c0c4cc8cb34cf5b62d5453228568a9d3bb1c99bbb1d",
-        "home_link_vectors_test.go": "53b68ec88ee83af0a81e87b0a8f696281b287235eaa9818e41e6d614a48f4a0a",
+        "home_link_vectors_test.go": "b6278a991bdace04cae7d4114f3bd8e23828bbb20cde0b65ad0cd44b0d623db2",
         "testdata/connection-admission-vectors.json": "41eb4a83835bd50390d000fa7396b7067dafa24f3023b34985e6b254cf5fc259"
       },
       "vectors": {
@@ -66,7 +66,7 @@
       "tests": {
         "api_error_vectors_test.go": "e9e77c1286fb59bab2d25857d7f46d598100707efdd5f9ec93d2c4013a43c0c9",
         "conformance_record_test.go": "a12d62d75c6a8f6ff7f606d9941bc7e81fe1658d95b6547b9934f4437b970db5",
-        "home_link_vectors_test.go": "53b68ec88ee83af0a81e87b0a8f696281b287235eaa9818e41e6d614a48f4a0a",
+        "home_link_vectors_test.go": "b6278a991bdace04cae7d4114f3bd8e23828bbb20cde0b65ad0cd44b0d623db2",
         "testdata/connection-kinds-vectors.json": "2baef508194472279ff2446105a1408e381b2f9e4bfc03e5f96d9c6529ddf604"
       },
       "vectors": {
@@ -116,7 +116,7 @@
       "tests": {
         "api_error_vectors_test.go": "e9e77c1286fb59bab2d25857d7f46d598100707efdd5f9ec93d2c4013a43c0c9",
         "conformance_record_test.go": "a12d62d75c6a8f6ff7f606d9941bc7e81fe1658d95b6547b9934f4437b970db5",
-        "home_link_vectors_test.go": "53b68ec88ee83af0a81e87b0a8f696281b287235eaa9818e41e6d614a48f4a0a",
+        "home_link_vectors_test.go": "b6278a991bdace04cae7d4114f3bd8e23828bbb20cde0b65ad0cd44b0d623db2",
         "testdata/device-login-vectors.json": "8a2257cd80b5d2dfa9553420b51617c697b1ad4e6af60ba83e980e1731fa7854"
       },
       "vectors": {
@@ -138,7 +138,7 @@
       "tests": {
         "conformance_record_test.go": "a12d62d75c6a8f6ff7f606d9941bc7e81fe1658d95b6547b9934f4437b970db5",
         "home_link_test.go": "8cfcc1c82403e0ebe2c78c0c4cc8cb34cf5b62d5453228568a9d3bb1c99bbb1d",
-        "home_link_vectors_test.go": "53b68ec88ee83af0a81e87b0a8f696281b287235eaa9818e41e6d614a48f4a0a",
+        "home_link_vectors_test.go": "b6278a991bdace04cae7d4114f3bd8e23828bbb20cde0b65ad0cd44b0d623db2",
         "link_keeping_vectors_test.go": "aa03e9579c3ac33ea03b0bac7e100fd917342ac834cb091b735f93ab70f3107f",
         "testdata/home-link-vectors.json": "3dc3d38020f3d1b7a2df61d0048fb13685a5361d2dff82710c1e1833cccc576f",
         "testdata/link-keeping-vectors.json": "b3be27131c051c527d7b917dd6d7d24692920a0f59694b1031f009724e3de4bc",
