@@ -51,16 +51,32 @@ func NewMQTTTransport(identity Identity) (*MQTTTransport, error) {
 	}, nil
 }
 
-func (t *MQTTTransport) Connect(ctx context.Context) (err error) {
+// Connect opens the broker session and completes the v3 Noise handshake. A KK
+// handshake whose answer does not authenticate is followed at once by one XX
+// handshake inside this connect, since only XX tells a changed password
+// (ErrHubRefused) from a changed hub key (ErrHubKeyChanged); the XX attempt's
+// outcome is the connect's.
+func (t *MQTTTransport) Connect(ctx context.Context) error {
+	channel, err := t.connectAttempt(ctx, false)
+	if retryKKWithXX(ctx, channel, err) {
+		_, err = t.connectAttempt(ctx, true)
+	}
+	return err
+}
+
+// connectAttempt is one connect: a fresh broker session and one handshake,
+// with XX forced when forceXX is set. It returns the Noise channel it used, if
+// it got as far as making one.
+func (t *MQTTTransport) connectAttempt(ctx context.Context, forceXX bool) (channel *noiseChannel, err error) {
 	ctx, cancelConnect := context.WithTimeout(ctx, 20*time.Second)
 	defer cancelConnect()
 	if err := t.lifecycleMu.Lock(ctx); err != nil {
-		return fmt.Errorf("%w: %w", ErrTimeout, err)
+		return channel, fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	defer t.lifecycleMu.Unlock()
 	health := t.Healthcheck()
 	if health.Connected && health.HandshakeComplete {
-		return nil
+		return channel, nil
 	}
 	t.closeClient()
 	t.beginConnection()
@@ -73,21 +89,21 @@ func (t *MQTTTransport) Connect(ctx context.Context) (err error) {
 	if t.Identity.MQTT == nil {
 		err := fmt.Errorf("%w: identity does not include MQTT broker credentials", ErrProtocol)
 		t.failConnection(err)
-		return err
+		return channel, err
 	}
 	if t.Identity.Password == "" {
-		return fmt.Errorf("%w: v3 Noise requires the identity password", ErrIdentity)
+		return channel, fmt.Errorf("%w: v3 Noise requires the identity password", ErrIdentity)
 	}
 	// TLS protects broker credentials; Noise protects the end-to-end hub session.
 	if !t.Identity.MQTT.TLS {
 		err := fmt.Errorf("%w: refusing to connect to an MQTT broker without TLS. Use an mqtts:// endpoint, or set tls: true on the identity's mqtt block", ErrConnection)
 		t.failConnection(err)
-		return err
+		return channel, err
 	}
 	brokerURL, err := pahoBrokerURL(t.Identity.MQTT.Endpoint, t.Identity.MQTT.TLS)
 	if err != nil {
 		t.failConnection(err)
-		return err
+		return channel, err
 	}
 	opts := mqtt.NewClientOptions()
 	opts.AddBroker(brokerURL)
@@ -132,7 +148,7 @@ func (t *MQTTTransport) Connect(ctx context.Context) (err error) {
 		}
 	})
 	client := mqtt.NewClient(opts)
-	channel := &noiseChannel{identity: t.Identity, stateDir: t.NoiseStateDir, write: func(ctx context.Context, raw []byte, _ bool) error {
+	channel = &noiseChannel{identity: t.Identity, stateDir: t.NoiseStateDir, forceXX: forceXX, write: func(ctx context.Context, raw []byte, _ bool) error {
 		return waitMQTTToken(ctx, client.Publish(t.Topics.Inbound, t.Identity.MQTT.QOS, false, raw), "MQTT publish")
 	}}
 	t.mu.Lock()
@@ -141,7 +157,7 @@ func (t *MQTTTransport) Connect(ctx context.Context) (err error) {
 	t.mu.Unlock()
 	if err := waitMQTTToken(ctx, client.Connect(), "MQTT connect"); err != nil {
 		t.failConnection(err)
-		return err
+		return channel, err
 	}
 	t.mu.Lock()
 	t.connected = true
@@ -151,41 +167,41 @@ func (t *MQTTTransport) Connect(ctx context.Context) (err error) {
 	t.mu.Unlock()
 	if err := waitMQTTToken(ctx, client.Subscribe(t.Topics.Outbound, t.Identity.MQTT.QOS, nil), "MQTT subscribe"); err != nil {
 		t.failConnection(err)
-		return err
+		return channel, err
 	}
 	if err := waitMQTTToken(ctx, client.Publish(t.Topics.Status, 1, true, "online"), "MQTT status publish"); err != nil {
 		t.failConnection(err)
-		return err
+		return channel, err
 	}
 	// A cleartext HELLO creates the server-side MQTT peer and triggers its
 	// HELLO/offer. Application messages remain blocked until Noise is complete.
 	initial, err := json.Marshal(helloHiveMessage(t.Identity, "thalovant-go-mqtt-"))
 	if err != nil {
-		return err
+		return channel, err
 	}
 	if err := channel.write(ctx, initial, false); err != nil {
 		t.failConnection(err)
-		return err
+		return channel, err
 	}
 	timer := time.NewTimer(20 * time.Second)
 	defer timer.Stop()
 	select {
 	case <-ready:
 		t.completeConnection()
-		return nil
+		return channel, nil
 	case <-failed:
 		t.mu.RLock()
 		err := t.lastError
 		t.mu.RUnlock()
-		return err
+		return channel, err
 	case <-ctx.Done():
 		err := fmt.Errorf("%w: %v", ErrTimeout, ctx.Err())
 		t.failConnection(err)
-		return err
+		return channel, err
 	case <-timer.C:
 		err := fmt.Errorf("%w: HiveMind MQTT handshake timed out", ErrTimeout)
 		t.failConnection(err)
-		return err
+		return channel, err
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -22,6 +23,30 @@ type noiseChannel struct {
 	session   *noiseSession
 	failed    bool
 	write     func(context.Context, []byte, bool) error
+	// forceXX makes this channel choose XX whatever is pinned: the KK attempt
+	// before it failed, and only XX tells a changed password from a changed
+	// hub key. pattern is what the channel chose.
+	forceXX bool
+	pattern string
+}
+
+// triedKK reports whether this channel's handshake was a KK attempt.
+func (n *noiseChannel) triedKK() bool {
+	if n == nil {
+		return false
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.pattern == noisePatternKK
+}
+
+// retryKKWithXX reports whether a connect that failed with err should make
+// its one XX attempt at once: the channel tried KK and the hub refused it, or
+// its answer did not authenticate. It is no downgrade -- the pinned key is
+// still checked when XX completes, so a hub that is not the pinned one still
+// fails, as ErrHubKeyChanged.
+func retryKKWithXX(ctx context.Context, channel *noiseChannel, err error) bool {
+	return err != nil && ctx.Err() == nil && errors.Is(err, ErrHubRefused) && channel.triedKK()
 }
 
 func (n *noiseChannel) remoteKey() string {
@@ -148,10 +173,16 @@ func (n *noiseChannel) start(ctx context.Context, offer, params map[string]any) 
 	if err != nil {
 		return err
 	}
-	pattern, suite, ok := selectNoiseOptions(stringSlice(params["patterns"]), stringSlice(params["suites"]), pinned)
+	choosing := pinned
+	if n.forceXX {
+		// The pin still decides the outcome: it is checked when XX completes.
+		choosing = ""
+	}
+	pattern, suite, ok := selectNoiseOptions(stringSlice(params["patterns"]), stringSlice(params["suites"]), choosing)
 	if !ok {
 		return fmt.Errorf("%w: no supported Noise pattern and suite", ErrConnection)
 	}
+	n.pattern = pattern
 	prologue, err := buildPrologue(n.hello, offer, noiseProtocolName(pattern, suite))
 	if err != nil {
 		return err

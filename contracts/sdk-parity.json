@@ -19,7 +19,7 @@
     "binary": {
       "implementation": {
         "hive.go": "def23f2bf2bd0dd8907de62ca913b94edb85d70c026a3f9a2a67d9685eebd1c3",
-        "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4",
+        "transport.go": "d83d17a904b00ca0de29859ddbc4d055775b9883d0ec20d7d1f51e7269d6f492",
         "wire.go": "99e462abd91a540571e0467e458d05dab75dbed38e14cbc146b1b6d7949bf0dd"
       },
       "reason": "DecodeHiveBinaryFrame branches on BINARY: four bits of payload type, then the clip itself, never parsed or inflated. ListenBinary delivers it. Run against the shared binary vectors and against binary-frames.json, which is hivemind-bus-client's own encoder output rather than frames this SDK built for itself.",
@@ -130,19 +130,21 @@
         "noise_store.go": "7e241a9e43cfb13587dcecde0b04258ddc765e88b48c886be2a9979219f5159a",
         "rich.go": "c92c7bc4e0c5b644822b24fc30b67e1ebd91f46858427d368cac01ed1427e613",
         "session.go": "4c220dd5092299e0ef350f168e86ec768a4879c31d9e30f2fd8d85c1ef759a96",
-        "transport_noise.go": "e9575c071f87e264b082acb64032f7a72a70036b6b645f0f3d842a3213f4aab8",
+        "transport.go": "d83d17a904b00ca0de29859ddbc4d055775b9883d0ec20d7d1f51e7269d6f492",
+        "transport_mqtt.go": "5aae55cc12284cea81c8194774dcd875445fda59682430ac258b09ce881b3737",
+        "transport_noise.go": "f2dd6d1724fa3f946be7317aa0d4c2acc14aee35eb698781cfa852ea27fc03db",
         "transport_wss.go": "8111063cce30921f70d3757126bf3b77c7a3191e6c3fe79f606aee32f694ecdf"
       },
-      "reason": "home.go: HomeRequest, HomeAnswer, HomeResponse, PlainSpeech and DecodeReferences (real tags only, via rich.go's StripSSML; numeric references, the XML five and &nbsp;; Unicode White_Space), AnswerHomeRequest and AnswerHomeRequests. The hub's 10 s run from arrival: the handler gets its 9 s or what is left, on its own goroutine, and the answer goes out at the deadline whatever the handler does; the reply gets what the handler left, is never started after the bound, and is withdrawn when it passes. client.go: Client.Reply and ReplyContext, built from the context as the hub sent it; a destination with no source gets no destination. session.go: HubSession.On, OnStateChange, Reply, Connect and Run, and LinkSupervisor, the pure decision Run follows after every attempt (drop: at once; failure: the ladder; refusal: the ladder through a 600 s grace; changed key: stop). transport_wss.go: closeRefuses, the pure close rule (1000/1005/1008 during the handshake or within 750 ms after it, a code up to 250 ms late), a handshake answer that does not authenticate is a refusal, a 401/403 upgrade is a refusal, and a failed KK is followed at once by one XX in the same connect. noise_store.go: a pin mismatch is ErrHubKeyChanged, never a refusal; transport_noise.go reads a failed HTTP/MQTT handshake as a refusal the same way. Run against the shared home-link vectors and link-keeping vectors: the close and supervise cases through the pure functions, the handshake cases over real WSS Noise against a loopback hub that records the patterns it saw.",
+      "reason": "home.go: HomeRequest, HomeAnswer, HomeResponse, PlainSpeech and DecodeReferences (real tags only, via rich.go's StripSSML; numeric references, the XML five and &nbsp;; Unicode White_Space), AnswerHomeRequest and AnswerHomeRequests. The hub's 10 s run from arrival: the handler gets its 9 s or what is left, on its own goroutine, and the answer goes out at the deadline whatever the handler does; the reply gets what the handler left, is never started after the bound, and is withdrawn when it passes. client.go: Client.Reply and ReplyContext, built from the context as the hub sent it; a destination with no source gets no destination. session.go: HubSession.On, OnStateChange, Reply, Connect and Run, and LinkSupervisor, the pure decision Run follows after every attempt (drop: at once; failure: the ladder; refusal: the ladder through a 600 s grace; changed key: stop). transport_wss.go: closeRefuses, the pure close rule (1000/1005/1008 during the handshake or within 750 ms after it, a code up to 250 ms late), a handshake answer that does not authenticate is a refusal, a 401/403 upgrade is a refusal, and a failed KK is followed at once by one XX in the same connect -- as it is over HTTP (transport.go) and MQTT (transport_mqtt.go), through the shared noiseChannel in transport_noise.go, which reads a failed handshake as a refusal the same way. noise_store.go: a pin mismatch is ErrHubKeyChanged, never a refusal. Run against the shared home-link vectors and link-keeping vectors: the close and supervise cases through the pure functions, the handshake cases over real WSS Noise against a loopback hub that records the patterns it saw.",
       "status": "required",
       "tests": {
         "conformance_record_test.go": "a12d62d75c6a8f6ff7f606d9941bc7e81fe1658d95b6547b9934f4437b970db5",
         "home_link_test.go": "8cfcc1c82403e0ebe2c78c0c4cc8cb34cf5b62d5453228568a9d3bb1c99bbb1d",
         "home_link_vectors_test.go": "b6278a991bdace04cae7d4114f3bd8e23828bbb20cde0b65ad0cd44b0d623db2",
-        "link_keeping_vectors_test.go": "aa03e9579c3ac33ea03b0bac7e100fd917342ac834cb091b735f93ab70f3107f",
+        "link_keeping_vectors_test.go": "705ccf67151dea5f9472ddc803c720537fb1b33df6e665d2f746ceef2e8dc4c8",
         "testdata/home-link-vectors.json": "3dc3d38020f3d1b7a2df61d0048fb13685a5361d2dff82710c1e1833cccc576f",
         "testdata/link-keeping-vectors.json": "b3be27131c051c527d7b917dd6d7d24692920a0f59694b1031f009724e3de4bc",
-        "transport_noise_test.go": "73da3589603a984c4412267df1450da1596673e494ace019be543a44b8dfa0cc"
+        "transport_noise_test.go": "7dc819072fee711b898a375dac1182868efc218dedb77e74af3573f3d7663ec9"
       },
       "vectors": {
         "home-link-vectors.json": "testdata/home-link-vectors.json",
@@ -193,7 +195,7 @@
     "mesh": {
       "implementation": {
         "hive.go": "def23f2bf2bd0dd8907de62ca913b94edb85d70c026a3f9a2a67d9685eebd1c3",
-        "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4"
+        "transport.go": "d83d17a904b00ca0de29859ddbc4d055775b9883d0ec20d7d1f51e7269d6f492"
       },
       "reason": "ListenHive over the five hive kinds, and Propagate/Escalate/Broadcast. The kinds used to fall off the end of dispatchNoiseMessage with no case and no log line. Run against the shared mesh vectors.",
       "status": "required",
@@ -225,8 +227,8 @@
       "implementation": {
         "client.go": "0b16c3ac67bc005cde50cacc76650c14c26b66cfecf392fbd4addacbe8100e4c",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc",
-        "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4",
-        "transport_noise.go": "e9575c071f87e264b082acb64032f7a72a70036b6b645f0f3d842a3213f4aab8"
+        "transport.go": "d83d17a904b00ca0de29859ddbc4d055775b9883d0ec20d7d1f51e7269d6f492",
+        "transport_noise.go": "f2dd6d1724fa3f946be7317aa0d4c2acc14aee35eb698781cfa852ea27fc03db"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs.",
       "status": "required",
@@ -235,7 +237,7 @@
         "reply_deadline_test.go": "1ffc64edc55e7cd2a0d71b4d11cddd464f445c51c530eea01f10cf7f11d4cdab",
         "runtime_parity_test.go": "ae735757282afa9070143663ce0e266b6f660a411f4afd9cfcadede04425b324",
         "testdata/reply-claim-vectors.json": "45f2731589e612d5a849376d94073c57b0fef426a92e1d065c58c48442b1ffdc",
-        "transport_noise_test.go": "73da3589603a984c4412267df1450da1596673e494ace019be543a44b8dfa0cc"
+        "transport_noise_test.go": "7dc819072fee711b898a375dac1182868efc218dedb77e74af3573f3d7663ec9"
       },
       "vectors": {
         "reply-claim-vectors.json": "testdata/reply-claim-vectors.json"

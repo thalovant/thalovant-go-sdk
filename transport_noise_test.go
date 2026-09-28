@@ -39,6 +39,9 @@ type transportResponder struct {
 	binary     []string
 	helloCount int
 	patterns   []string
+	// corrupt names the patterns whose answer this responder spoils, so the
+	// client cannot authenticate it: a hub whose answer fails verification.
+	corrupt map[string]bool
 }
 
 func newTransportResponder(t *testing.T) *transportResponder {
@@ -146,6 +149,9 @@ func (s *transportResponder) receive(raw []byte, binary bool) error {
 		reply, err := s.handshake.writeMessage(nil)
 		if err != nil {
 			return err
+		}
+		if s.corrupt[pattern] {
+			reply[len(reply)-1] ^= 1
 		}
 		s.plain = append(s.plain, marshalHive("shake", map[string]any{"noise": map[string]any{"msg": hex.EncodeToString(reply)}}))
 	} else {

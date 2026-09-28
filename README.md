@@ -1205,11 +1205,11 @@ A refusal is any of these:
   750 ms after it (`WithSettle`), which is how a hub that does not know the
   client's key answers.
 
-Any other close is a drop. Over WSS, a KK handshake that fails that way is
-followed at once, inside the same connect, by one XX handshake, because only
-XX tells a changed password (a refusal) from a changed hub key; the pin is
-still checked when XX completes. The HTTP and MQTT transports read a failed
-handshake and a changed key the same way, but make no XX attempt after KK.
+Any other close is a drop. On every transport -- WSS, HTTP and MQTT -- a KK
+handshake that fails that way is followed at once, inside the same connect, by
+one XX handshake, because only XX tells a changed password (a refusal) from a
+changed hub key; the pin is still checked when XX completes, so the retry is
+no downgrade.
 
 `session.On(eventType, handler)` registers a handler for any other event type;
 it keeps working across reconnects. `session.OnStateChange` reports the link

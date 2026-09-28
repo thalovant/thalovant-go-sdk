@@ -121,27 +121,43 @@ func (t *HTTPTransport) Authorization() string {
 	return base64.StdEncoding.EncodeToString([]byte(t.UserAgent + ":" + t.Identity.AccessKey))
 }
 
-func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
+// Connect opens the HTTP session and completes the v3 Noise handshake. A KK
+// handshake the hub refuses, or whose answer does not authenticate, is
+// followed at once by one XX handshake inside this connect, since only XX
+// tells a changed password (ErrHubRefused) from a changed hub key
+// (ErrHubKeyChanged); the XX attempt's outcome is the connect's.
+func (t *HTTPTransport) Connect(ctx context.Context) error {
+	channel, err := t.connectAttempt(ctx, false)
+	if retryKKWithXX(ctx, channel, err) {
+		_, err = t.connectAttempt(ctx, true)
+	}
+	return err
+}
+
+// connectAttempt is one connect: a fresh session and one handshake, with XX
+// forced when forceXX is set. It returns the Noise channel it used, if it got
+// as far as making one.
+func (t *HTTPTransport) connectAttempt(ctx context.Context, forceXX bool) (channel *noiseChannel, err error) {
 	ctx, cancelConnect := context.WithTimeout(ctx, 20*time.Second)
 	defer cancelConnect()
 	if err := t.lifecycleMu.Lock(ctx); err != nil {
-		return fmt.Errorf("%w: %w", ErrTimeout, err)
+		return channel, fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	defer t.lifecycleMu.Unlock()
 	// Join any manually driven poll before deciding this session is reusable.
 	if err := t.pollMu.Lock(ctx); err != nil {
-		return fmt.Errorf("%w: %w", ErrTimeout, err)
+		return channel, fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	health := t.Healthcheck()
 	t.pollMu.Unlock()
 	if health.Connected && health.HandshakeComplete {
-		return nil
+		return channel, nil
 	}
 	if err := t.stopPolling(ctx); err != nil {
-		return err
+		return channel, err
 	}
 	if err := t.pollMu.Lock(ctx); err != nil {
-		return fmt.Errorf("%w: %w", ErrTimeout, err)
+		return channel, fmt.Errorf("%w: %w", ErrTimeout, err)
 	}
 	defer t.pollMu.Unlock()
 	t.mu.Lock()
@@ -155,7 +171,7 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 		cancel()
 		if cleanupErr != nil {
 			t.failConnection(cleanupErr)
-			return cleanupErr
+			return channel, cleanupErr
 		}
 		t.mu.Lock()
 		t.admitted = false
@@ -169,10 +185,10 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 		}
 	}()
 	if err = requireTLSEndpoint(t.BaseURL()); err != nil {
-		return err
+		return channel, err
 	}
 	if t.Identity.Password == "" {
-		return fmt.Errorf("%w: v3 Noise requires the identity password", ErrIdentity)
+		return channel, fmt.Errorf("%w: v3 Noise requires the identity password", ErrIdentity)
 	}
 	client := t.HTTPClient
 	if client == nil {
@@ -187,17 +203,18 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 	if copyClient.Jar == nil {
 		copyClient.Jar, err = cookiejar.New(nil)
 		if err != nil {
-			return err
+			return channel, err
 		}
 	}
 	t.HTTPClient = &copyClient
+	channel = &noiseChannel{identity: t.Identity, stateDir: t.NoiseStateDir, write: t.writeFrame, forceXX: forceXX}
 	t.mu.Lock()
-	t.noise = &noiseChannel{identity: t.Identity, stateDir: t.NoiseStateDir, write: t.writeFrame}
+	t.noise = channel
 	t.mu.Unlock()
 	handshakeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	if _, err = t.request(handshakeCtx, http.MethodPost, "/connect", nil); err != nil {
-		return err
+		return channel, err
 	}
 	t.mu.Lock()
 	t.connected = true
@@ -218,14 +235,14 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 	}()
 	for !t.IsHandshakeComplete() {
 		if err = t.pollOnceLocked(handshakeCtx); err != nil {
-			return err
+			return channel, err
 		}
 		if t.IsHandshakeComplete() {
 			break
 		}
 		select {
 		case <-handshakeCtx.Done():
-			return fmt.Errorf("%w: HiveMind HTTP Noise handshake timed out", ErrTimeout)
+			return channel, fmt.Errorf("%w: HiveMind HTTP Noise handshake timed out", ErrTimeout)
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
@@ -234,7 +251,7 @@ func (t *HTTPTransport) Connect(ctx context.Context) (err error) {
 	t.cancelPolling = pollCancel
 	t.pollDone = make(chan struct{})
 	go func(done chan struct{}) { defer close(done); t.pollLoop(pollCtx) }(t.pollDone)
-	return nil
+	return channel, nil
 }
 
 // stopPolling joins the old reader before replacing a channel, preventing a

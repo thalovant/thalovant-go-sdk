@@ -11,6 +11,8 @@ package thalovant
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -358,5 +360,102 @@ func TestRunStopsAtOnceWhenTheHubKeyChanged(t *testing.T) {
 	}
 	if seen := hub.seen(); attempts != 1 || fmt.Sprint(seen[len(seen)-2:]) != "[KKpsk0 XXpsk2]" {
 		t.Fatalf("%d attempts, patterns %v", attempts, seen)
+	}
+}
+
+// A KK answer that does not authenticate is followed at once by one XX
+// attempt on every transport, not just WSS. Over HTTP polling:
+func TestHTTPRetriesAFailedKKWithXXOnce(t *testing.T) {
+	fixture := newHTTPNoiseFixture(t)
+	transport := fixture.transport(t)
+	if err := transport.Connect(context.Background()); err != nil { // first contact pins over XX
+		t.Fatal(err)
+	}
+	if err := transport.Disconnect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fixture.mu.Lock()
+	fixture.responder.corrupt = map[string]bool{noisePatternKK: true}
+	fixture.mu.Unlock()
+	if err := transport.Connect(context.Background()); err != nil {
+		t.Fatalf("a spoiled KK answer was not followed by XX: %v", err)
+	}
+	if err := transport.Disconnect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fixture.mu.Lock()
+	fixture.responder.corrupt = map[string]bool{noisePatternKK: true, noisePatternXX: true}
+	fixture.mu.Unlock()
+	if err := transport.Connect(context.Background()); !errors.Is(err, ErrHubRefused) {
+		t.Fatalf("an XX answer that does not authenticate = %v, want the refusal", err)
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if got := fmt.Sprint(fixture.responder.patterns); got != "[XXpsk2 KKpsk0 XXpsk2 KKpsk0 XXpsk2]" {
+		t.Fatalf("patterns %s: want XX once after each failed KK, and never twice", got)
+	}
+}
+
+// Over MQTT, against a loopback TLS broker:
+func TestMQTTRetriesAFailedKKWithXXOnce(t *testing.T) {
+	certificateServer := httptest.NewTLSServer(http.NotFoundHandler())
+	defer certificateServer.Close()
+	listener, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: certificateServer.TLS.Certificates, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	roots := x509.NewCertPool()
+	roots.AddCert(certificateServer.Certificate())
+	identity := Identity{AccessKey: "test-access", Password: "test-password", MQTT: &MqttBrokerCredentials{Endpoint: "mqtts://" + listener.Addr().String(), Username: "broker-user", Password: "broker-password", TLS: true, QOS: 1, TopicPrefix: "test"}}
+	transport, err := NewMQTTTransport(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport.TLSConfig = &tls.Config{RootCAs: roots, MinVersion: tls.VersionTLS12}
+	transport.NoiseStateDir = t.TempDir()
+	responder := newTransportResponder(t)
+	var brokerMu sync.Mutex
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			brokerMu.Lock()
+			_ = serveNoiseMQTT(conn, responder, transport.Topics)
+			brokerMu.Unlock()
+			_ = conn.Close()
+		}
+	}()
+	connect := func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return transport.Connect(ctx)
+	}
+	if err := connect(); err != nil { // first contact pins over XX
+		t.Fatal(err)
+	}
+	if err := transport.Disconnect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	brokerMu.Lock()
+	responder.corrupt = map[string]bool{noisePatternKK: true}
+	brokerMu.Unlock()
+	if err := connect(); err != nil {
+		t.Fatalf("a spoiled KK answer was not followed by XX: %v", err)
+	}
+	if err := transport.Disconnect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, func() bool {
+		brokerMu.Lock()
+		defer brokerMu.Unlock()
+		return len(responder.patterns) == 3
+	})
+	brokerMu.Lock()
+	defer brokerMu.Unlock()
+	if got := fmt.Sprint(responder.patterns); got != "[XXpsk2 KKpsk0 XXpsk2]" {
+		t.Fatalf("patterns %s", got)
 	}
 }
