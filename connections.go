@@ -68,18 +68,33 @@ func operationFromAny(raw any) *OperationResource {
 
 // refusesConnectionType reports a 422 whose problem is about the connection
 // type: the API does not know the kind yet.
+//
+// Only where the API says what is wrong counts: its detail sentence, and the
+// loc of each entry of a FastAPI validation list. Never the whole body, since
+// a validation error can echo the request back, and the request always
+// carries spec.connection_type -- a 422 about any other spec field would then
+// read as this one.
 func refusesConnectionType(err error) (*APIError, bool) {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnprocessableEntity {
 		return nil, false
 	}
-	text := apiErr.Detail
-	if apiErr.Problem != nil {
-		if encoded, marshalErr := json.Marshal(apiErr.Problem); marshalErr == nil {
-			text = string(encoded)
+	names := func(text string) bool {
+		return strings.Contains(text, "connection_type") || strings.Contains(text, "connectionType")
+	}
+	_, bodyDetail := problemFields(apiErr.Problem)
+	if names(firstNonEmpty(apiErr.ProblemDetail, bodyDetail)) {
+		return apiErr, true
+	}
+	for _, item := range anySlice(apiErr.Problem["detail"]) {
+		entry, _ := item.(map[string]any)
+		for _, part := range anySlice(entry["loc"]) {
+			if text, ok := part.(string); ok && names(text) {
+				return apiErr, true
+			}
 		}
 	}
-	return apiErr, strings.Contains(text, "connection_type") || strings.Contains(text, "connectionType")
+	return apiErr, false
 }
 
 // requireConnectionType deletes a connection the API did not make of the kind

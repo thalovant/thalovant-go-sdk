@@ -544,9 +544,11 @@ func deepCopyValue(value any) any {
 
 // ClosedRefused reports whether the hub closed this client's last connection
 // the way it refuses credentials: a close with no status, 1000, 1005 or 1008.
-// A hub that does not know a client's static key says so only by closing
-// right after the handshake, so a caller that has just connected can tell a
-// refusal from a drop. It is false for a transport that cannot tell.
+// It is only a verdict on the credentials when the close came right after the
+// handshake -- a hub that does not know a client's static key says so only by
+// closing then, and a hub shutting down later closes with 1000 too -- which is
+// how HubSession's settle window reads it. It is false for a transport that
+// cannot tell.
 func (c *Client) ClosedRefused() bool {
 	if refuser, ok := c.Transport.(interface{ ClosedRefused() bool }); ok {
 		return refuser.ClosedRefused()

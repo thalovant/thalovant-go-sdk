@@ -1080,8 +1080,9 @@ result, err := control.CreateClientIdentity(ctx, hub, thalovant.BootstrapIdentit
 	ConnectionType: thalovant.ConnectionTypeHomeAssistant,
 })
 var apiErr *thalovant.APIError
+errors.As(err, &apiErr) // every refusal below carries one
 switch {
-case errors.Is(err, thalovant.ErrAlreadyLinked) && errors.As(err, &apiErr):
+case errors.Is(err, thalovant.ErrAlreadyLinked):
 	return fmt.Errorf("this hub is already linked by %s", apiErr.LinkedClientID())
 case errors.Is(err, thalovant.ErrUnsupportedConnectionType):
 	return err // the API cannot make this kind of connection yet

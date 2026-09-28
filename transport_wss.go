@@ -861,9 +861,12 @@ func refusalClose(err error) bool {
 
 // ClosedRefused reports whether the hub closed the last connection the way it
 // refuses credentials (a close frame with no status, 1000, 1005 or 1008).
-// A hub that does not know a client's static key says so only by closing
-// right after the handshake, so a caller that just connected can tell a
-// refusal from a drop. A new connection attempt clears it.
+// It describes the last close whenever it happened, and it is only a verdict
+// on the credentials when that close came right after the handshake: a hub
+// that does not know a client's static key says so only by closing then,
+// while a hub shutting down hours later closes with 1000 too. HubSession reads
+// it inside its settle window for that reason. A new connection attempt
+// clears it.
 func (t *WSSTransport) ClosedRefused() bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()

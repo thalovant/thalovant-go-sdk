@@ -588,3 +588,26 @@ func TestDeviceGrantNumbersNeverOverflow(t *testing.T) {
 		t.Fatalf("out-of-range numbers read as %s / %s", grant.Interval, grant.ExpiresIn)
 	}
 }
+
+func TestAConnectionTypeRefusalIsReadFromWhereTheAPISaysWhatIsWrong(t *testing.T) {
+	for _, tc := range []struct {
+		problem map[string]any
+		refused bool
+	}{
+		{map[string]any{"detail": "Schema validation failed: 'home_assistant' is not one of [...] at spec.connection_type"}, true},
+		{map[string]any{"detail": []any{map[string]any{"loc": []any{"body", "spec", "connection_type"}, "msg": "Input should be ..."}}}, true},
+		// A 422 about another field that echoes the request, which always
+		// names the connection type, is not about the connection type.
+		{map[string]any{"detail": []any{map[string]any{"loc": []any{"body", "spec", "siteId"}, "msg": "too long",
+			"input": map[string]any{"connection_type": "home_assistant", "siteId": "x"}}}}, false},
+		{map[string]any{"detail": "Name too long", "spec": map[string]any{"connection_type": "home_assistant"}}, false},
+	} {
+		_, refused := refusesConnectionType(&APIError{StatusCode: http.StatusUnprocessableEntity, Problem: tc.problem})
+		if refused != tc.refused {
+			t.Errorf("%v: refused = %v, want %v", tc.problem, refused, tc.refused)
+		}
+	}
+	if _, refused := refusesConnectionType(&APIError{StatusCode: http.StatusBadRequest, ProblemDetail: "connection_type"}); refused {
+		t.Error("a 400 read as a connection-type refusal")
+	}
+}

@@ -39,7 +39,7 @@
     },
     "connection-admission": {
       "implementation": {
-        "connections.go": "259891ac33f7bceee36ded4a10b502dde882e46109217e866714fbcd5f783a72",
+        "connections.go": "681a018c6dca506c33f6a20887bb5a95db9aae7551f79eb296e411e395805eda",
         "control.go": "b5f50fc5ae60f9d05502595e8024aa85dd9e80ef0c2472900cbb578f0b14bbc0",
         "errors.go": "0a001db55894dda74d3b8d9b05f39c4d4658684e80c7a2fa8108b9adb6eb49ea"
       },
@@ -47,7 +47,7 @@
       "status": "required",
       "tests": {
         "conformance_record_test.go": "31f3322b202e3fe9cd265f3e8ad6929b9eaae7c167575deffd8a38e4ff7e8bbf",
-        "home_link_test.go": "d2f6ad65889dbb1b46945e4e22ef5c7430101d35bb4ada0c8899d0d0978d7041",
+        "home_link_test.go": "ee2fa6a2dc5f61cc4182d0a144c045b715a293791c655db3cb793b9b984549b0",
         "home_link_vectors_test.go": "261f730f6b8ab137695d71cb8b8411ee9e08f67af41a8ed21dfad6bcd0b2cbc6",
         "testdata/connection-admission-vectors.json": "d9f7ae3443a66b54e325b9f516f6bf3c6adc414506086d017c3e63496bf790d6"
       },
@@ -57,7 +57,7 @@
     },
     "connection-kinds": {
       "implementation": {
-        "connections.go": "259891ac33f7bceee36ded4a10b502dde882e46109217e866714fbcd5f783a72",
+        "connections.go": "681a018c6dca506c33f6a20887bb5a95db9aae7551f79eb296e411e395805eda",
         "control.go": "b5f50fc5ae60f9d05502595e8024aa85dd9e80ef0c2472900cbb578f0b14bbc0",
         "errors.go": "0a001db55894dda74d3b8d9b05f39c4d4658684e80c7a2fa8108b9adb6eb49ea"
       },
@@ -91,7 +91,7 @@
     },
     "conversation": {
       "implementation": {
-        "client.go": "d572f607cfcd6b15a52afbac62315c179bff2f6bb30bc07255e53349072b41c9",
+        "client.go": "09491ad6a6a609e7a0b5d408eb106ed987610fc05f3d80a3f1040bb93cbe18d0",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc"
       },
       "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
@@ -124,16 +124,16 @@
     },
     "home-link": {
       "implementation": {
-        "client.go": "d572f607cfcd6b15a52afbac62315c179bff2f6bb30bc07255e53349072b41c9",
+        "client.go": "09491ad6a6a609e7a0b5d408eb106ed987610fc05f3d80a3f1040bb93cbe18d0",
         "home.go": "02bde06c35b319096dc99dd2954905089a40798fd38990701c54c89bc94ca116",
         "session.go": "fe85775052c25b1a88acdb5465674f519251c2eee0351a9e0e3edca56797f936",
-        "transport_wss.go": "0e56c8215a91f7f82e44b15fc7a70c1a4de0a3ef16417997938bafe2e1998f72"
+        "transport_wss.go": "2bcd7223bd7bd5fcc1d479bc91f658086116b6e8069ef1f968976f7f12305297"
       },
       "reason": "home.go: HomeRequest, HomeAnswer, HomeResponse, PlainSpeech, AnswerHomeRequest (the handler runs under a context with the 9 s deadline on its own goroutine, so a handler that ignores its context is still answered for in time; an error or a panic is failed_to_handle, the deadline timeout, an answer outside the code sets unknown) and AnswerHomeRequests over any HomeLink. client.go: Client.Reply and ReplyContext, built from the context as the hub sent it (the Go transports deliver the wire context unchanged), deep-copied. session.go: HubSession.On, OnStateChange, Reply, Connect and Run -- handlers outlive a reconnect, the settle window reads a close right after the handshake, and Run keeps the link on the retry ladder with the refusal grace. transport_wss.go records whether the last close was a refusal (no status, 1000, 1005, 1008) and marks an HTTP 401/403 upgrade and a refusal during the handshake with ErrHubRefused. Run against the shared home-link vectors, plus a request answered end to end over a real WSS Noise connection and the settle window against real close codes.",
       "status": "required",
       "tests": {
         "conformance_record_test.go": "31f3322b202e3fe9cd265f3e8ad6929b9eaae7c167575deffd8a38e4ff7e8bbf",
-        "home_link_test.go": "d2f6ad65889dbb1b46945e4e22ef5c7430101d35bb4ada0c8899d0d0978d7041",
+        "home_link_test.go": "ee2fa6a2dc5f61cc4182d0a144c045b715a293791c655db3cb793b9b984549b0",
         "home_link_vectors_test.go": "261f730f6b8ab137695d71cb8b8411ee9e08f67af41a8ed21dfad6bcd0b2cbc6",
         "testdata/home-link-vectors.json": "1fdffb95faea854ed15d4ad27aa495e7372a0827b3dae8f5945c0be4c1bfb0f3"
       },
@@ -200,7 +200,7 @@
     },
     "refusal": {
       "implementation": {
-        "client.go": "d572f607cfcd6b15a52afbac62315c179bff2f6bb30bc07255e53349072b41c9",
+        "client.go": "09491ad6a6a609e7a0b5d408eb106ed987610fc05f3d80a3f1040bb93cbe18d0",
         "errors.go": "0a001db55894dda74d3b8d9b05f39c4d4658684e80c7a2fa8108b9adb6eb49ea"
       },
       "reason": "refusalBelongsToAsk() and failureError() in errors.go, used by AskWithOptions() in client.go, which counts asks, queries and fire-and-forget utterances inside the shared grace window -- recorded immediately before the publish and kept when the publish errors, since the transport can fail after the hub holds the frame. PolicyDeniedError carries Quota and UnansweredError is new, both still errors.Is ErrRuntime. Run against the shared refusal vectors, decoded as map[string]any so numbers arrive as float64, plus five end-to-end asks.",
@@ -215,7 +215,7 @@
     },
     "runtime": {
       "implementation": {
-        "client.go": "d572f607cfcd6b15a52afbac62315c179bff2f6bb30bc07255e53349072b41c9",
+        "client.go": "09491ad6a6a609e7a0b5d408eb106ed987610fc05f3d80a3f1040bb93cbe18d0",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc",
         "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4",
         "transport_noise.go": "e474489cdec5fd12fa2c2c179af33eb503792bb06ea4dce7a0a1c1ba9784819d"
