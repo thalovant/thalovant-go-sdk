@@ -91,7 +91,7 @@
     },
     "conversation": {
       "implementation": {
-        "client.go": "6e08cff483639f0bbcedbfe751caa1679b794b0be44b06e4219b5518284bdf09",
+        "client.go": "0b16c3ac67bc005cde50cacc76650c14c26b66cfecf392fbd4addacbe8100e4c",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc"
       },
       "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
@@ -125,7 +125,7 @@
     },
     "home-link": {
       "implementation": {
-        "client.go": "6e08cff483639f0bbcedbfe751caa1679b794b0be44b06e4219b5518284bdf09",
+        "client.go": "0b16c3ac67bc005cde50cacc76650c14c26b66cfecf392fbd4addacbe8100e4c",
         "home.go": "5b3bf5ce321a15018469a7da3e4b2f06df554c9e5419b8427ad469f62194b2d3",
         "noise_store.go": "7e241a9e43cfb13587dcecde0b04258ddc765e88b48c886be2a9979219f5159a",
         "rich.go": "c92c7bc4e0c5b644822b24fc30b67e1ebd91f46858427d368cac01ed1427e613",
@@ -208,7 +208,7 @@
     },
     "refusal": {
       "implementation": {
-        "client.go": "6e08cff483639f0bbcedbfe751caa1679b794b0be44b06e4219b5518284bdf09",
+        "client.go": "0b16c3ac67bc005cde50cacc76650c14c26b66cfecf392fbd4addacbe8100e4c",
         "errors.go": "7fe1cffc732722814f68d11274931913b78cfb4f3abd6534a04b743b9b58656c"
       },
       "reason": "refusalBelongsToAsk() and failureError() in errors.go, used by AskWithOptions() in client.go, which counts asks, queries and fire-and-forget utterances inside the shared grace window -- recorded immediately before the publish and kept when the publish errors, since the transport can fail after the hub holds the frame. PolicyDeniedError carries Quota and UnansweredError is new, both still errors.Is ErrRuntime. Run against the shared refusal vectors, decoded as map[string]any so numbers arrive as float64, plus five end-to-end asks.",
@@ -223,7 +223,7 @@
     },
     "runtime": {
       "implementation": {
-        "client.go": "6e08cff483639f0bbcedbfe751caa1679b794b0be44b06e4219b5518284bdf09",
+        "client.go": "0b16c3ac67bc005cde50cacc76650c14c26b66cfecf392fbd4addacbe8100e4c",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc",
         "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4",
         "transport_noise.go": "e9575c071f87e264b082acb64032f7a72a70036b6b645f0f3d842a3213f4aab8"

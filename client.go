@@ -406,16 +406,16 @@ func (c *Client) runOwned(ctx context.Context, cleanupOnError bool, operation fu
 	go func() {
 		defer c.connectionGate.Unlock()
 		err := operation()
-		// Only an operation that itself failed, after it may have put part of
-		// a frame on the wire, leaves the transport in doubt. One withdrawn
-		// before anything was sent -- a reply still queued at its deadline --
-		// does not, and tearing the link down for it would only force a
-		// reconnect.
-		cleanup := err != nil && cleanupOnError && !errors.Is(err, errNothingSent)
+		// A send withdrawn before any of it was written -- a reply still
+		// queued at its deadline -- leaves the transport sound, and tearing
+		// the link down for it would only force a reconnect. Anything else
+		// that failed, or that finished after its caller had given up on it,
+		// is cleaned up as before.
+		nothingSent := errors.Is(err, errNothingSent)
 		if ctx.Err() != nil {
 			err = fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
 		}
-		if cleanup {
+		if err != nil && cleanupOnError && !nothingSent {
 			cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 			_ = c.Transport.Disconnect(cleanupCtx)
 			cancel()
