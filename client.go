@@ -343,7 +343,7 @@ func (c *Client) Connect(ctx context.Context) error {
 		if err == nil {
 			health := c.Transport.Healthcheck()
 			if !health.Connected || !health.HandshakeComplete {
-				err = fmt.Errorf("%w: transport returned before authenticated readiness", ErrConnection)
+				err = c.closedBeforeReady()
 			}
 		}
 		if connectCtx.Err() != nil {
@@ -577,6 +577,22 @@ func (c *Client) keyRejection() error {
 		return rejecter.keyRejection()
 	}
 	return nil
+}
+
+// closedBeforeReady is the error for a transport that finished its handshake
+// and was closed before Connect could look at it. The close landed inside the
+// settle window as surely as one a moment later, so it is read the same way
+// HubSession reads that one: the transport recorded its verdict with the
+// close, and a slow scheduler between the two must not turn a refusal, or a
+// rejected client key, into a plain failure.
+func (c *Client) closedBeforeReady() error {
+	if err := c.keyRejection(); err != nil {
+		return err
+	}
+	if c.ClosedRefused() {
+		return fmt.Errorf("%w: %w: the hub closed the link right after the handshake: it does not accept these credentials, or not yet", ErrConnection, ErrHubRefused)
+	}
+	return fmt.Errorf("%w: transport returned before authenticated readiness", ErrConnection)
 }
 
 // emit publishes without recording a fire-and-forget utterance: the ask uses
