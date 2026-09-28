@@ -611,6 +611,10 @@ func (apiUnreachableError) Unwrap() []error {
 	return []error{ErrAPI, ErrAPIUnreachable, ErrConnection}
 }
 
+// errNothingSent marks a send withdrawn before any of it was encrypted or
+// written: the transport is still sound, so nothing is torn down for it.
+var errNothingSent = errors.New("nothing was sent")
+
 // apiErrorOrSentinel is the API's answer when there is one, and ErrAPI when
 // there is not, so a typed error always matches ErrAPI without ever
 // unwrapping to a nil *APIError inside a non-nil interface.

@@ -744,7 +744,10 @@ func (s *HubSession) call(ctx context.Context, operation func(HubSessionClient) 
 	}
 	s.markUp(client)
 	err = operation(client)
-	if err != nil && !errors.Is(err, ErrRuntime) {
+	// A remote refusal proves a live, authenticated session, and a call the
+	// caller withdrew (its context ended) says nothing about the link unless
+	// the link went down with it.
+	if err != nil && !errors.Is(err, ErrRuntime) && (ctx.Err() == nil || !Alive(client)) {
 		err = errors.Join(err, s.drop(ctx))
 	}
 	return err

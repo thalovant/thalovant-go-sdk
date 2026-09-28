@@ -720,3 +720,41 @@ func TestAnUnsubscribedHandlerIsNeverCalledAgain(t *testing.T) {
 		t.Fatalf("an unsubscribed handler was called %d times", calls.Load())
 	}
 }
+
+func TestAReplyWithdrawnBeforeItWasSentKeepsTheLink(t *testing.T) {
+	hub := newHomeHub(t, nil, 0)
+	connected, err := hub.connect(t)(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := connected.(*Client)
+	defer client.Close(context.Background())
+	transport := client.Transport.(*WSSTransport)
+	session, err := NewHubSession(func(context.Context) (HubSessionClient, error) { return client, nil }, quickPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close(context.Background())
+	if err := session.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// Another frame is being written: this reply waits its turn, and its
+	// deadline passes first.
+	if err := transport.writeMu.Lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	err = session.Reply(ctx, Event{Name: HomeRequestEvent, Context: Context{"source": "skill"}}, HomeResponseEvent, Data{}, nil)
+	cancel()
+	transport.writeMu.Unlock()
+	if !errors.Is(err, ErrTimeout) {
+		t.Fatalf("a withdrawn reply = %v", err)
+	}
+	time.Sleep(50 * time.Millisecond) // any teardown would have happened by now
+	if !Alive(client) || !session.Connected() || !transport.Healthcheck().Connected {
+		t.Fatal("a reply withdrawn before it was sent tore the link down")
+	}
+	if err := session.Reply(context.Background(), Event{Name: HomeRequestEvent, Context: Context{"source": "skill"}}, HomeResponseEvent, Data{}, nil); err != nil {
+		t.Fatalf("the link is not usable after a withdrawn reply: %v", err)
+	}
+}

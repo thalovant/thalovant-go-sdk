@@ -758,7 +758,9 @@ func (t *WSSTransport) writeGeneration(ctx context.Context, generation uint64, c
 	bounded, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	if err := t.writeMu.Lock(bounded); err != nil {
-		return fmt.Errorf("%w: %w", ErrTimeout, err)
+		// Still queued behind another frame: nothing of this one was
+		// encrypted or written, so the Noise stream is intact.
+		return fmt.Errorf("%w: %w: %w", ErrTimeout, errNothingSent, err)
 	}
 	defer t.writeMu.Unlock()
 	t.mu.RLock()
