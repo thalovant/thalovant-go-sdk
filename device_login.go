@@ -103,6 +103,10 @@ func (c *ControlPlane) BeginDeviceLogin(ctx context.Context, scopes []string, cl
 	return deviceAuthorizationFromGrant(grant)
 }
 
+// maxDurationSeconds is the most seconds a time.Duration holds (about 292
+// years), so a number off the wire never overflows the conversion.
+const maxDurationSeconds = float64(math.MaxInt64/int64(time.Second)) - 1
+
 // deviceAuthorizationFromGrant reads POST /v1/auth/device/authorize and
 // refuses URLs a browser should not open.
 func deviceAuthorizationFromGrant(grant map[string]any) (*DeviceAuthorization, error) {
@@ -122,11 +126,11 @@ func deviceAuthorizationFromGrant(grant map[string]any) (*DeviceAuthorization, e
 		}
 	}
 	interval := defaultDevicePollInterval
-	if raw, ok := grant["interval"].(float64); ok && raw >= 0 && !math.IsInf(raw, 0) {
+	if raw, ok := grant["interval"].(float64); ok && raw >= 0 && raw <= maxDurationSeconds {
 		interval = time.Duration(raw * float64(time.Second))
 	}
 	expiresIn := 900 * time.Second
-	if raw, ok := grant["expires_in"].(float64); ok && raw >= 0 && raw == math.Trunc(raw) && raw <= float64(maxCount) {
+	if raw, ok := grant["expires_in"].(float64); ok && raw >= 0 && raw == math.Trunc(raw) && raw <= maxDurationSeconds {
 		expiresIn = time.Duration(raw) * time.Second
 	}
 	return &DeviceAuthorization{

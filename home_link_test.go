@@ -575,3 +575,16 @@ func TestWaitForAdmissionEndsWithTheContext(t *testing.T) {
 		t.Fatalf("a link with another scheme was followed: %v", err)
 	}
 }
+
+func TestDeviceGrantNumbersNeverOverflow(t *testing.T) {
+	grant, err := deviceAuthorizationFromGrant(map[string]any{
+		"device_code": "dc", "user_code": "U", "verification_uri": "https://thalovant.com/activate",
+		"interval": 1e300, "expires_in": 1e300,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant.Interval != defaultDevicePollInterval || grant.ExpiresIn != 900*time.Second {
+		t.Fatalf("out-of-range numbers read as %s / %s", grant.Interval, grant.ExpiresIn)
+	}
+}

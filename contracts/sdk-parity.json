@@ -47,7 +47,7 @@
       "status": "required",
       "tests": {
         "conformance_record_test.go": "31f3322b202e3fe9cd265f3e8ad6929b9eaae7c167575deffd8a38e4ff7e8bbf",
-        "home_link_test.go": "4a97ada8de5341ade6a4e127dd6528c0b4fe065d932f72230c5025c011b4405c",
+        "home_link_test.go": "d2f6ad65889dbb1b46945e4e22ef5c7430101d35bb4ada0c8899d0d0978d7041",
         "home_link_vectors_test.go": "261f730f6b8ab137695d71cb8b8411ee9e08f67af41a8ed21dfad6bcd0b2cbc6",
         "testdata/connection-admission-vectors.json": "d9f7ae3443a66b54e325b9f516f6bf3c6adc414506086d017c3e63496bf790d6"
       },
@@ -107,7 +107,7 @@
     "device-login": {
       "implementation": {
         "control.go": "b5f50fc5ae60f9d05502595e8024aa85dd9e80ef0c2472900cbb578f0b14bbc0",
-        "device_login.go": "94a78d2f43a3507f2b0fa61ea6858f136f2e19f799ee1b00141d5209d41cc922",
+        "device_login.go": "37ecac4f7f6c3309435894b172c5744648018939817639d924fa22d0354c4860",
         "errors.go": "0a001db55894dda74d3b8d9b05f39c4d4658684e80c7a2fa8108b9adb6eb49ea"
       },
       "reason": "BeginDeviceLogin, PollDeviceLogin and RevokeAPIToken in device_login.go, one step each, for a caller that runs its own loop; LoginWithBrowser in control.go now runs its loop over the same one-poll path. A pending poll is a *DeviceLoginPendingError carrying Interval, and slow_down lengthens the DeviceAuthorization's Interval for good; expiry and denial are *DeviceLoginExpiredError and *DeviceLoginDeniedError (errors.go), still matching ErrDeviceCodeExpired and ErrDeviceAccessDenied, and every one of them reaches the *APIError the API answered with. The approved token and its token_id are kept on the ControlPlane (TokenID is new), and a token revokes itself. DeviceAuthorization and APIToken print with the device code and the token redacted. Run against the shared device-login vectors over a loopback httptest server, checking every request, with what the SDK produced recorded.",
@@ -133,7 +133,7 @@
       "status": "required",
       "tests": {
         "conformance_record_test.go": "31f3322b202e3fe9cd265f3e8ad6929b9eaae7c167575deffd8a38e4ff7e8bbf",
-        "home_link_test.go": "4a97ada8de5341ade6a4e127dd6528c0b4fe065d932f72230c5025c011b4405c",
+        "home_link_test.go": "d2f6ad65889dbb1b46945e4e22ef5c7430101d35bb4ada0c8899d0d0978d7041",
         "home_link_vectors_test.go": "261f730f6b8ab137695d71cb8b8411ee9e08f67af41a8ed21dfad6bcd0b2cbc6",
         "testdata/home-link-vectors.json": "1fdffb95faea854ed15d4ad27aa495e7372a0827b3dae8f5945c0be4c1bfb0f3"
       },
