@@ -238,7 +238,7 @@ func (h *keepingHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if failure != nil {
 			// A handshake message it cannot read: a close frame with no status.
-			_ = conn.WriteMessage(websocket.CloseMessage, []byte{})
+			closeLikeAHub(conn)
 			return
 		}
 		if responder.session != nil && len(responder.peer) > 0 {
@@ -257,10 +257,35 @@ func (h *keepingHub) serve(w http.ResponseWriter, r *http.Request) {
 			if flush() != nil {
 				return
 			}
-			_ = conn.WriteMessage(websocket.CloseMessage, []byte{})
+			closeLikeAHub(conn)
 			return
 		}
 		if flush() != nil {
+			return
+		}
+	}
+}
+
+// closeLikeAHub sends a close frame with no status and finishes the closing
+// handshake before the socket goes, as a hub's WebSocket server does (RFC
+// 6455 section 7.1.1): it reads, dropping whatever the client already had in
+// flight, until the client's own close answers or a grace period passes.
+//
+// Dropping the socket straight after the close frame is not a hub a client
+// can meet, and on Windows it loses the close. The client sends its encrypted
+// HELLO right behind the last XX message, so that frame is still unread when
+// the hub fails the handshake; closing a socket with unread data sends a TCP
+// reset instead of a FIN, and Windows discards everything the client had
+// received but not yet read when a reset arrives -- the close frame included.
+// The client then sees a socket that ended with no close frame (1006), which
+// is a drop by the vectors, not a refusal.
+func closeLikeAHub(conn *websocket.Conn) {
+	if conn.WriteMessage(websocket.CloseMessage, []byte{}) != nil {
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
 			return
 		}
 	}
