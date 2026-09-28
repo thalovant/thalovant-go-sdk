@@ -166,7 +166,8 @@ type Replier interface {
 // whatever happened, and returns the payload it sent.
 //
 // The handler has timeout (DefaultHomeHandlerTimeout when nonpositive), under
-// a context derived from ctx. When it fails the answer is failed_to_handle,
+// a context derived from ctx, and the reply has what is left of the hub's
+// HomeRequestTimeout after it. When it fails the answer is failed_to_handle,
 // and when it is still running at the deadline the answer is timeout; a
 // handler that ignores its context is left to finish on its own goroutine,
 // and what it returns then is dropped. When ctx itself ends first, nothing is
@@ -179,12 +180,18 @@ func AnswerHomeRequest(ctx context.Context, replier Replier, event Event, handle
 	if timeout <= 0 {
 		timeout = DefaultHomeHandlerTimeout
 	}
+	// The hub's bound covers the handler and the reply together, so the reply
+	// gets what is left of it rather than a budget of its own: an answer
+	// delivered after the hub has given up is only noise. A handler timeout
+	// set past the hub's bound extends it, since the caller asked for that.
+	replyCtx, cancel := context.WithTimeout(ctx, max(HomeRequestTimeout, timeout))
+	defer cancel()
 	answer, err := runHomeHandler(ctx, request, handler, timeout)
 	if err != nil {
 		return nil, err
 	}
 	payload := HomeResponse(request, answer)
-	if err := replier.Reply(ctx, event, HomeResponseEvent, payload, nil); err != nil {
+	if err := replier.Reply(replyCtx, event, HomeResponseEvent, payload, nil); err != nil {
 		return payload, err
 	}
 	return payload, nil

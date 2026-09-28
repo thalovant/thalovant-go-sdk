@@ -630,3 +630,49 @@ func TestEverySignInSetsTheTokenIDFromItsOwnAnswer(t *testing.T) {
 		t.Fatalf("revoking with no device token = %v, want a local refusal", err)
 	}
 }
+
+// stallingReplier holds every reply until its context ends.
+type stallingReplier struct{ deadline chan time.Time }
+
+func (r stallingReplier) Reply(ctx context.Context, _ Event, _ string, _ Data, _ Context) error {
+	deadline, _ := ctx.Deadline()
+	r.deadline <- deadline
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func TestAHomeReplyGetsWhatIsLeftOfTheHubsBound(t *testing.T) {
+	replier := stallingReplier{deadline: make(chan time.Time, 1)}
+	started := time.Now()
+	_, err := AnswerHomeRequest(context.Background(), replier, Event{Name: HomeRequestEvent}, func(context.Context, HomeRequest) (HomeAnswer, error) {
+		return HomeAnswer{Speech: "done"}, nil
+	}, 50*time.Millisecond)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("a stalled reply = %v", err)
+	}
+	if deadline := <-replier.deadline; deadline.Sub(started) > HomeRequestTimeout+time.Second {
+		t.Fatalf("the reply could run until %s after the request", deadline.Sub(started))
+	}
+}
+
+func TestAStalledOperationReadEndsTheAdmissionWaitOnTime(t *testing.T) {
+	release := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer server.Close()
+	defer close(release)
+	plane := NewControlPlane(server.URL, "token")
+	started := time.Now()
+	err := plane.WaitForAdmission(context.Background(), &OperationResource{ID: "op"}, AdmissionOptions{Timeout: 200 * time.Millisecond})
+	var timeout *AdmissionTimeoutError
+	if !errors.As(err, &timeout) {
+		t.Fatalf("WaitForAdmission = %v, want the admission timeout", err)
+	}
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("a stalled read held the wait for %s", elapsed)
+	}
+}

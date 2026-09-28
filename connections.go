@@ -240,11 +240,18 @@ func (c *ControlPlane) WaitForAdmission(ctx context.Context, operation *Operatio
 		return fmt.Errorf("%w: an operation needs an id to wait on", ErrAPI)
 	}
 	deadline := time.Now().Add(timeout)
+	// Every read is bounded by the wait's own deadline too, so one stalled
+	// request cannot hold the wait past it.
+	waitCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	for {
 		wait := interval
-		current, err := c.GetOperation(ctx, operationID)
+		current, err := c.GetOperation(waitCtx, operationID)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return fmt.Errorf("%w: %w", ErrTimeout, ctxErr)
+		}
+		if waitCtx.Err() != nil {
+			return &AdmissionTimeoutError{Wait: timeout, OperationID: operationID}
 		}
 		var apiErr *APIError
 		switch {
