@@ -477,9 +477,9 @@ func TestPlainSpeech(t *testing.T) {
 		"":                                    "",
 		"  plain  ":                           "plain",
 		"<b>bold</b>\u00a0&lt;tag&gt; &#233;": "bold <tag> é",
-		// Unicode White_Space collapses; the information separators do not,
-		// though the ends are trimmed of them as the reference's strip() does.
-		"line\none\u2028two\x1cthree\x1c": "line one two\x1cthree",
+		// Unicode White_Space collapses and is trimmed; the information
+		// separators are not white space, so they stay, even at the ends.
+		"line\none\u2028two\x1cthree\x1c": "line one two\x1cthree\x1c",
 		"5 < 6 and 7 > 3":                 "5 < 6 and 7 > 3",
 	} {
 		if got := PlainSpeech(input); got != want {

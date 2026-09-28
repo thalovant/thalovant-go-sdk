@@ -184,7 +184,10 @@ func (c *ControlPlane) deviceTokenOnce(ctx context.Context, deviceCode string, i
 	if status >= 200 && status <= 299 {
 		result, decodeErr := decodeControlJSON(raw)
 		if decodeErr != nil {
-			return nil, &APIError{StatusCode: status, Detail: "invalid JSON response"}
+			// No status, like a 2xx that carries no token: the API did not
+			// refuse, this SDK could not use its answer
+			// (device-login-vectors.json records that case with status null).
+			return nil, fmt.Errorf("%w: device token response was not a JSON object", ErrAPI)
 		}
 		return result, nil
 	}
@@ -266,7 +269,9 @@ func (c *ControlPlane) RevokeAPIToken(ctx context.Context, tokenID string) error
 			return err
 		}
 	}
-	if own {
+	// Forget the token only while it is still the one revoked: a sign-in that
+	// finished meanwhile installed another, and that one is alive.
+	if own && c.TokenID == target {
 		c.AccessToken = ""
 		c.TokenID = ""
 		c.revokedOwn = true

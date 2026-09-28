@@ -218,6 +218,16 @@ func (t *WSSTransport) connectGeneration(ctx context.Context, generation uint64)
 			return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
 		}
 		if t.generation != generation || t.conn != conn || !t.connected || !t.handshake {
+			// A close that landed between the end of the handshake and here
+			// is read as it would be a moment later.
+			if t.generation == generation {
+				switch cause := t.lastError; {
+				case errors.Is(cause, ErrHubKeyChanged), errors.Is(cause, ErrHubRefused):
+					return cause
+				case t.closedRefused:
+					return fmt.Errorf("%w: %w: the hub closed the link right after the handshake: %v", ErrConnection, ErrHubRefused, cause)
+				}
+			}
 			return fmt.Errorf("%w: connection retired before authenticated readiness", ErrConnection)
 		}
 		t.connection.complete(time.Now())

@@ -459,3 +459,43 @@ func TestMQTTRetriesAFailedKKWithXXOnce(t *testing.T) {
 		t.Fatalf("patterns %s", got)
 	}
 }
+
+// Over HTTP polling, a request answered 401 or 403 is a refusal, as an
+// upgrade answered so is over WSS; during a KK exchange it is followed by XX.
+func TestHTTPAKKAnsweredUnauthorizedIsFollowedByXX(t *testing.T) {
+	fixture := newHTTPNoiseFixture(t)
+	transport := fixture.transport(t)
+	if err := transport.Connect(context.Background()); err != nil { // first contact pins over XX
+		t.Fatal(err)
+	}
+	if err := transport.Disconnect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fixture.mu.Lock()
+	fixture.refuseKK = true
+	fixture.mu.Unlock()
+	if err := transport.Connect(context.Background()); err != nil {
+		t.Fatalf("a KK answered 401 was not followed by XX: %v", err)
+	}
+	fixture.mu.Lock()
+	defer fixture.mu.Unlock()
+	if fixture.refusedKK != 1 || fmt.Sprint(fixture.responder.patterns) != "[XXpsk2 XXpsk2]" {
+		t.Fatalf("%d KK refused, patterns %v", fixture.refusedKK, fixture.responder.patterns)
+	}
+}
+
+func TestADeviceTokenAnswerThatIsNoObjectCarriesNoStatus(t *testing.T) {
+	for _, body := range []string{`[1, 2]`, `"token"`, `not json`} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("content-type", "application/json")
+			_, _ = w.Write([]byte(body))
+		}))
+		plane := NewControlPlane(server.URL, "")
+		_, err := plane.PollDeviceLogin(context.Background(), &DeviceAuthorization{DeviceCode: "dc", Interval: time.Second})
+		server.Close()
+		var apiErr *APIError
+		if !errors.Is(err, ErrAPI) || errors.As(err, &apiErr) {
+			t.Errorf("a 2xx answering %s = %v, want an error with no status", body, err)
+		}
+	}
+}

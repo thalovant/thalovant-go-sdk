@@ -687,6 +687,11 @@ func (t *HTTPTransport) request(ctx context.Context, method, path string, form u
 		return nil, fmt.Errorf("%w: %v", ErrConnection, scrubTransportError(err))
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		// The hub turned the credentials away, as a WebSocket upgrade answered
+		// so does; during a KK exchange, Connect follows it with XX.
+		return nil, fmt.Errorf("%w: %w: HTTP %s status %d", ErrConnection, ErrHubRefused, path, resp.StatusCode)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return nil, fmt.Errorf("%w: HTTP %s status %d", ErrConnection, path, resp.StatusCode)
 	}

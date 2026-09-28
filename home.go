@@ -152,7 +152,7 @@ func HomeResponse(request HomeRequest, answer HomeAnswer) Data {
 //     DecodeReferences: numeric ones, the five XML entities and &nbsp;,
 //     nothing else;
 //  3. every run of Unicode White_Space collapsed to one space, and the ends
-//     trimmed.
+//     trimmed of it.
 //
 // Nothing comes from html.UnescapeString: its table of named references is
 // not the one other SDKs decode.
@@ -160,8 +160,9 @@ func PlainSpeech(text string) string {
 	if text == "" {
 		return ""
 	}
-	collapsed := whiteSpace.ReplaceAllString(DecodeReferences(StripSSML(text)), " ")
-	return strings.TrimFunc(collapsed, problemBlank)
+	// Every White_Space run is one space by now, so trimming spaces trims
+	// exactly White_Space; U+001C..U+001F are not white space and stay.
+	return strings.Trim(whiteSpace.ReplaceAllString(DecodeReferences(StripSSML(text)), " "), " ")
 }
 
 // whiteSpace is a run of Unicode White_Space characters, spelled out rather
