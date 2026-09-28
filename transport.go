@@ -137,6 +137,12 @@ func (t *HTTPTransport) Authorization() string {
 // an XX handshake it completed is the hub refusing this client's own key: a
 // *ClientKeyRejectedError.
 func (t *HTTPTransport) Connect(ctx context.Context) error {
+	// A verdict left by the last session is not this call's: an attempt that
+	// fails before it begins a session (a lock wait, the cleanup of the old
+	// admission) must not come back as that session's key rejection.
+	t.mu.Lock()
+	t.closedRefused, t.closedKeyRejected = false, false
+	t.mu.Unlock()
 	channel, err := t.connectAttempt(ctx, false)
 	if retryKKWithXX(ctx, channel, err) {
 		_, err = t.connectAttempt(ctx, true)
@@ -438,9 +444,10 @@ func (t *HTTPTransport) pollLoop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := t.PollOnce(ctx); err != nil {
+				channel, refused, rejected := t.readVerdict(err)
 				t.mu.Lock()
-				if channel := t.noise; channel != nil {
-					t.closedRefused, t.closedKeyRejected = channel.verdict(err)
+				if channel != nil && t.noise == channel {
+					t.closedRefused, t.closedKeyRejected = refused, rejected
 				}
 				t.lastError = err
 				t.handshake = false
@@ -589,11 +596,27 @@ func (t *HTTPTransport) completeConnection() {
 	t.mu.Unlock()
 }
 
+// readVerdict reads the current Noise channel's verdict on err outside t.mu:
+// the channel's lock can be held through a whole HTTP write (up to
+// noiseSendTimeout), and Healthcheck and ClosedRefused must not wait on it.
+// It returns the channel it read, so the caller stores the verdict only while
+// that channel is still the session's.
+func (t *HTTPTransport) readVerdict(err error) (channel *noiseChannel, refused, rejected bool) {
+	t.mu.RLock()
+	channel = t.noise
+	t.mu.RUnlock()
+	if channel != nil {
+		refused, rejected = channel.verdict(err)
+	}
+	return channel, refused, rejected
+}
+
 func (t *HTTPTransport) failConnection(err error) {
+	channel, refused, rejected := t.readVerdict(err)
 	t.mu.Lock()
-	if channel := t.noise; channel != nil {
+	if channel != nil && t.noise == channel {
 		// Read once, by the failure that ended the session.
-		t.closedRefused, t.closedKeyRejected = channel.verdict(err)
+		t.closedRefused, t.closedKeyRejected = refused, rejected
 	}
 	t.connected, t.handshake = false, false
 	t.noise = nil

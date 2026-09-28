@@ -1029,3 +1029,52 @@ func TestHTTPDisconnectAcknowledgmentRejectsAmbiguousResponses(t *testing.T) {
 		})
 	}
 }
+
+// A connect that fails before it begins a session reports its own failure,
+// not the key rejection the last session ended with: that would make the
+// supervisor give up on a link it should retry.
+func TestHTTPConnectDoesNotReturnTheLastSessionsVerdict(t *testing.T) {
+	transport := NewHTTPTransport(Identity{})
+	transport.closedRefused, transport.closedKeyRejected = true, true
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := transport.Connect(ctx)
+	if !errors.Is(err, ErrTimeout) || errors.Is(err, ErrClientKeyRejected) || errors.Is(err, ErrHubRefused) {
+		t.Fatalf("connect = %v", err)
+	}
+	if transport.ClosedRefused() || transport.keyRejection() != nil {
+		t.Fatal("the last session's verdict outlived a new attempt")
+	}
+}
+
+// The verdict on a failed session is read without holding the transport's
+// lock: a send can hold the channel's lock through a whole HTTP write, and
+// Healthcheck must not wait for it.
+func TestHTTPFailureReadsTheVerdictOutsideTheTransportLock(t *testing.T) {
+	transport := NewHTTPTransport(Identity{})
+	channel := &noiseChannel{pattern: noisePatternXX, finalSent: true}
+	transport.noise = channel
+	channel.mu.Lock() // a send mid-write
+	failed := make(chan struct{})
+	go func() {
+		transport.failConnection(fmt.Errorf("%w: %w", ErrConnection, ErrHubRefused))
+		close(failed)
+	}()
+	time.Sleep(50 * time.Millisecond)
+	probed := make(chan struct{})
+	go func() {
+		transport.Healthcheck()
+		close(probed)
+	}()
+	select {
+	case <-probed:
+	case <-time.After(time.Second):
+		channel.mu.Unlock()
+		t.Fatal("Healthcheck waited on a send holding the Noise channel")
+	}
+	channel.mu.Unlock()
+	<-failed
+	if !transport.ClosedRefused() || transport.keyRejection() == nil {
+		t.Fatal("the verdict was lost")
+	}
+}
