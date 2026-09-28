@@ -287,8 +287,11 @@ func (c *ControlPlane) LoginWithOptions(ctx context.Context, email string, passw
 // message printed to stdout. Timeout bounds the whole approval wait and
 // defaults to DefaultDeviceLoginTimeout when zero.
 type DeviceLoginOptions struct {
-	Scopes      []string
-	ClientName  string
+	Scopes     []string
+	ClientName string
+	// ClientID signs in as a registered app, such as HomeAssistantClientID;
+	// "" leaves it out. See BeginDeviceLoginWithOptions.
+	ClientID    string
 	OpenBrowser *bool
 	Prompt      func(grant map[string]any)
 	Timeout     time.Duration
@@ -310,14 +313,7 @@ type DeviceLoginOptions struct {
 // *DeviceLoginExpiredError), and ErrTimeout respectively. BeginDeviceLogin and
 // PollDeviceLogin are the same flow one step at a time.
 func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOptions) (map[string]any, error) {
-	payload := map[string]any{}
-	if len(opts.Scopes) > 0 {
-		payload["scopes"] = opts.Scopes
-	}
-	if strings.TrimSpace(opts.ClientName) != "" {
-		payload["client_name"] = opts.ClientName
-	}
-	grant, err := c.request(ctx, http.MethodPost, "/v1/auth/device/authorize", payload, nil, false)
+	grant, err := c.request(ctx, http.MethodPost, "/v1/auth/device/authorize", deviceAuthorizePayload(opts), nil, false)
 	if err != nil {
 		return nil, err
 	}

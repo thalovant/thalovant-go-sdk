@@ -74,6 +74,8 @@ type HTTPTransport struct {
 	PollInterval time.Duration
 	HTTPClient   *http.Client
 	// NoiseStateDir selects the persistent client key and hub pin directory.
+	// Empty uses the directory of the file the identity was read from
+	// (Identity.SourcePath), else NoiseStateDir().
 	NoiseStateDir string
 	noise         *noiseChannel
 	pollMu        contextMutex
@@ -85,9 +87,13 @@ type HTTPTransport struct {
 	connected     bool
 	handshake     bool
 	lastError     error
-	connection    connectionTelemetry
-	cancelPolling context.CancelFunc
-	mu            sync.RWMutex
+	// closedRefused and closedKeyRejected are the hub's verdict on the last
+	// session: see ClosedRefused.
+	closedRefused     bool
+	closedKeyRejected bool
+	connection        connectionTelemetry
+	cancelPolling     context.CancelFunc
+	mu                sync.RWMutex
 }
 
 func NewHTTPTransport(identity Identity) *HTTPTransport {
@@ -126,12 +132,44 @@ func (t *HTTPTransport) Authorization() string {
 // followed at once by one XX handshake inside this connect, since only XX
 // tells a changed password (ErrHubRefused) from a changed hub key
 // (ErrHubKeyChanged); the XX attempt's outcome is the connect's.
+//
+// A request answered 401 or 403 while this client sends the last frames of
+// an XX handshake it completed is the hub refusing this client's own key: a
+// *ClientKeyRejectedError.
 func (t *HTTPTransport) Connect(ctx context.Context) error {
 	channel, err := t.connectAttempt(ctx, false)
 	if retryKKWithXX(ctx, channel, err) {
 		_, err = t.connectAttempt(ctx, true)
 	}
+	if err != nil {
+		if rejected := t.keyRejection(); rejected != nil {
+			return rejected
+		}
+	}
 	return err
+}
+
+// ClosedRefused reports whether the hub refused this connection's
+// credentials the last time it ended: a request answered 401 or 403 before
+// the hub had sent anything that decrypted under the session's keys. A hub
+// that has spoken accepted the credentials, so a refusal after that is not
+// read as one. A new connection attempt clears it.
+func (t *HTTPTransport) ClosedRefused() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.closedRefused
+}
+
+// keyRejection is a *ClientKeyRejectedError when the last session ended with
+// the hub refusing this client's own key, and nil otherwise.
+func (t *HTTPTransport) keyRejection() error {
+	t.mu.RLock()
+	rejected, explicit := t.closedKeyRejected, t.NoiseStateDir
+	t.mu.RUnlock()
+	if !rejected {
+		return nil
+	}
+	return clientKeyRejected(explicit, t.Identity)
 }
 
 // connectAttempt is one connect: a fresh session and one handshake, with XX
@@ -401,6 +439,9 @@ func (t *HTTPTransport) pollLoop(ctx context.Context) {
 		case <-ticker.C:
 			if err := t.PollOnce(ctx); err != nil {
 				t.mu.Lock()
+				if channel := t.noise; channel != nil {
+					t.closedRefused, t.closedKeyRejected = channel.verdict(err)
+				}
 				t.lastError = err
 				t.handshake = false
 				t.noise = nil
@@ -537,6 +578,7 @@ func (t *HTTPTransport) beginConnection() {
 	t.connected, t.handshake = false, false
 	t.noise = nil
 	t.lastError = nil
+	t.closedRefused, t.closedKeyRejected = false, false
 	t.connection.begin(time.Now())
 	t.mu.Unlock()
 }
@@ -549,6 +591,10 @@ func (t *HTTPTransport) completeConnection() {
 
 func (t *HTTPTransport) failConnection(err error) {
 	t.mu.Lock()
+	if channel := t.noise; channel != nil {
+		// Read once, by the failure that ended the session.
+		t.closedRefused, t.closedKeyRejected = channel.verdict(err)
+	}
 	t.connected, t.handshake = false, false
 	t.noise = nil
 	t.lastError = err
@@ -655,7 +701,9 @@ func (t *HTTPTransport) sendHiveMessage(ctx context.Context, message HiveMessage
 		return fmt.Errorf("%w: HTTP transport is not connected", ErrConnection)
 	}
 	if err := channel.send(ctx, message); err != nil {
-		t.failConnection(err)
+		if !errors.Is(err, errNothingSent) && !errors.Is(err, errFinishing) {
+			t.failConnection(err)
+		}
 		return err
 	}
 	return nil

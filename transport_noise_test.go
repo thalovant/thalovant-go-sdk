@@ -1,6 +1,7 @@
 package thalovant
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -42,7 +43,17 @@ type transportResponder struct {
 	// corrupt names the patterns whose answer this responder spoils, so the
 	// client cannot authenticate it: a hub whose answer fails verification.
 	corrupt map[string]bool
+	// pinnedClient, when set, is the only client static key a completed
+	// handshake may show, as hivemind-core pins the first key a connection
+	// presents; any other ends the handshake with errClientKeyContradicts.
+	pinnedClient []byte
+	// received is every bus message the client sent, in order.
+	received []HiveMessage
 }
+
+// errClientKeyContradicts is a responder's abort on a client key that is not
+// the one it pinned.
+var errClientKeyContradicts = errors.New("client Noise static key contradicts pinned key")
 
 func newTransportResponder(t *testing.T) *transportResponder {
 	t.Helper()
@@ -96,6 +107,7 @@ func (s *transportResponder) receive(raw []byte, binary bool) error {
 		if message.MsgType != "bus" {
 			return fmt.Errorf("unexpected application message")
 		}
+		s.received = append(s.received, message)
 		return s.session.sendMessage(payload, true, func(frame []byte) error {
 			s.binary = append(s.binary, base64.StdEncoding.EncodeToString(frame))
 			return nil
@@ -160,6 +172,10 @@ func (s *transportResponder) receive(raw []byte, binary bool) error {
 		}
 	}
 	if s.handshake.complete {
+		if peer := s.handshake.state.PeerStatic(); len(s.pinnedClient) > 0 && !bytes.Equal(peer, s.pinnedClient) {
+			s.handshake = nil
+			return errClientKeyContradicts
+		}
 		s.peer = append([]byte(nil), s.handshake.state.PeerStatic()...)
 		s.session, err = newNoiseSession(s.handshake)
 		if err != nil {

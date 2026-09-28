@@ -408,11 +408,12 @@ func (c *Client) runOwned(ctx context.Context, cleanupOnError bool, operation fu
 		err := operation()
 		// A send withdrawn before any of it was written -- a reply still
 		// queued at its deadline -- leaves the transport sound, and tearing
-		// the link down for it would only force a reconnect. Anything else
-		// that failed, or that finished after its caller had given up on it,
-		// is cleaned up as before.
-		nothingSent := errors.Is(err, errNothingSent)
-		if ctx.Err() != nil {
+		// the link down for it would only force a reconnect; so does one that
+		// finished writing after its caller gave up, since a frame being
+		// written is always finished whole. Anything else that failed is
+		// cleaned up as before.
+		nothingSent := errors.Is(err, errNothingSent) || errors.Is(err, errFinishing)
+		if err != nil && ctx.Err() != nil {
 			err = fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
 		}
 		if err != nil && cleanupOnError && !nothingSent {
@@ -566,6 +567,16 @@ func (c *Client) ClosedRefused() bool {
 		return refuser.ClosedRefused()
 	}
 	return false
+}
+
+// keyRejection is the hub refusing this client's own key on the last
+// connection, or nil: a refusal right as an XX handshake ended, with nothing
+// from the hub in between.
+func (c *Client) keyRejection() error {
+	if rejecter, ok := c.Transport.(interface{ keyRejection() error }); ok {
+		return rejecter.keyRejection()
+	}
+	return nil
 }
 
 // emit publishes without recording a fire-and-forget utterance: the ask uses

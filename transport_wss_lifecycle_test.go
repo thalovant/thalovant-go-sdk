@@ -250,7 +250,11 @@ func assertWSSEcho(t *testing.T, transport *WSSTransport) {
 	}
 }
 
-func TestWSSBackpressuredSendCancellationPoisonsCapturedSessionAndReconnects(t *testing.T) {
+// A caller that leaves while its frame is being written gets its answer at
+// once, but the frame goes on being written -- half of one would break the
+// Noise stream -- so leaving does not spoil the session. Only the write
+// itself failing does: here the peer, which stopped reading, then goes away.
+func TestWSSBackpressuredSendCancellationFinishesTheFrameAndKeepsTheLink(t *testing.T) {
 	f := newWSSLifecycleFixture(t, false, true)
 	if err := f.transport.Connect(context.Background()); err != nil {
 		t.Fatal(err)
@@ -276,13 +280,14 @@ func TestWSSBackpressuredSendCancellationPoisonsCapturedSessionAndReconnects(t *
 	// The peer is not reading; allow chunks to fill the socket before cancelling.
 	time.Sleep(50 * time.Millisecond)
 	cancel()
-	if err := waitWSSResult(t, result); err == nil {
-		t.Fatal("backpressured send completed after cancellation")
+	if err := waitWSSResult(t, result); !errors.Is(err, ErrTimeout) || !errors.Is(err, errFinishing) {
+		t.Fatalf("a caller that left mid-write = %v, want errFinishing", err)
 	}
-	if f.transport.Healthcheck().HandshakeComplete {
-		t.Fatal("uncertain delivery did not poison Noise")
+	if !f.transport.Healthcheck().HandshakeComplete {
+		t.Fatal("the caller leaving spoiled a session whose frame is still being written")
 	}
 	f.release()
+	waitFor(t, func() bool { return !f.transport.Healthcheck().HandshakeComplete })
 	if err := f.transport.Connect(context.Background()); err != nil {
 		t.Fatal(err)
 	}

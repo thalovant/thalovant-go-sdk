@@ -71,7 +71,7 @@ func TestAskEmptyCompletionFailsAndHardDenialRetainsPartialReply(t *testing.T) {
 		})
 	}
 }
-func TestFallbackProbeIncludesBlockedSendAndRetainsCleanup(t *testing.T) {
+func TestFallbackProbeIncludesBlockedSendAndRetainsOwnership(t *testing.T) {
 	transport := newBlockedClientTransport()
 	transport.ready.Store(true)
 	transport.sendStarted = make(chan struct{}, 1)
@@ -96,8 +96,10 @@ func TestFallbackProbeIncludesBlockedSendAndRetainsCleanup(t *testing.T) {
 	if err := client.Connect(context.Background()); !errors.Is(err, ErrTimeout) {
 		t.Fatal("pending send lost ownership", err)
 	}
+	// The probe's send finishes after its caller left: a frame written whole
+	// keeps the link.
 	close(transport.sendRelease)
-	awaitCleanup(t, transport)
+	awaitNoCleanup(t, client, transport)
 }
 
 type queryDispatchTransport struct {

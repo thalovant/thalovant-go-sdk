@@ -19,6 +19,13 @@ func HomeAssistantScopes() []string {
 	return []string{"hubs:read", "clients:read", "clients:write"}
 }
 
+// HomeAssistantClientID is the registered app id Home Assistant signs in as:
+// DeviceLoginOptions.ClientID of its device login. The approval screen then
+// shows the platform's own name for the app as verified, and approving it
+// again replaces the token the last approval gave it instead of counting a
+// second one against the plan.
+const HomeAssistantClientID = "thalovant-home-assistant"
+
 // DeviceAuthorization is a started device sign-in (RFC 8628): what to show a
 // person, and what to poll with. Show VerificationURI and UserCode, or open
 // VerificationURIComplete, which carries the code; then call PollDeviceLogin
@@ -90,18 +97,102 @@ func (t APIToken) GoString() string { return t.String() }
 // A verification URL that is not HTTP(S), has no host, or carries credentials
 // is refused: it is about to be opened in a browser.
 func (c *ControlPlane) BeginDeviceLogin(ctx context.Context, scopes []string, clientName string) (*DeviceAuthorization, error) {
-	payload := map[string]any{}
-	if len(scopes) > 0 {
-		payload["scopes"] = scopes
-	}
-	if strings.TrimSpace(clientName) != "" {
-		payload["client_name"] = clientName
-	}
-	grant, err := c.request(ctx, http.MethodPost, "/v1/auth/device/authorize", payload, nil, false)
+	return c.BeginDeviceLoginWithOptions(ctx, DeviceLoginOptions{Scopes: scopes, ClientName: clientName})
+}
+
+// BeginDeviceLoginWithOptions is BeginDeviceLogin with the options
+// LoginWithBrowser takes; it reads Scopes, ClientName and ClientID, and
+// ignores the rest.
+//
+// ClientID signs in as a registered app, such as HomeAssistantClientID: the
+// approval screen shows the platform's name for the app as verified
+// (ClientName becomes the device's own label beside it), and approving the
+// app again replaces the token it already holds. Such an app may ask only for
+// its own scopes, and an id the API does not know is refused with a 400
+// unknown_client *APIError. "" leaves the field out.
+func (c *ControlPlane) BeginDeviceLoginWithOptions(ctx context.Context, opts DeviceLoginOptions) (*DeviceAuthorization, error) {
+	grant, err := c.request(ctx, http.MethodPost, "/v1/auth/device/authorize", deviceAuthorizePayload(opts), nil, false)
 	if err != nil {
 		return nil, err
 	}
 	return deviceAuthorizationFromGrant(grant)
+}
+
+// deviceAuthorizePayload is the body of POST /v1/auth/device/authorize:
+// only what was given, and never an empty scope list.
+func deviceAuthorizePayload(opts DeviceLoginOptions) map[string]any {
+	payload := map[string]any{}
+	if len(opts.Scopes) > 0 {
+		payload["scopes"] = opts.Scopes
+	}
+	if strings.TrimSpace(opts.ClientName) != "" {
+		payload["client_name"] = opts.ClientName
+	}
+	if opts.ClientID != "" {
+		payload["client_id"] = opts.ClientID
+	}
+	return payload
+}
+
+// DeviceLoginRequest is a pending device sign-in as the person approving it
+// sees it; see DescribeDeviceLogin.
+//
+// ClientVerified is true only when a registered app asked (it named its
+// ClientID): ClientName is then the platform's own name for that app, and
+// DeviceName whatever the device called itself, which nothing checks.
+// Otherwise ClientName is the device's own claim.
+type DeviceLoginRequest struct {
+	Scopes     []string
+	ClientName string
+	// ExpiresAt is when the code stops being approvable; zero when the API did
+	// not say.
+	ExpiresAt      time.Time
+	ClientID       string
+	ClientVerified bool
+	DeviceName     string
+}
+
+// DescribeDeviceLogin reads a pending device sign-in by its user code, as its
+// approver sees it: GET /v1/auth/device/codes/{userCode}, signed in as the
+// person who would approve it. It says which app asked and whether the
+// platform vouches for its name (ClientVerified). A code that is unknown,
+// expired or already answered is a 404 *APIError.
+func (c *ControlPlane) DescribeDeviceLogin(ctx context.Context, userCode string) (*DeviceLoginRequest, error) {
+	detail, err := c.request(ctx, http.MethodGet, "/v1/auth/device/codes/"+url.PathEscape(userCode), nil, nil, true)
+	if err != nil {
+		return nil, err
+	}
+	return deviceLoginRequestFrom(detail), nil
+}
+
+func deviceLoginRequestFrom(detail map[string]any) *DeviceLoginRequest {
+	text := func(key string) string {
+		value, _ := detail[key].(string)
+		return value
+	}
+	request := &DeviceLoginRequest{
+		ClientName: text("client_name"),
+		ClientID:   text("client_id"),
+		DeviceName: text("device_name"),
+	}
+	if raw, ok := detail["scopes"].([]any); ok {
+		request.Scopes = make([]string, 0, len(raw))
+		for _, scope := range raw {
+			if value, ok := scope.(string); ok {
+				request.Scopes = append(request.Scopes, value)
+			}
+		}
+	}
+	if raw := text("expires_at"); raw != "" {
+		if at, err := time.Parse(time.RFC3339, raw); err == nil {
+			request.ExpiresAt = at
+		}
+	}
+	// Verified only as the API says it, and only with the app named: a true
+	// without an id says nothing about who asked.
+	verified, _ := detail["client_verified"].(bool)
+	request.ClientVerified = verified && request.ClientID != ""
+	return request
 }
 
 // maxDurationSeconds is the most seconds a time.Duration holds (about 292

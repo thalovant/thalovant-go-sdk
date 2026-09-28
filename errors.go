@@ -1,6 +1,7 @@
 package thalovant
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,6 +56,13 @@ var (
 	// a refusal, and retrying cannot change it; the pin is never replaced
 	// automatically (see ForgetNoisePin).
 	ErrHubKeyChanged = errors.New("thalovant hub key changed")
+	// ErrClientKeyRejected reports that a hub refused this client's own Noise
+	// static key: it pinned a different one for the connection. It is a
+	// refusal -- errors.Is(err, ErrHubRefused) holds too, and it travels with
+	// ErrConnection -- but no handshake can recover from it, so a HubSession's
+	// Run returns it at once. errors.As reaches the *ClientKeyRejectedError,
+	// which names the key folders.
+	ErrClientKeyRejected = fmt.Errorf("%w: the hub refused this client's Noise key", ErrHubRefused)
 	// ErrAPIUnreachable reports a control-plane request that never got an
 	// answer: DNS, the connection, TLS, a proxy. It always travels with ErrAPI
 	// and ErrConnection, and it says nothing about what the API would have
@@ -366,6 +374,18 @@ func (e *APIError) Error() string {
 }
 func (e *APIError) Unwrap() error { return ErrAPI }
 
+// GoString keeps %#v from printing Problem, which can hold values the body
+// echoed back from the request: a validation error's input is the request as
+// sent. It shows the status, the code and the display line, which never
+// carries an echoed value; read Problem itself when you need it.
+func (e *APIError) GoString() string {
+	if e == nil {
+		return "(*thalovant.APIError)(nil)"
+	}
+	return fmt.Sprintf("&thalovant.APIError{StatusCode:%d, Code:%q, Detail:%q, RetryAfter:%s}",
+		e.StatusCode, e.Code, e.Detail, e.RetryAfter)
+}
+
 // Is reports whether the refusal is one a caller can branch on: ErrAuth,
 // ErrPlan or ErrAlreadyLinked. They are read from the status and the body, so
 // every control-plane call answers them the same way, and the error stays an
@@ -615,6 +635,36 @@ func (apiUnreachableError) Unwrap() []error {
 // written: the transport is still sound, so nothing is torn down for it.
 var errNothingSent = errors.New("nothing was sent")
 
+// errFinishing marks a send its caller stopped waiting for once its frame
+// had begun to be written: the frame is written to the end in the
+// background, since half of one would break the Noise stream, so nothing is
+// torn down for it either. A write that then fails retires the session on its
+// own.
+var errFinishing = errors.New("the frame being written is finished without its caller")
+
+// finishWithout runs write -- a frame already being written, which must run
+// to the end -- and waits for it or for ctx, whichever comes first. done
+// runs once write has returned, with its error, whatever the caller did.
+func finishWithout(ctx context.Context, write func() error, done func(error)) error {
+	result := make(chan error, 1)
+	go func() {
+		err := write()
+		done(err)
+		result <- err
+	}()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		select {
+		case err := <-result:
+			return err
+		default:
+		}
+		return fmt.Errorf("%w: %w: %w", ErrTimeout, errFinishing, ctx.Err())
+	}
+}
+
 // apiErrorOrSentinel is the API's answer when there is one, and ErrAPI when
 // there is not, so a typed error always matches ErrAPI without ever
 // unwrapping to a nil *APIError inside a non-nil interface.
@@ -671,4 +721,44 @@ func problemText(value any) string {
 // no code in the reference, so it is none here either.
 func problemBlank(r rune) bool {
 	return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f)
+}
+
+// ClientKeyRejectedError is a hub refusing this client's own Noise static key.
+//
+// A hub pins the first static key a connection presents and refuses any other
+// for good, closing the link the moment the XX handshake that showed it ends.
+// Two programs that read the same identity but keep their keys in different
+// folders -- a satellite and a command-line tool run by another user, say --
+// each present their own key, and whichever came second is locked out.
+//
+// KeyFolder is the folder this client's key is in; OtherKeyFolder, when there
+// is a likely one, where another program reading the same identity keeps its
+// key. The fix is to pair again (a new connection pins afresh), or to share
+// the key folder: point every program that reads this identity at the folder
+// holding the key the hub trusts (the transports' NoiseStateDir). It matches
+// ErrClientKeyRejected, ErrHubRefused and ErrConnection.
+type ClientKeyRejectedError struct {
+	KeyFolder      string
+	OtherKeyFolder string
+}
+
+func (e *ClientKeyRejectedError) Error() string {
+	folder := e.KeyFolder
+	if folder == "" {
+		folder = "an unknown folder"
+	}
+	elsewhere := ""
+	if e.OtherKeyFolder != "" {
+		elsewhere = fmt.Sprintf(" Another program that reads the same identity may keep its key in %s, and the hub may have pinned that one.", e.OtherKeyFolder)
+	}
+	return fmt.Sprintf("%v: %v: it pinned a different key for this connection when it first connected. "+
+		"This client's key is in %s.%s A new handshake cannot fix this. Re-pair, or share the key folder: "+
+		"point every program that uses this identity at the folder holding the key the hub trusts (NoiseStateDir).",
+		ErrConnection, ErrClientKeyRejected, folder, elsewhere)
+}
+
+// Unwrap makes a ClientKeyRejectedError match ErrClientKeyRejected, and through
+// it ErrHubRefused, and ErrConnection.
+func (e *ClientKeyRejectedError) Unwrap() []error {
+	return []error{ErrClientKeyRejected, ErrConnection}
 }

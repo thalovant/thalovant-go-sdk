@@ -612,6 +612,25 @@ Set `NoiseStateDir` on `WSSTransport`, `HTTPTransport`, or `MQTTTransport`
 to use another persistent directory. Reuse the same directory and identity
 when switching transports; do not regenerate a paired client's static key.
 
+A hub pins one client key per connection, so every program that uses one
+identity has to present the same key. When `NoiseStateDir` is empty and the
+identity was read from a file (`IdentityFromFile`, `IdentityFromConfig`; see
+`Identity.SourcePath()`), the key and pins live in that file's directory. For
+the usual `~/.config/thalovant` files that is the directory above, so nothing
+moves. For an identity file anywhere else, the first connection copies the key
+and pins from the old default into its directory -- a copy, never a move, and
+only when that key has already met the hub being dialled -- so no device gets
+a new key and is locked out. A directory the process cannot write falls back to
+the old default.
+
+A hub that pinned another key for the connection refuses this one the moment
+the XX handshake that showed it ends. That is a `*ClientKeyRejectedError`
+(`errors.Is(err, thalovant.ErrClientKeyRejected)`, and still
+`ErrHubRefused`): its `KeyFolder` is where this client's key is, and
+`OtherKeyFolder` where another program reading the same identity likely keeps
+its own. No handshake fixes it: pair again, or point every program that reads
+the identity at the folder holding the key the hub trusts.
+
 The first connection to a hub trusts the key it presents and records it. A
 later connection presenting a different key is **refused**, because the SDK
 cannot tell a reinstalled hub from another machine answering at the same
@@ -1042,7 +1061,11 @@ anything. Show the person `VerificationURI` and `UserCode`, or open
 
 ```go
 control := thalovant.NewDefaultControlPlane("")
-grant, err := control.BeginDeviceLogin(ctx, thalovant.HomeAssistantScopes(), "Home Assistant")
+grant, err := control.BeginDeviceLoginWithOptions(ctx, thalovant.DeviceLoginOptions{
+	Scopes:     thalovant.HomeAssistantScopes(),
+	ClientName: "Home Assistant (kitchen)",
+	ClientID:   thalovant.HomeAssistantClientID,
+})
 if err != nil {
 	return err
 }
@@ -1064,7 +1087,18 @@ for {
 ```
 
 `HomeAssistantScopes()` is `hubs:read`, `clients:read` and `clients:write`,
-which is also everything a Free plan can approve. A `slow_down` answer adds
+which is also everything a Free plan can approve. `ClientID` signs in as a
+registered app: the approval screen shows the platform's own name for it as
+verified, with `ClientName` as the device's label beside it, and approving the
+app again replaces the token it already holds. An id the API does not know is
+refused with a 400 `unknown_client`. `BeginDeviceLogin(ctx, scopes, name)` is
+the same call without one.
+
+The person approving can read what they are approving:
+`control.DescribeDeviceLogin(ctx, userCode)`, signed in as them, returns the
+scopes, `ClientName`, `ClientID`, `DeviceName` and `ClientVerified`, which is
+true only for a registered app. A code that is unknown, expired or already
+answered is a 404. A `slow_down` answer adds
 five seconds to `grant.Interval` for good, so keep polling with the same
 `grant`. On approval the token is kept on `control.AccessToken` and its id on
 `control.TokenID`; `control.RevokeAPIToken(ctx, "")` revokes it (a token may
@@ -1177,7 +1211,10 @@ what is left of the 10, when less), under a context that ends when its time is
 up; the reply gets what the handler left. The answer goes out at the deadline
 whether or not the handler has returned, so a handler that ignores its context
 cannot hold it back. A reply is never started after the 10 seconds, and one
-still waiting to be sent then is withdrawn: the hub has already given up on it.
+still waiting to be sent then -- queued behind another frame -- is withdrawn:
+the hub has already given up on it. Withdrawing it leaves the link as it was.
+A frame already being written is always finished, since half of one would
+break the Noise stream.
 
 Every request gets an answer while there is time: an error or a panic is
 answered as `failed_to_handle`, running out of time as `timeout`, and an answer
@@ -1194,7 +1231,8 @@ drops. A hub turns away a connection it has not admitted yet, so a refusal is
 "not yet" for 10 minutes (`WithRefusalGrace`) before `Run` returns an error
 matching `ErrHubRefused`. A hub whose Noise key is not the pinned one ends
 `Run` at once with `ErrHubKeyChanged`: retrying cannot change it, and the pin
-is never replaced for you (see `ForgetNoisePin`).
+is never replaced for you (see `ForgetNoisePin`). So does a hub that refuses
+this client's own key, `ErrClientKeyRejected` (see "Transport Security").
 
 A refusal is any of these:
 
@@ -1203,9 +1241,12 @@ A refusal is any of these:
 - a WebSocket upgrade answered 401 or 403;
 - a close with no status, 1000, 1005 or 1008 during the handshake or within
   750 ms after it (`WithSettle`), which is how a hub that does not know the
-  client's key answers.
+  client's key answers, as long as the hub has sent nothing that decrypted
+  under the new session's keys: a hub refuses a key before it says anything;
+- over HTTP, a request answered 401 or 403 before the hub has sent anything.
 
-Any other close is a drop. On every transport -- WSS, HTTP and MQTT -- a KK
+Right as an XX handshake ends, such a refusal is `ErrClientKeyRejected`: the
+hub pinned another key for this connection. Any other close is a drop. On every transport -- WSS, HTTP and MQTT -- a KK
 handshake that fails that way is followed at once, inside the same connect, by
 one XX handshake, because only XX tells a changed password (a refusal) from a
 changed hub key; the pin is still checked when XX completes, so the retry is
@@ -1224,8 +1265,9 @@ and `thalovant.AnswerHomeRequest` for each event.
 - `NewControlPlane(apiURL, accessToken)` for local or self-hosted control planes
 - `control.Login(ctx, email, password, scope)`
 - `control.LoginWithOptions(ctx, email, password, LoginOptions{Scope: ..., OTPCode: ..., RecoveryCode: ...})`
-- `control.LoginWithBrowser(ctx, DeviceLoginOptions{Scopes: ..., ClientName: ..., OpenBrowser: ..., Prompt: ..., Timeout: ...})`
-- `control.BeginDeviceLogin(ctx, scopes, clientName)` and `control.PollDeviceLogin(ctx, grant)`
+- `control.LoginWithBrowser(ctx, DeviceLoginOptions{Scopes: ..., ClientName: ..., ClientID: ..., OpenBrowser: ..., Prompt: ..., Timeout: ...})`
+- `control.BeginDeviceLogin(ctx, scopes, clientName)`, `control.BeginDeviceLoginWithOptions(ctx, DeviceLoginOptions{...})` and `control.PollDeviceLogin(ctx, grant)`
+- `control.DescribeDeviceLogin(ctx, userCode)` -> `*DeviceLoginRequest`; `HomeAssistantClientID`
 - `control.RevokeAPIToken(ctx, tokenID)`
 - `control.ListPublicHubs(ctx, limit, cursor)`
 - `control.GetPublicHub(ctx, hubRef)`
@@ -1265,7 +1307,7 @@ and `thalovant.AnswerHomeRequest` for each event.
 - `control.GetClient(ctx, clientID)`
 - `control.DeleteClient(ctx, clientID, etag)`
 - `IdentityFromConfig(path, profile)`
-- `IdentityFromFile(path)`
+- `IdentityFromFile(path)`; `identity.SourcePath()`
 - `NewClientFromConfig(path, profile)`
 - `NewClientFromFile(path)`
 - `NewClientFromEnv()`
@@ -1286,7 +1328,7 @@ and `thalovant.AnswerHomeRequest` for each event.
 - `session.Run(ctx)`, `session.Connect(ctx)`, `session.On(eventType, handler)`, `session.OnStateChange(notify)`, `session.Reply(...)`
 - `AnswerHomeRequests(session, handler, HomeAnswerOptions{Timeout: ..., HubTimeout: ..., OnReplyError: ...})` and `AnswerHomeRequest(ctx, replier, event, handler, options)`
 - `PlainSpeech(text)`, `DecodeReferences(text)`, `StripSSML(text)`
-- `NewLinkSupervisor(policy, refusalGrace).After(outcome, now)`
+- `NewLinkSupervisor(policy, refusalGrace).After(outcome, now)`; `LinkClientKeyRejected`, `ErrClientKeyRejected` and `*ClientKeyRejectedError{KeyFolder, OtherKeyFolder}`
 
 ## Development
 
