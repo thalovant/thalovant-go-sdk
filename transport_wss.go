@@ -6,8 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"sync"
 	"time"
@@ -24,13 +26,22 @@ type WSSTransport struct {
 	// pin file live. Empty uses the directory holding the SDK config file.
 	NoiseStateDir string
 
-	BusEvents      chan Event
-	HiveEvents     chan HiveMessage
-	conn           *websocket.Conn
-	connected      bool
-	handshake      bool
-	lastError      error
-	connection     connectionTelemetry
+	BusEvents     chan Event
+	HiveEvents    chan HiveMessage
+	conn          *websocket.Conn
+	connected     bool
+	handshake     bool
+	lastError     error
+	closedRefused bool
+	connection    connectionTelemetry
+	// handshakeAt is when the Noise handshake completed, the start of the
+	// window in which a close is still the hub's answer to it.
+	handshakeAt time.Time
+	// pattern is the Noise pattern the current attempt chose, and forceXX
+	// makes the next attempt choose XX whatever is pinned: after a failed KK,
+	// only XX tells a changed password from a changed hub key.
+	pattern        string
+	forceXX        bool
 	handshakeReady chan struct{}
 	readDone       chan struct{}
 	writeMu        contextMutex
@@ -105,6 +116,7 @@ func (t *WSSTransport) Connect(ctx context.Context) error {
 	owned, cancel := context.WithTimeout(ctx, 20*time.Second)
 	pending := &wssConnectionAttempt{done: make(chan struct{}), cancel: cancel}
 	t.attempt = pending
+	t.forceXX = false
 	old := t.beginConnectionLocked()
 	generation := t.generation
 	t.mu.Unlock()
@@ -112,6 +124,25 @@ func (t *WSSTransport) Connect(ctx context.Context) error {
 		_ = old.Close()
 	}
 	err := t.connectGeneration(owned, generation)
+	t.mu.Lock()
+	retryXX := err != nil && t.pattern == noisePatternKK && errors.Is(err, ErrHubRefused) && owned.Err() == nil
+	if retryXX {
+		// A KK attempt the hub refused, or whose answer did not authenticate,
+		// is followed at once, inside this connect, by one XX attempt: KK
+		// cannot tell a changed password from a changed hub key, and XX can.
+		// It is no downgrade -- the pinned key is still checked when XX
+		// completes, so a hub that is not the pinned one still fails.
+		t.forceXX = true
+		old = t.beginConnectionLocked()
+		generation = t.generation
+	}
+	t.mu.Unlock()
+	if retryXX {
+		if old != nil {
+			_ = old.Close()
+		}
+		err = t.connectGeneration(owned, generation)
+	}
 	cancel()
 	t.mu.Lock()
 	pending.err = err
@@ -141,10 +172,16 @@ func (t *WSSTransport) connectGeneration(ctx context.Context, generation uint64)
 	if err != nil {
 		return err
 	}
-	conn, _, err = websocket.DefaultDialer.DialContext(ctx, endpointURL, nil)
+	conn, response, err := websocket.DefaultDialer.DialContext(ctx, endpointURL, nil)
 	if err != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
 		if ctx.Err() != nil {
 			return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+		}
+		if response != nil && (response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
+			return fmt.Errorf("%w: %w (HTTP %d)", ErrConnection, ErrHubRefused, response.StatusCode)
 		}
 		return fmt.Errorf("%w: %v", ErrConnection, scrubTransportError(err))
 	}
@@ -164,8 +201,15 @@ func (t *WSSTransport) connectGeneration(ctx context.Context, generation uint64)
 		return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
 	case <-closed:
 		t.mu.RLock()
-		cause := t.lastError
+		cause, refused := t.lastError, t.closedRefused
 		t.mu.RUnlock()
+		switch {
+		case errors.Is(cause, ErrHubKeyChanged), errors.Is(cause, ErrHubRefused):
+			// This SDK's own verdict on the handshake, already worded.
+			return cause
+		case refused:
+			return fmt.Errorf("%w: %w: the hub closed the link during the handshake: %v", ErrConnection, ErrHubRefused, cause)
+		}
 		return fmt.Errorf("%w: v3 Noise handshake did not complete: %v", ErrConnection, cause)
 	case <-ready:
 		t.mu.Lock()
@@ -174,6 +218,16 @@ func (t *WSSTransport) connectGeneration(ctx context.Context, generation uint64)
 			return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
 		}
 		if t.generation != generation || t.conn != conn || !t.connected || !t.handshake {
+			// A close that landed between the end of the handshake and here
+			// is read as it would be a moment later.
+			if t.generation == generation {
+				switch cause := t.lastError; {
+				case errors.Is(cause, ErrHubKeyChanged), errors.Is(cause, ErrHubRefused):
+					return cause
+				case t.closedRefused:
+					return fmt.Errorf("%w: %w: the hub closed the link right after the handshake: %v", ErrConnection, ErrHubRefused, cause)
+				}
+			}
 			return fmt.Errorf("%w: connection retired before authenticated readiness", ErrConnection)
 		}
 		t.connection.complete(time.Now())
@@ -421,10 +475,18 @@ func (t *WSSTransport) startNoiseHandshake(ctx context.Context, handshakePayload
 	if err != nil {
 		return err
 	}
+	t.mu.RLock()
+	choosing := pinned
+	if t.forceXX {
+		// The pin still decides the outcome: pinServerKey checks it when XX
+		// completes.
+		choosing = ""
+	}
+	t.mu.RUnlock()
 	pattern, suite, ok := selectNoiseOptions(
 		stringSlice(noiseParams["patterns"]),
 		stringSlice(noiseParams["suites"]),
-		pinned,
+		choosing,
 	)
 	if !ok {
 		return fmt.Errorf("%w: no Noise pattern and suite this SDK supports are on offer from the hub", ErrConnection)
@@ -468,6 +530,7 @@ func (t *WSSTransport) startNoiseHandshake(ctx context.Context, handshakePayload
 		return staleWSSGeneration()
 	}
 	t.noiseHandshake = handshake
+	t.pattern = pattern
 	t.mu.Unlock()
 
 	return t.sendCleartext(ctx, HiveMessage{
@@ -514,7 +577,9 @@ func (t *WSSTransport) continueNoiseHandshake(ctx context.Context, noiseParams m
 		if current {
 			t.forgetPSK(nodeID)
 		}
-		return err
+		// A message that does not authenticate under the key this password
+		// derives is the hub refusing the credentials: a wrong password.
+		return fmt.Errorf("%w: %w: the hub's handshake answer did not authenticate under this connection's password: %v", ErrConnection, ErrHubRefused, err)
 	}
 	if !handshake.complete {
 		// XXpsk2 message 3: our encrypted static key and the final DH mix.
@@ -569,6 +634,7 @@ func (t *WSSTransport) continueNoiseHandshake(ctx context.Context, noiseParams m
 	}
 	if !t.handshake {
 		t.handshake = true
+		t.handshakeAt = time.Now()
 		close(t.handshakeReady)
 	}
 	t.mu.Unlock()
@@ -702,7 +768,9 @@ func (t *WSSTransport) writeGeneration(ctx context.Context, generation uint64, c
 	bounded, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	if err := t.writeMu.Lock(bounded); err != nil {
-		return fmt.Errorf("%w: %w", ErrTimeout, err)
+		// Still queued behind another frame: nothing of this one was
+		// encrypted or written, so the Noise stream is intact.
+		return fmt.Errorf("%w: %w: %w", ErrTimeout, errNothingSent, err)
 	}
 	defer t.writeMu.Unlock()
 	t.mu.RLock()
@@ -799,6 +867,9 @@ func (t *WSSTransport) beginConnectionLocked() *websocket.Conn {
 	t.conn = nil
 	t.generation++
 	t.lastError = nil
+	t.closedRefused = false
+	t.handshakeAt = time.Time{}
+	t.pattern = ""
 	t.connected = false
 	t.handshake = false
 	t.session = nil
@@ -821,11 +892,60 @@ func (t *WSSTransport) recordReadFailure(generation uint64, err error) {
 		return
 	}
 	t.lastError = err
+	var closed *websocket.CloseError
+	code := 0
+	if errors.As(err, &closed) {
+		code = closed.Code
+	}
+	// The close's own time decides: gorilla learns the code with the close,
+	// so it is never late here.
+	t.closedRefused = errors.Is(err, ErrHubRefused) ||
+		closeRefuses(code, !t.handshake, time.Since(t.handshakeAt), 0)
 	t.connected = false
 	t.handshake = false
 	t.session = nil
 	t.noiseHandshake = nil
 	t.connection.fail(time.Now(), err)
+}
+
+// refusalCloseCodes are how a hub closes a socket whose credentials it
+// refuses: no status (1005) for an access key it does not know and after a
+// Noise abort, 1008 for a malformed authorization, and 1000. Anything else --
+// 1001, 1011, 1013, a socket that ended with no close frame (1006) -- is the
+// hub's trouble or the network's, not a verdict on the credentials.
+var refusalCloseCodes = map[int]bool{
+	websocket.CloseNormalClosure:    true,
+	websocket.CloseNoStatusReceived: true,
+	websocket.ClosePolicyViolation:  true,
+}
+
+// closeCodeGrace is how late a transport may learn a close's code and still
+// have it count (URLSession reports that a socket closed before how).
+const closeCodeGrace = 250 * time.Millisecond
+
+// closeRefuses reports whether a close is the hub refusing the credentials
+// rather than a drop (link-keeping-vectors.json). code is the RFC 6455 close
+// code, 0 when the socket ended with no close frame. A refusal code counts
+// during the handshake -- any step of it -- or within DefaultHubSettle after
+// it, by the close's own time (afterHandshake), when the code was learnt no
+// more than closeCodeGrace after the close (codeLate).
+func closeRefuses(code int, duringHandshake bool, afterHandshake, codeLate time.Duration) bool {
+	if !refusalCloseCodes[code] || codeLate > closeCodeGrace {
+		return false
+	}
+	return duringHandshake || afterHandshake <= DefaultHubSettle
+}
+
+// ClosedRefused reports whether the hub refused this connection's credentials
+// the last time it ended: a handshake message that did not authenticate (a
+// wrong password), or a close with no status, 1000, 1005 or 1008 during the
+// handshake or within DefaultHubSettle after it. A hub that does not know a
+// client's static key says so only by closing then; the same codes later are a
+// hub going away, which is a drop. A new connection attempt clears it.
+func (t *WSSTransport) ClosedRefused() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.closedRefused
 }
 
 // signalReadDone unblocks a Connect still waiting on the handshake once the

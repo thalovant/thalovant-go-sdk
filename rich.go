@@ -17,8 +17,20 @@ type DisplayItem struct {
 	Silent  bool
 }
 
-var ssmlPattern = regexp.MustCompile(`<{1}/?[^>]*>{1}`)
+// markupSpace is what the reference's \s matches in a tag: Unicode white
+// space and the four information separators.
+const markupSpace = "[\\t\\n\\v\\f\\r \\x{1c}-\\x{1f}\\x{85}\\x{a0}\\x{1680}\\x{2000}-\\x{200a}\\x{2028}\\x{2029}\\x{202f}\\x{205f}\\x{3000}]"
 
+// ssmlPattern is one markup construct: a comment, a processing instruction,
+// or a tag -- "<" or "</" immediately followed by a name that starts with an
+// ASCII letter, then attributes, whose quoted values may hold ">", then ">"
+// or "/>". Any other "<" is text.
+var ssmlPattern = regexp.MustCompile(`(?s)<!--.*?-->|<\?.*?\?>|</?[A-Za-z][A-Za-z0-9._:-]*(?:` + markupSpace + `+(?:[^<>"']|"[^"]*"|'[^']*')*)?` + markupSpace + `*/?>`)
+
+// StripSSML removes SSML and XML markup from display text: tags, comments and
+// processing instructions. Only real markup goes, so "5 < 6 and 7 > 3"
+// survives whole, and an unclosed "<b" is text. Entities are left as they
+// are; PlainSpeech decodes the portable set.
 func StripSSML(text string) string {
 	return ssmlPattern.ReplaceAllString(text, "")
 }

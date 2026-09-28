@@ -15,7 +15,9 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -62,11 +64,28 @@ type OperationResource struct {
 	Links         map[string]*string `json:"links"`
 }
 
+// controlTokens guards the token fields of every ControlPlane while the SDK
+// reads or writes them -- AccessToken, TokenID and whether the token was
+// revoked -- so a sign-in stores a token and its id together and a revoke
+// finishing on another goroutine clears only the token it revoked. It is one
+// lock for all control planes because a ControlPlane is a plain struct, often
+// built as a literal and copied by value; the sections it guards are a few
+// assignments long. A caller that sets AccessToken itself while calls are in
+// flight on other goroutines still has to synchronise that itself.
+var controlTokens sync.Mutex
+
 type ControlPlane struct {
 	APIURL      string
 	AccessToken string
 	UserAgent   string
 	HTTPClient  *http.Client
+	// TokenID names the API token in AccessToken when the sign-in that stored
+	// it said which one (a device login does), for RevokeAPIToken; "" otherwise.
+	// Every sign-in sets it from its own answer.
+	TokenID string
+	// revokedOwn records that the token this ControlPlane signed in with was
+	// revoked and forgotten, so revoking it again is the no-op it should be.
+	revokedOwn bool
 }
 
 // String implements fmt.Stringer so the %v, %s, and %+v verbs render a
@@ -88,6 +107,12 @@ type BootstrapIdentityOptions struct {
 	Active             *bool
 	PreferredProtocols []HubProtocol
 	IdempotencyKey     string
+	// ConnectionType is the kind of connection to create, such as
+	// ConnectionTypeHomeAssistant, sent as spec.connection_type; "" leaves the
+	// API's default. The API must say the connection is of that kind: when it
+	// does not, CreateClientIdentity deletes what it made and returns an
+	// *UnsupportedConnectionTypeError.
+	ConnectionType string
 }
 
 type BootstrapIdentityResult struct {
@@ -95,6 +120,9 @@ type BootstrapIdentityResult struct {
 	Hub      map[string]any
 	Client   map[string]any
 	Endpoint *SelectedHubEndpoint
+	// Operation tracks the hub admitting the new connection, about ninety
+	// seconds; WaitForAdmission follows it. nil when the API sent none.
+	Operation *OperationResource
 }
 
 type AnalyticsOverviewOptions struct {
@@ -242,17 +270,18 @@ func (c *ControlPlane) LoginWithOptions(ctx context.Context, email string, passw
 	if err != nil {
 		return nil, err
 	}
-	accessToken, _ := token["access_token"].(string)
-	if accessToken == "" {
-		return nil, fmt.Errorf("%w: token response did not include access_token", ErrAPI)
+	// A password sign-in answers with a session token, which has no token_id:
+	// the id of a device-login token signed in with earlier must not outlive it.
+	if _, err := c.acceptToken(token); err != nil {
+		return nil, err
 	}
-	c.AccessToken = accessToken
 	return token, nil
 }
 
 // DeviceLoginOptions carries optional device-flow sign-in inputs for
 // LoginWithBrowser. Scopes and ClientName are forwarded to the device
-// authorization request when set; the server may expand the echoed scopes
+// authorization request when set (an empty Scopes is left out, as the API
+// refuses one); the server may expand the echoed scopes
 // during normalization. OpenBrowser defaults to true when nil. Prompt, when
 // set, receives the device authorization payload instead of the default
 // message printed to stdout. Timeout bounds the whole approval wait and
@@ -275,12 +304,14 @@ type DeviceLoginOptions struct {
 // approved, denied, expired, the timeout elapses, or ctx is cancelled.
 //
 // On approval the returned access_token is a durable scoped API token and is
-// stored on ControlPlane.AccessToken exactly like Login. Denial, expiry, and
-// timeout are reported as ErrDeviceAccessDenied, ErrDeviceCodeExpired, and
-// ErrTimeout respectively.
+// stored on ControlPlane.AccessToken exactly like Login, with its token_id on
+// ControlPlane.TokenID. Denial, expiry, and timeout are reported as
+// ErrDeviceAccessDenied (a *DeviceLoginDeniedError), ErrDeviceCodeExpired (a
+// *DeviceLoginExpiredError), and ErrTimeout respectively. BeginDeviceLogin and
+// PollDeviceLogin are the same flow one step at a time.
 func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOptions) (map[string]any, error) {
 	payload := map[string]any{}
-	if opts.Scopes != nil {
+	if len(opts.Scopes) > 0 {
 		payload["scopes"] = opts.Scopes
 	}
 	if strings.TrimSpace(opts.ClientName) != "" {
@@ -290,32 +321,18 @@ func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOpt
 	if err != nil {
 		return nil, err
 	}
-	deviceCode := optional(grant["device_code"])
-	userCode := optional(grant["user_code"])
-	verificationURI := optional(grant["verification_uri"])
-	if deviceCode == "" || userCode == "" || verificationURI == "" {
-		return nil, fmt.Errorf("%w: device authorization response was incomplete", ErrAPI)
-	}
-	if err := validateBrowserURL(verificationURI); err != nil {
+	authorization, err := deviceAuthorizationFromGrant(grant)
+	if err != nil {
 		return nil, err
-	}
-	if completeURI := optional(grant["verification_uri_complete"]); completeURI != "" {
-		if err := validateBrowserURL(completeURI); err != nil {
-			return nil, err
-		}
-	}
-	interval := defaultDevicePollInterval
-	if raw, ok := grant["interval"].(float64); ok && raw >= 0 {
-		interval = time.Duration(raw * float64(time.Second))
 	}
 
 	if opts.Prompt != nil {
 		opts.Prompt(grant)
 	} else {
-		fmt.Printf("To sign in, visit %s and enter the code %s\n", verificationURI, userCode)
+		fmt.Printf("To sign in, visit %s and enter the code %s\n", authorization.VerificationURI, authorization.UserCode)
 	}
 	if opts.OpenBrowser == nil || *opts.OpenBrowser {
-		if completeURI := optional(grant["verification_uri_complete"]); completeURI != "" {
+		if completeURI := authorization.VerificationURIComplete; completeURI != "" {
 			// Browser availability is best-effort; a headless host is fine.
 			_ = openBrowser(completeURI)
 		}
@@ -325,15 +342,13 @@ func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOpt
 	if timeout <= 0 {
 		timeout = DefaultDeviceLoginTimeout
 	}
-	token, err := c.pollDeviceToken(ctx, deviceCode, interval, timeout, sleepContext, time.Now)
+	token, err := c.pollDeviceToken(ctx, authorization.DeviceCode, authorization.Interval, timeout, sleepContext, time.Now)
 	if err != nil {
 		return nil, err
 	}
-	accessToken, _ := token["access_token"].(string)
-	if accessToken == "" {
-		return nil, fmt.Errorf("%w: token response did not include access_token", ErrAPI)
+	if _, err := c.acceptToken(token); err != nil {
+		return nil, err
 	}
-	c.AccessToken = accessToken
 	return token, nil
 }
 
@@ -349,39 +364,14 @@ func (c *ControlPlane) pollDeviceToken(
 	now func() time.Time,
 ) (map[string]any, error) {
 	deadline := now().Add(timeout)
-	wait := interval
 	for {
-		status, raw, err := c.send(ctx, http.MethodPost, "/v1/auth/device/token", map[string]any{"device_code": deviceCode}, nil, false)
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, ctxErr
-			}
+		token, err := c.deviceTokenOnce(ctx, deviceCode, &interval)
+		if err == nil {
+			return token, nil
+		}
+		wait, pending := devicePending(err)
+		if !pending {
 			return nil, err
-		}
-		if status >= 200 && status <= 299 {
-			result, decodeErr := decodeControlJSON(raw)
-			if decodeErr != nil {
-				return nil, &APIError{StatusCode: status, Detail: "invalid JSON response"}
-			}
-			return result, nil
-		}
-		errorCode := ""
-		if status == http.StatusBadRequest {
-			if body, decodeErr := decodeControlJSON(raw); decodeErr == nil {
-				errorCode, _ = body["error"].(string)
-			}
-		}
-		switch errorCode {
-		case "authorization_pending":
-			// Keep polling.
-		case "slow_down":
-			wait += deviceSlowDownIncrement
-		case "access_denied":
-			return nil, fmt.Errorf("%w: the device sign-in request was denied in the browser", ErrDeviceAccessDenied)
-		case "expired_token":
-			return nil, fmt.Errorf("%w: the device sign-in code expired before it was approved; call LoginWithBrowser again to request a new code", ErrDeviceCodeExpired)
-		default:
-			return nil, apiErrorFromResponse(status, raw)
 		}
 		remaining := deadline.Sub(now())
 		if remaining <= 0 {
@@ -748,12 +738,12 @@ func (c *ControlPlane) UpdateRuntimeGroupConfig(ctx context.Context, runtimeGrou
 	}
 	delta := stable["config"].(map[string]any)
 	for attempt := 0; ; attempt++ {
-		status, raw, err := c.send(ctx, http.MethodGet, path, nil, nil, true)
+		status, raw, header, err := c.send(ctx, http.MethodGet, path, nil, nil, true)
 		if err != nil {
 			return nil, err
 		}
 		if status < 200 || status > 299 {
-			return nil, apiErrorFromResponse(status, raw)
+			return nil, apiErrorFromResponse(status, raw, header)
 		}
 		// Preserve untouched JSON integers/decimals exactly when writing the snapshot back.
 		var snapshot map[string]any
@@ -965,6 +955,21 @@ func (c *ControlPlane) CreateClientIdentityForHubID(ctx context.Context, hubID s
 	return c.CreateClientIdentity(ctx, hub, opts)
 }
 
+// CreateClientIdentity provisions a connection to a hub and returns the
+// identity to connect with. The secrets are generated here and sent to the API
+// once; the usable identity is in the result.
+//
+// With opts.ConnectionType set, the connection is of that kind, and the
+// refusals a caller can branch on come back as errors to test with errors.Is:
+// ErrUnsupportedConnectionType (an *UnsupportedConnectionTypeError: the API
+// does not know the kind, or made an ordinary connection instead, which is
+// deleted), ErrPlan (the plan does not allow it), ErrAlreadyLinked (the hub
+// already holds the one link of its kind; APIError.LinkedClientID names it) and
+// ErrAuth (sign in again). Each still carries the *APIError the API answered
+// with.
+//
+// The result's Operation tracks the hub admitting the connection, about ninety
+// seconds; WaitForAdmission waits for it.
 func (c *ControlPlane) CreateClientIdentity(ctx context.Context, hub map[string]any, opts BootstrapIdentityOptions) (BootstrapIdentityResult, error) {
 	if strings.TrimSpace(opts.Name) == "" {
 		return BootstrapIdentityResult{}, fmt.Errorf("%w: client name is required", ErrAPI)
@@ -993,6 +998,10 @@ func (c *ControlPlane) CreateClientIdentity(ctx context.Context, hub map[string]
 		}
 		spec[key] = val
 	}
+	connectionType := strings.TrimSpace(opts.ConnectionType)
+	if connectionType != "" {
+		spec["connection_type"] = connectionType
+	}
 	spec["apiKey"] = apiKey
 	spec["password"] = password
 	spec["siteId"] = siteID
@@ -1012,7 +1021,17 @@ func (c *ControlPlane) CreateClientIdentity(ctx context.Context, hub map[string]
 	}
 	client, err := c.CreateClient(ctx, payload, opts.IdempotencyKey)
 	if err != nil {
+		if connectionType != "" {
+			if apiErr, refused := refusesConnectionType(err); refused {
+				return BootstrapIdentityResult{}, &UnsupportedConnectionTypeError{ConnectionType: connectionType, APIError: apiErr}
+			}
+		}
 		return BootstrapIdentityResult{}, err
+	}
+	if connectionType != "" {
+		if err := c.requireConnectionType(ctx, client, connectionType); err != nil {
+			return BootstrapIdentityResult{}, err
+		}
 	}
 
 	protocols := ProtocolSettingsFromMap(hub)
@@ -1041,7 +1060,13 @@ func (c *ControlPlane) CreateClientIdentity(ctx context.Context, hub map[string]
 			Protocols:          protocols,
 		}
 	}
-	return BootstrapIdentityResult{Identity: identity, Hub: hub, Client: client, Endpoint: selected}, nil
+	return BootstrapIdentityResult{
+		Identity:  identity,
+		Hub:       hub,
+		Client:    client,
+		Endpoint:  selected,
+		Operation: operationFromAny(client["operation"]),
+	}, nil
 }
 
 func (r BootstrapIdentityResult) SelectedProtocol() HubProtocol {
@@ -1175,12 +1200,12 @@ func (c *ControlPlane) RequireRuntimeProtocol(result BootstrapIdentityResult, pr
 }
 
 func (c *ControlPlane) request(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool) (map[string]any, error) {
-	status, raw, err := c.send(ctx, method, path, payload, headers, auth)
+	status, raw, header, err := c.send(ctx, method, path, payload, headers, auth)
 	if err != nil {
 		return nil, err
 	}
 	if status < 200 || status > 299 {
-		return nil, apiErrorFromResponse(status, raw)
+		return nil, apiErrorFromResponse(status, raw, header)
 	}
 	result, decodeErr := decodeControlJSON(raw)
 	if decodeErr != nil {
@@ -1189,18 +1214,18 @@ func (c *ControlPlane) request(ctx context.Context, method string, path string, 
 	return result, nil
 }
 
-func (c *ControlPlane) send(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool) (int, []byte, error) {
+func (c *ControlPlane) send(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool) (int, []byte, http.Header, error) {
 	var body io.Reader
 	if payload != nil {
 		raw, err := json.Marshal(payload)
 		if err != nil {
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 		body = bytes.NewReader(raw)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.APIURL+strings.TrimLeft(path, "/"), body)
 	if err != nil {
-		return 0, nil, fmt.Errorf("%w: invalid control request", ErrAPI)
+		return 0, nil, nil, fmt.Errorf("%w: invalid control request", ErrAPI)
 	}
 	req.Header.Set("accept", "application/json")
 	req.Header.Set("user-agent", c.UserAgent)
@@ -1211,10 +1236,13 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 		req.Header.Set(key, val)
 	}
 	if auth {
-		if c.AccessToken == "" {
-			return 0, nil, fmt.Errorf("%w: missing access token", ErrAPI)
+		controlTokens.Lock()
+		accessToken := c.AccessToken
+		controlTokens.Unlock()
+		if accessToken == "" {
+			return 0, nil, nil, fmt.Errorf("%w: missing access token", ErrAPI)
 		}
-		req.Header.Set("authorization", "Bearer "+c.AccessToken)
+		req.Header.Set("authorization", "Bearer "+accessToken)
 	}
 	// Bind passwords, device codes and bearer credentials to a secure endpoint.
 	// Literal loopback development endpoints remain supported without DNS
@@ -1226,7 +1254,7 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 	sendsCookies := client.Jar != nil && len(client.Jar.Cookies(req.URL)) != 0
 	if auth || payload != nil || req.URL.User != nil || sendsCookies || req.Header.Get("authorization") != "" || req.Header.Get("cookie") != "" || req.Header.Get("proxy-authorization") != "" {
 		if err := requireControlCredentialEndpoint(req.URL); err != nil {
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 	}
 	scopedClient := *client
@@ -1239,13 +1267,15 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 		// may return arbitrary credential-bearing text. Preserve only known,
 		// safe context errors; never retain the transport cause in the chain.
 		if cause := ctx.Err(); cause == context.Canceled || cause == context.DeadlineExceeded {
-			return 0, nil, fmt.Errorf("%w: %w", ErrAPI, cause)
+			return 0, nil, nil, fmt.Errorf("%w: %w", ErrAPI, cause)
 		}
-		return 0, nil, fmt.Errorf("%w: control request failed", ErrAPI)
+		// Never answered: DNS, the connection, TLS, a proxy. It says nothing
+		// about what the API would have answered.
+		return 0, nil, nil, apiUnreachableError{}
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, raw, nil
+	return resp.StatusCode, raw, resp.Header, nil
 }
 
 // requireControlCredentialEndpoint permits HTTP only for literal local development.
@@ -1285,7 +1315,7 @@ var serverErrorDetailFields = []string{"detail", "message", "error", "error_desc
 // decoded once. When it is a JSON object it rides on the error whole, as
 // Problem, with its Code and its unshortened ProblemDetail read out of it; the
 // Detail that Error() prints stays the bounded line it always was.
-func apiErrorFromResponse(status int, raw []byte) *APIError {
+func apiErrorFromResponse(status int, raw []byte, header http.Header) *APIError {
 	problem := decodeProblem(raw)
 	code, detail := problemFields(problem)
 	return &APIError{
@@ -1294,7 +1324,32 @@ func apiErrorFromResponse(status int, raw []byte) *APIError {
 		Code:          code,
 		ProblemDetail: detail,
 		Problem:       problem,
+		RetryAfter:    retryAfter(problem, header),
 	}
+}
+
+// retryAfter is how long an answer asks the caller to wait: the body's
+// retry_after_seconds, at the top or inside a detail object -- the API's
+// per-token 429 is FastAPI's envelope around a structured refusal, so it sits
+// inside detail, as code does -- else the Retry-After header in seconds, else
+// RateLimit-Reset. An HTTP-date Retry-After is not read.
+func retryAfter(problem map[string]any, header http.Header) time.Duration {
+	nested, _ := problem["detail"].(map[string]any)
+	for _, source := range []map[string]any{problem, nested} {
+		if seconds, ok := source["retry_after_seconds"].(float64); ok && seconds >= 0 && seconds <= maxDurationSeconds {
+			return time.Duration(seconds * float64(time.Second))
+		}
+	}
+	for _, name := range []string{"Retry-After", "RateLimit-Reset"} {
+		value := strings.TrimSpace(header.Get(name))
+		if value == "" || strings.TrimLeft(value, "0123456789") != "" {
+			continue
+		}
+		if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && float64(seconds) <= maxDurationSeconds {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	return 0
 }
 
 // decodeProblem is an error body decoded, exactly when it is a JSON object;

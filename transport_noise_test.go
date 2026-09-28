@@ -39,6 +39,9 @@ type transportResponder struct {
 	binary     []string
 	helloCount int
 	patterns   []string
+	// corrupt names the patterns whose answer this responder spoils, so the
+	// client cannot authenticate it: a hub whose answer fails verification.
+	corrupt map[string]bool
 }
 
 func newTransportResponder(t *testing.T) *transportResponder {
@@ -147,6 +150,9 @@ func (s *transportResponder) receive(raw []byte, binary bool) error {
 		if err != nil {
 			return err
 		}
+		if s.corrupt[pattern] {
+			reply[len(reply)-1] ^= 1
+		}
 		s.plain = append(s.plain, marshalHive("shake", map[string]any{"noise": map[string]any{"msg": hex.EncodeToString(reply)}}))
 	} else {
 		if _, err := s.handshake.readMessage(msg); err != nil {
@@ -173,6 +179,10 @@ type httpNoiseFixture struct {
 	plainBus    bool
 	unsupported bool
 	connected   bool
+	// refuseKK answers a KK first message with HTTP 401, as a hub that turns
+	// the credentials away does; refusedKK counts them.
+	refuseKK  bool
+	refusedKK int
 }
 
 func newHTTPNoiseFixture(t *testing.T) *httpNoiseFixture {
@@ -241,6 +251,11 @@ func (f *httpNoiseFixture) serve(w http.ResponseWriter, r *http.Request) {
 				reply(map[string]any{"error": "bad base64"})
 				return
 			}
+		}
+		if f.refuseKK && !binary && strings.Contains(string(raw), `"pattern":"KKpsk0"`) {
+			f.refusedKK++
+			w.WriteHeader(http.StatusUnauthorized)
+			return
 		}
 		if err := f.responder.receive(raw, binary); err != nil {
 			reply(map[string]any{"error": "rejected frame"})

@@ -25,6 +25,41 @@ var (
 	// ErrDeviceCodeExpired reports that the device sign-in code expired
 	// before it was approved.
 	ErrDeviceCodeExpired = errors.New("thalovant device sign-in code expired")
+	// ErrDeviceLoginPending reports that nobody has approved a device
+	// sign-in yet. PollDeviceLogin returns it as a *DeviceLoginPendingError,
+	// whose Interval says when to ask again.
+	ErrDeviceLoginPending = errors.New("thalovant device sign-in pending")
+
+	// ErrAuth matches an *APIError that signing in again is the way out of:
+	// HTTP 401 (a token unknown, expired or revoked), 423 (a locked account),
+	// or 403 whose detail is "Insufficient scopes".
+	ErrAuth = errors.New("thalovant authentication refused")
+	// ErrPlan matches an *APIError the account's plan refused: HTTP 402, or
+	// 403 with code "plan_limit". Problem carries the plan's numbers.
+	ErrPlan = errors.New("thalovant plan refused")
+	// ErrAlreadyLinked matches an *APIError saying the hub already holds the
+	// one link of its kind: HTTP 409 with code "home_assistant_already_linked".
+	// LinkedClientID names the connection that holds it.
+	ErrAlreadyLinked = errors.New("thalovant hub already linked")
+	// ErrUnsupportedConnectionType matches an *UnsupportedConnectionTypeError:
+	// the API could not make a connection of the kind asked for.
+	ErrUnsupportedConnectionType = errors.New("thalovant unsupported connection type")
+	// ErrHubRefused reports that a hub turned the connection's credentials
+	// away. It always travels with ErrConnection. A new connection is refused
+	// until its hub admits it, so a HubSession's Run treats it as "not yet"
+	// for a grace period before returning it.
+	ErrHubRefused = errors.New("thalovant hub refused the credentials")
+	// ErrHubKeyChanged reports that a hub's Noise static key is not the one
+	// pinned for it: the hub was replaced or reinstalled, or another machine
+	// answers at its address. It always travels with ErrConnection. It is not
+	// a refusal, and retrying cannot change it; the pin is never replaced
+	// automatically (see ForgetNoisePin).
+	ErrHubKeyChanged = errors.New("thalovant hub key changed")
+	// ErrAPIUnreachable reports a control-plane request that never got an
+	// answer: DNS, the connection, TLS, a proxy. It always travels with ErrAPI
+	// and ErrConnection, and it says nothing about what the API would have
+	// answered.
+	ErrAPIUnreachable = errors.New("thalovant api unreachable")
 )
 
 // The hub's codes for the three kinds of refusal that arrive as
@@ -318,12 +353,277 @@ type APIError struct {
 	// values the body echoed back from the request, which is why Error()
 	// never prints it.
 	Problem map[string]any
+	// RetryAfter is how long the API asked the caller to wait before trying
+	// again, when it said; 0 otherwise. It is read from the body's
+	// retry_after_seconds (at the top, or inside a detail object), else from
+	// the Retry-After header in seconds, else from RateLimit-Reset: the API's
+	// own rate limiter answers a 429 in plain text with only that header.
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
 	return fmt.Sprintf("%v: HTTP %d: %s", ErrAPI, e.StatusCode, e.Detail)
 }
 func (e *APIError) Unwrap() error { return ErrAPI }
+
+// Is reports whether the refusal is one a caller can branch on: ErrAuth,
+// ErrPlan or ErrAlreadyLinked. They are read from the status and the body, so
+// every control-plane call answers them the same way, and the error stays an
+// *APIError with every field it carried:
+//
+//	var apiErr *thalovant.APIError
+//	switch {
+//	case errors.Is(err, thalovant.ErrAlreadyLinked) && errors.As(err, &apiErr):
+//		fmt.Println("linked by", apiErr.LinkedClientID())
+//	case errors.Is(err, thalovant.ErrPlan):
+//		fmt.Println("upgrade the plan")
+//	case errors.Is(err, thalovant.ErrAuth):
+//		fmt.Println("sign in again")
+//	}
+func (e *APIError) Is(target error) bool {
+	switch target {
+	case ErrAuth:
+		return e.refusal() == ErrAuth
+	case ErrPlan:
+		return e.refusal() == ErrPlan
+	case ErrAlreadyLinked:
+		return e.refusal() == ErrAlreadyLinked
+	}
+	return false
+}
+
+// refusal is the kind of refusal the answer is, or nil for none of them. The
+// rules are the parity contract's (connection-kinds-vectors.json).
+func (e *APIError) refusal() error {
+	// An APIError built by hand may carry only the body; read it the way
+	// apiErrorFromResponse does.
+	bodyCode, bodyDetail := problemFields(e.Problem)
+	code, detail := firstNonEmpty(e.Code, bodyCode), firstNonEmpty(e.ProblemDetail, bodyDetail)
+	switch {
+	case e.StatusCode == 401 || e.StatusCode == 423 || (e.StatusCode == 403 && detail == "Insufficient scopes"):
+		// A token that is unknown, expired or revoked; a locked account; or a
+		// token without the scope: signing in again is the way out of each.
+		return ErrAuth
+	case e.StatusCode == 402 || (e.StatusCode == 403 && code == "plan_limit"):
+		return ErrPlan
+	case e.StatusCode == 409 && code == "home_assistant_already_linked":
+		return ErrAlreadyLinked
+	}
+	return nil
+}
+
+// LinkedClientID is the connection that already holds a hub's link, named by
+// an ErrAlreadyLinked refusal; "" when the answer names none. It is read from
+// the body's client_id (or existing_client_id, or connection_id), at the top
+// or inside a detail that is itself an object.
+func (e *APIError) LinkedClientID() string {
+	if e.Problem == nil {
+		return ""
+	}
+	nested, _ := e.Problem["detail"].(map[string]any)
+	for _, source := range []map[string]any{e.Problem, nested} {
+		for _, key := range []string{"client_id", "existing_client_id", "connection_id"} {
+			if text, ok := source[key].(string); ok && text != "" {
+				return text
+			}
+		}
+	}
+	return ""
+}
+
+// DeviceLoginPendingError is a device sign-in nobody has approved yet: poll
+// again after Interval. A slow_down answer has already lengthened it, for good,
+// on the DeviceAuthorization that was polled. It matches ErrDeviceLoginPending,
+// and errors.As reaches the *APIError the API answered with (HTTP 400).
+type DeviceLoginPendingError struct {
+	// Interval is how long to wait before the next poll.
+	Interval time.Duration
+	// APIError is what the API answered.
+	APIError *APIError
+}
+
+func (e *DeviceLoginPendingError) Error() string {
+	return fmt.Sprintf("%v: nobody has approved the device sign-in yet; poll again in %s", ErrDeviceLoginPending, e.Interval)
+}
+
+// Unwrap makes a DeviceLoginPendingError match ErrDeviceLoginPending and ErrAPI.
+func (e *DeviceLoginPendingError) Unwrap() []error {
+	return []error{ErrDeviceLoginPending, apiErrorOrSentinel(e.APIError)}
+}
+
+// DeviceLoginDeniedError is a device sign-in the person refused in the
+// browser. It matches ErrDeviceAccessDenied, and errors.As reaches the
+// *APIError the API answered with.
+type DeviceLoginDeniedError struct {
+	APIError *APIError
+}
+
+func (e *DeviceLoginDeniedError) Error() string {
+	return fmt.Sprintf("%v: the device sign-in request was denied in the browser", ErrDeviceAccessDenied)
+}
+
+// Unwrap makes a DeviceLoginDeniedError match ErrDeviceAccessDenied and ErrAPI.
+func (e *DeviceLoginDeniedError) Unwrap() []error {
+	return []error{ErrDeviceAccessDenied, apiErrorOrSentinel(e.APIError)}
+}
+
+// DeviceLoginExpiredError is a device sign-in code that expired before anyone
+// approved it; start a new sign-in for a new code. It matches
+// ErrDeviceCodeExpired, and errors.As reaches the *APIError the API answered
+// with.
+type DeviceLoginExpiredError struct {
+	APIError *APIError
+}
+
+func (e *DeviceLoginExpiredError) Error() string {
+	return fmt.Sprintf("%v: the device sign-in code expired before it was approved; start a new sign-in to get a new code", ErrDeviceCodeExpired)
+}
+
+// Unwrap makes a DeviceLoginExpiredError match ErrDeviceCodeExpired and ErrAPI.
+func (e *DeviceLoginExpiredError) Unwrap() []error {
+	return []error{ErrDeviceCodeExpired, apiErrorOrSentinel(e.APIError)}
+}
+
+// UnsupportedConnectionTypeError reports that the API could not make a
+// connection of the kind asked for. Either it refused the kind (HTTP 422 about
+// spec.connection_type; APIError carries the answer), or it made an ordinary
+// connection instead, which the SDK then deleted (APIError is nil; ClientID
+// and Deleted say what happened to it). It matches
+// ErrUnsupportedConnectionType and ErrAPI.
+type UnsupportedConnectionTypeError struct {
+	// ConnectionType is the kind asked for.
+	ConnectionType string
+	// Answered is the kind the API made instead; "" when it named none.
+	Answered string
+	// ClientID is the connection the API made instead, when it made one.
+	ClientID string
+	// Deleted reports that the connection the API made instead is gone.
+	Deleted bool
+	// DeleteErr is why deleting it failed, when it did; remove it in the
+	// dashboard.
+	DeleteErr error
+	// APIError is the API's refusal, when it refused.
+	APIError *APIError
+}
+
+func (e *UnsupportedConnectionTypeError) Error() string {
+	if e.APIError != nil {
+		return fmt.Sprintf("%v: the Thalovant API cannot create a %q connection yet (HTTP %d: %s)",
+			ErrUnsupportedConnectionType, e.ConnectionType, e.APIError.StatusCode, e.APIError.Detail)
+	}
+	answered := e.Answered
+	if answered == "" {
+		answered = "no type"
+	}
+	message := fmt.Sprintf("%v: the Thalovant API did not make a %q connection (it answered %q)",
+		ErrUnsupportedConnectionType, e.ConnectionType, answered)
+	if e.ClientID != "" && !e.Deleted {
+		message += fmt.Sprintf("; deleting the connection it made instead (%s) failed, so remove it in the dashboard", e.ClientID)
+	}
+	return message
+}
+
+// Unwrap makes an UnsupportedConnectionTypeError match
+// ErrUnsupportedConnectionType, and ErrAPI through the API's own answer when
+// there is one.
+func (e *UnsupportedConnectionTypeError) Unwrap() []error {
+	return []error{ErrUnsupportedConnectionType, apiErrorOrSentinel(e.APIError)}
+}
+
+// AdmissionTimeoutError reports that a new connection was not admitted by its
+// hub within the wait. It is a connection error and a timeout at once --
+// errors.Is matches both ErrConnection and ErrTimeout, and Timeout reports
+// true -- because the connection may still be admitted after it.
+type AdmissionTimeoutError struct {
+	// Wait is how long the wait lasted.
+	Wait time.Duration
+	// OperationID is the operation that was followed.
+	OperationID string
+}
+
+func (e *AdmissionTimeoutError) Error() string {
+	return fmt.Sprintf("%v: %v: the hub did not admit the connection within %s; it may still admit it later.", ErrConnection, ErrTimeout, e.Wait)
+}
+
+// Unwrap makes an AdmissionTimeoutError match ErrConnection and ErrTimeout.
+func (e *AdmissionTimeoutError) Unwrap() []error { return []error{ErrConnection, ErrTimeout} }
+
+// Timeout reports true, the way a net.Error that timed out does.
+func (e *AdmissionTimeoutError) Timeout() bool { return true }
+
+// AdmissionFailedError reports that the hub could not admit a new connection:
+// the operation carrying it ended failed or timed_out on the platform, or the
+// API refused the wait itself (for any reason but authentication, which
+// WaitForAdmission returns as the *APIError it is). It matches ErrConnection;
+// when the API refused the wait, errors.As also reaches its *APIError, with
+// the status, code and detail it answered.
+type AdmissionFailedError struct {
+	// OperationID is the operation that was followed.
+	OperationID string
+	// Status is the operation's final status, when it reached one.
+	Status OperationStatus
+	// ErrorCode is the operation's own code, such as "gitops_push_rejected";
+	// "" when it had none, and always "" when the API refused the wait (its
+	// code is on the *APIError in Err).
+	ErrorCode string
+	// ErrorMessage is the operation's own explanation, when it gave one.
+	ErrorMessage string
+	// Err is the API's refusal of the wait, when that is what ended it.
+	Err error
+}
+
+func (e *AdmissionFailedError) Error() string {
+	detail := e.ErrorMessage
+	if detail == "" {
+		detail = e.ErrorCode
+	}
+	if detail == "" && e.Err != nil {
+		detail = e.Err.Error()
+	}
+	if detail == "" {
+		detail = "no detail"
+	}
+	if e.Status != "" {
+		return fmt.Sprintf("%v: the hub could not admit the connection: operation %s ended %s: %s", ErrConnection, e.OperationID, e.Status, detail)
+	}
+	return fmt.Sprintf("%v: the hub could not admit the connection: %s", ErrConnection, detail)
+}
+
+// Unwrap makes an AdmissionFailedError match ErrConnection, and whatever the
+// API answered when that is what ended the wait.
+func (e *AdmissionFailedError) Unwrap() []error {
+	if e.Err != nil {
+		return []error{ErrConnection, e.Err}
+	}
+	return []error{ErrConnection}
+}
+
+// apiUnreachableError is a control-plane request that never got an answer. Its
+// message is the one this SDK has always given; it matches ErrAPI as it always
+// did, and ErrAPIUnreachable and ErrConnection besides.
+type apiUnreachableError struct{}
+
+func (apiUnreachableError) Error() string {
+	return fmt.Sprintf("%v: control request failed", ErrAPI)
+}
+
+func (apiUnreachableError) Unwrap() []error {
+	return []error{ErrAPI, ErrAPIUnreachable, ErrConnection}
+}
+
+// errNothingSent marks a send withdrawn before any of it was encrypted or
+// written: the transport is still sound, so nothing is torn down for it.
+var errNothingSent = errors.New("nothing was sent")
+
+// apiErrorOrSentinel is the API's answer when there is one, and ErrAPI when
+// there is not, so a typed error always matches ErrAPI without ever
+// unwrapping to a nil *APIError inside a non-nil interface.
+func apiErrorOrSentinel(apiErr *APIError) error {
+	if apiErr == nil {
+		return ErrAPI
+	}
+	return apiErr
+}
 
 // problemFields reads the code and the sentence out of an API error body.
 //

@@ -12,10 +12,10 @@ package thalovant
 // recipe as the reference's tests/conformance_record.py: JSON with keys sorted
 // at every depth, no insignificant whitespace, non-ASCII left as itself,
 // SHA-256 of the UTF-8 bytes, and a whole number spelled without a fractional
-// part. encoding/json already sorts map keys and already writes a float64 of 1
-// as "1"; what it does not do by default is leave "<", ">" and "&" alone, and
-// that escaping would be this language's spelling of a value rather than the
-// value.
+// part. encoding/json writes a float64 of 1 as "1", but it escapes "<", ">",
+// "&", U+2028 and U+2029 and spells \b and \f its own way, and each of those
+// would be this language's spelling of a value rather than the value, so the
+// document is written out by canonicalDocument.
 //
 // Set THALOVANT_CONFORMANCE_OUT to a path and run the suite; the results are
 // written when the package's tests finish.
@@ -30,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"sync"
 	"testing"
 )
@@ -45,16 +46,109 @@ func canonicalDigest(value any) string {
 		return "bytes:" + hex.EncodeToString(sha256Sum(raw))
 	}
 	mustBeSpellableEverywhere(value)
+	return hex.EncodeToString(sha256Sum(canonicalDocument(value)))
+}
+
+// canonicalDocument spells a value the way the reference's json.dumps(...,
+// sort_keys=True, separators=(",", ":"), ensure_ascii=False) does.
+//
+// encoding/json alone does not: it writes U+2028 and U+2029 as \u2028 and
+// \u2029 even with SetEscapeHTML(false), and a backspace and a form feed as
+// \u0008 and \u000c where Python writes \b and \f. home-link-vectors.json
+// holds a U+2028 in a speech case, so the digest of the vector file itself
+// disagreed while every case matched. The value goes through encoding/json
+// once, to reach the plain tree of maps, slices, strings and numbers it
+// decodes to, and is then written out here.
+func canonicalDocument(value any) []byte {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
-	// Without this, "a & b" is written as "a & b" and no other language
-	// agrees with us about what we produced.
 	encoder.SetEscapeHTML(false)
 	if err := encoder.Encode(value); err != nil {
 		panic("conformance: " + err.Error())
 	}
-	// Encode appends a newline; the reference hashes the document alone.
-	return hex.EncodeToString(sha256Sum(bytes.TrimRight(buffer.Bytes(), "\n")))
+	decoder := json.NewDecoder(&buffer)
+	decoder.UseNumber()
+	var tree any
+	if err := decoder.Decode(&tree); err != nil {
+		panic("conformance: " + err.Error())
+	}
+	var out bytes.Buffer
+	writeDocument(&out, tree)
+	return out.Bytes()
+}
+
+func writeDocument(out *bytes.Buffer, value any) {
+	switch typed := value.(type) {
+	case nil:
+		out.WriteString("null")
+	case bool:
+		out.WriteString(strconv.FormatBool(typed))
+	case json.Number:
+		out.WriteString(typed.String())
+	case string:
+		writeDocumentString(out, typed)
+	case []any:
+		out.WriteByte('[')
+		for index, item := range typed {
+			if index > 0 {
+				out.WriteByte(',')
+			}
+			writeDocument(out, item)
+		}
+		out.WriteByte(']')
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		// Byte order of UTF-8 is code point order, which is Python's.
+		sort.Strings(keys)
+		out.WriteByte('{')
+		for index, key := range keys {
+			if index > 0 {
+				out.WriteByte(',')
+			}
+			writeDocumentString(out, key)
+			out.WriteByte(':')
+			writeDocument(out, typed[key])
+		}
+		out.WriteByte('}')
+	default:
+		panic(fmt.Sprintf("conformance: cannot canonicalise %T", value))
+	}
+}
+
+// writeDocumentString escapes exactly what Python's JSON writer escapes with
+// ensure_ascii=False: the quote, the backslash, the five short escapes, and
+// the other control characters as a lower-case \u00XX. Everything else is
+// written as itself.
+func writeDocumentString(out *bytes.Buffer, text string) {
+	out.WriteByte('"')
+	for _, r := range text {
+		switch r {
+		case '"':
+			out.WriteString(`\"`)
+		case '\\':
+			out.WriteString(`\\`)
+		case '\b':
+			out.WriteString(`\b`)
+		case '\f':
+			out.WriteString(`\f`)
+		case '\n':
+			out.WriteString(`\n`)
+		case '\r':
+			out.WriteString(`\r`)
+		case '\t':
+			out.WriteString(`\t`)
+		default:
+			if r < 0x20 {
+				fmt.Fprintf(out, `\u%04x`, r)
+			} else {
+				out.WriteRune(r)
+			}
+		}
+	}
+	out.WriteByte('"')
 }
 
 // absentIfEmpty spells "no value" the way the vectors spell it.
