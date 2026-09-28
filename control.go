@@ -17,6 +17,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 )
@@ -62,6 +63,16 @@ type OperationResource struct {
 	TerminalAt    *string            `json:"terminal_at"`
 	Links         map[string]*string `json:"links"`
 }
+
+// controlTokens guards the token fields of every ControlPlane while the SDK
+// reads or writes them -- AccessToken, TokenID and whether the token was
+// revoked -- so a sign-in stores a token and its id together and a revoke
+// finishing on another goroutine clears only the token it revoked. It is one
+// lock for all control planes because a ControlPlane is a plain struct, often
+// built as a literal and copied by value; the sections it guards are a few
+// assignments long. A caller that sets AccessToken itself while calls are in
+// flight on other goroutines still has to synchronise that itself.
+var controlTokens sync.Mutex
 
 type ControlPlane struct {
 	APIURL      string
@@ -1225,10 +1236,13 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 		req.Header.Set(key, val)
 	}
 	if auth {
-		if c.AccessToken == "" {
+		controlTokens.Lock()
+		accessToken := c.AccessToken
+		controlTokens.Unlock()
+		if accessToken == "" {
 			return 0, nil, nil, fmt.Errorf("%w: missing access token", ErrAPI)
 		}
-		req.Header.Set("authorization", "Bearer "+c.AccessToken)
+		req.Header.Set("authorization", "Bearer "+accessToken)
 	}
 	// Bind passwords, device codes and bearer credentials to a secure endpoint.
 	// Literal loopback development endpoints remain supported without DNS

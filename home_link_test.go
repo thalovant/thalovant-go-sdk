@@ -758,3 +758,66 @@ func TestAReplyWithdrawnBeforeItWasSentKeepsTheLink(t *testing.T) {
 		t.Fatalf("the link is not usable after a withdrawn reply: %v", err)
 	}
 }
+
+// A revoke finishing on another goroutine while a sign-in lands must not
+// clear the new token, and never leaves a token beside another token's id.
+func TestARevokeRacingASignInKeepsTheNewToken(t *testing.T) {
+	deleting := make(chan struct{})
+	release := make(chan struct{})
+	var issued atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodDelete:
+			if r.URL.Path == "/v1/auth/api-tokens/old-id" {
+				close(deleting)
+				<-release
+			}
+			w.WriteHeader(http.StatusNoContent)
+		case r.URL.Path == "/v1/auth/device/token":
+			n := issued.Add(1)
+			w.Header().Set("content-type", "application/json")
+			_, _ = fmt.Fprintf(w, `{"access_token":"tok-%d","token_id":"id-%d"}`, n, n)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	plane := NewControlPlane(server.URL, "old")
+	plane.TokenID = "old-id"
+	revoked := make(chan error, 1)
+	go func() { revoked <- plane.RevokeAPIToken(context.Background(), "") }()
+	<-deleting
+	grant := &DeviceAuthorization{DeviceCode: "dc", Interval: time.Second}
+	if _, err := plane.PollDeviceLogin(context.Background(), grant); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-revoked; err != nil {
+		t.Fatal(err)
+	}
+	if plane.AccessToken != "tok-1" || plane.TokenID != "id-1" {
+		t.Fatalf("the revoke of old-id cleared the new sign-in: %q / %q", plane.AccessToken, plane.TokenID)
+	}
+
+	// Many at once: whatever the interleaving, the token and its id belong
+	// together.
+	var workers sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		workers.Add(2)
+		go func() {
+			defer workers.Done()
+			_, _ = plane.PollDeviceLogin(context.Background(), &DeviceAuthorization{DeviceCode: "dc", Interval: time.Second})
+		}()
+		go func() {
+			defer workers.Done()
+			_ = plane.RevokeAPIToken(context.Background(), "")
+		}()
+	}
+	workers.Wait()
+	controlTokens.Lock()
+	token, id := plane.AccessToken, plane.TokenID
+	controlTokens.Unlock()
+	if strings.TrimPrefix(token, "tok-") != strings.TrimPrefix(id, "id-") {
+		t.Fatalf("a token beside another token's id: %q / %q", token, id)
+	}
+}

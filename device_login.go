@@ -222,10 +222,12 @@ func (c *ControlPlane) acceptToken(token map[string]any) (*APIToken, error) {
 	if accessToken == "" {
 		return nil, fmt.Errorf("%w: token response did not include access_token", ErrAPI)
 	}
-	c.AccessToken = accessToken
 	tokenID, _ := token["token_id"].(string)
-	c.TokenID = tokenID
-	c.revokedOwn = false
+	// The token and its id land together: a revoke finishing on another
+	// goroutine must never see one without the other.
+	controlTokens.Lock()
+	c.AccessToken, c.TokenID, c.revokedOwn = accessToken, tokenID, false
+	controlTokens.Unlock()
 	result := &APIToken{AccessToken: accessToken, TokenID: tokenID, Scopes: []string{}}
 	result.TokenType, _ = token["token_type"].(string)
 	for _, scope := range anySlice(token["scopes"]) {
@@ -252,18 +254,26 @@ func (c *ControlPlane) acceptToken(token map[string]any) (*APIToken, error) {
 // forgotten. Revoking it again then sends nothing and returns nil, until the
 // next sign-in. Revoking another token by id is not idempotent: the API's own
 // answer, such as a 404 for a token it does not know, is returned as usual.
+//
+// A sign-in that finishes on another goroutine while the revoke is on its way
+// keeps its token: the revoke forgets only the token it revoked, checked and
+// cleared under the same lock a sign-in stores its token and id under. The
+// lock is never held across the request.
 func (c *ControlPlane) RevokeAPIToken(ctx context.Context, tokenID string) error {
+	controlTokens.Lock()
 	target := strings.TrimSpace(tokenID)
 	if target == "" {
 		target = c.TokenID
 	}
+	alreadyRevoked := c.revokedOwn && c.AccessToken == ""
+	own := target != "" && target == c.TokenID
+	controlTokens.Unlock()
 	if target == "" {
-		if c.revokedOwn && c.AccessToken == "" {
+		if alreadyRevoked {
 			return nil // already revoked and forgotten: revoking again changes nothing
 		}
 		return fmt.Errorf("%w: no API token id to revoke: pass one, or sign in with a device login first", ErrAPI)
 	}
-	own := target == c.TokenID
 	if _, err := c.request(ctx, http.MethodDelete, "/v1/auth/api-tokens/"+url.PathEscape(target), nil, nil, true); err != nil {
 		if !own || !isAPIStatus(err, http.StatusUnauthorized) {
 			return err
@@ -271,11 +281,11 @@ func (c *ControlPlane) RevokeAPIToken(ctx context.Context, tokenID string) error
 	}
 	// Forget the token only while it is still the one revoked: a sign-in that
 	// finished meanwhile installed another, and that one is alive.
+	controlTokens.Lock()
 	if own && c.TokenID == target {
-		c.AccessToken = ""
-		c.TokenID = ""
-		c.revokedOwn = true
+		c.AccessToken, c.TokenID, c.revokedOwn = "", "", true
 	}
+	controlTokens.Unlock()
 	return nil
 }
 

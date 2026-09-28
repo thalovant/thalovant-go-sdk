@@ -2,7 +2,7 @@
   "capabilities": {
     "api-errors": {
       "implementation": {
-        "control.go": "813be02fba8c4eb2890d05db0219170b8d710c33fe9541f664803665b5d693c2",
+        "control.go": "12c82c726a16d6d8a716a1b9cb640ca488930968ed9157c14a92d1f9dc673f5d",
         "errors.go": "7fe1cffc732722814f68d11274931913b78cfb4f3abd6534a04b743b9b58656c"
       },
       "reason": "apiErrorFromResponse() in control.go builds every non-2xx control-plane error from one decode of the body, and problemFields() in errors.go reads APIError.Code and ProblemDetail out of it beside the whole body as Problem; StatusCode, Detail and Error() are unchanged. Run against the shared api-error vectors, each served by a loopback httptest server and read back through GetHub, the configuration-merge read and the device-flow token poll, with what GetHub produced recorded.",
@@ -40,14 +40,14 @@
     "connection-admission": {
       "implementation": {
         "connections.go": "44e521e58188d7bc5b05348bd6db1f92eacdc7d328bce992826ecd2c2e55ced3",
-        "control.go": "813be02fba8c4eb2890d05db0219170b8d710c33fe9541f664803665b5d693c2",
+        "control.go": "12c82c726a16d6d8a716a1b9cb640ca488930968ed9157c14a92d1f9dc673f5d",
         "errors.go": "7fe1cffc732722814f68d11274931913b78cfb4f3abd6534a04b743b9b58656c"
       },
       "reason": "WaitForAdmission in connections.go follows the Operation a create returned (BootstrapIdentityResult.Operation): ready is admitted; failed and timed_out are *AdmissionFailedError with the operation's code; no operation and 404 are admitted at once; a 5xx is ridden out; a 429 waits APIError.RetryAfter (the body's retry_after_seconds, then Retry-After, then RateLimit-Reset, read in control.go) or the poll interval when longer, and is a timeout at once when that is more than the time left; a 401/403 is the API's own *APIError (errors.Is ErrAuth), never a failed admission; any other refusal is *AdmissionFailedError whose Err keeps status, code and detail and whose ErrorCode stays empty; an unreachable API (ErrAPIUnreachable, from control.go) is returned as it is; each read is bounded by the deadline; the timeout is *AdmissionTimeoutError, errors.Is ErrConnection and ErrTimeout, ending 'it may still admit it later.'; a links.self on another origin (scheme, host, port, default ports spelled out) is refused unfetched. Run against the shared connection-admission vectors over a loopback httptest server that sends each case's headers, with {api_host}/{api_port} filled in and a closed port for an unreachable API.",
       "status": "required",
       "tests": {
         "conformance_record_test.go": "a12d62d75c6a8f6ff7f606d9941bc7e81fe1658d95b6547b9934f4437b970db5",
-        "home_link_test.go": "f4f0e2f7a606ee41fc80a07a6077cac632bf3124c5d66e0b8e18a888ec6f31e3",
+        "home_link_test.go": "6eddaeea422871f7b25b5e7bc9cedfcec07a90681e570954c99bb59d68e94057",
         "home_link_vectors_test.go": "b6278a991bdace04cae7d4114f3bd8e23828bbb20cde0b65ad0cd44b0d623db2",
         "testdata/connection-admission-vectors.json": "41eb4a83835bd50390d000fa7396b7067dafa24f3023b34985e6b254cf5fc259"
       },
@@ -58,7 +58,7 @@
     "connection-kinds": {
       "implementation": {
         "connections.go": "44e521e58188d7bc5b05348bd6db1f92eacdc7d328bce992826ecd2c2e55ced3",
-        "control.go": "813be02fba8c4eb2890d05db0219170b8d710c33fe9541f664803665b5d693c2",
+        "control.go": "12c82c726a16d6d8a716a1b9cb640ca488930968ed9157c14a92d1f9dc673f5d",
         "errors.go": "7fe1cffc732722814f68d11274931913b78cfb4f3abd6534a04b743b9b58656c"
       },
       "reason": "BootstrapIdentityOptions.ConnectionType sends spec.connection_type; CreateClientIdentity checks the kind comes back and, when it does not, deletes the client with its etag and returns *UnsupportedConnectionTypeError, as it does for a 422 whose detail or code, or a validation error's loc or msg (under errors, or under detail when that is a list), names the field -- never an echoed input. The other refusals stay the *APIError every call already returned and are told apart with errors.Is: APIError.Is answers ErrAuth, ErrPlan and ErrAlreadyLinked from the status, code and detail, and LinkedClientID names the client that holds the link, so no existing caller sees a different error type. GetClient and DeleteClient (connections.go): read the etag when none is given, retry once on 412, and count 404 as deleted. Run against the shared connection-kinds vectors over a loopback httptest server, with the requests the server saw recorded beside each outcome.",
@@ -75,7 +75,7 @@
     },
     "control": {
       "implementation": {
-        "control.go": "813be02fba8c4eb2890d05db0219170b8d710c33fe9541f664803665b5d693c2",
+        "control.go": "12c82c726a16d6d8a716a1b9cb640ca488930968ed9157c14a92d1f9dc673f5d",
         "hub_skills.go": "fedcdfea962817ada46bc8281e4c70458187e2cf80b1081203e33fdd4048fa20",
         "hubs.go": "52433966442f363e691a12d973dfb3df9fdffd75fc8c3772f8fb91b937293a34",
         "native_auth.go": "9d6b0af21bfa1614aa36c28c48dc932c69b41a0e670f4a286d983f84f18bf228"
@@ -106,8 +106,8 @@
     },
     "device-login": {
       "implementation": {
-        "control.go": "813be02fba8c4eb2890d05db0219170b8d710c33fe9541f664803665b5d693c2",
-        "device_login.go": "cb23001bebd35cb1f12ff27042e9e06c7e84a575b560e28f0c718d9e0c148e9b",
+        "control.go": "12c82c726a16d6d8a716a1b9cb640ca488930968ed9157c14a92d1f9dc673f5d",
+        "device_login.go": "49e0177ae1d1c2c89457a37294fa64c5d26d11a4b99879b0d224c61846ae9000",
         "errors.go": "7fe1cffc732722814f68d11274931913b78cfb4f3abd6534a04b743b9b58656c",
         "native_auth.go": "9d6b0af21bfa1614aa36c28c48dc932c69b41a0e670f4a286d983f84f18bf228"
       },
@@ -139,7 +139,7 @@
       "status": "required",
       "tests": {
         "conformance_record_test.go": "a12d62d75c6a8f6ff7f606d9941bc7e81fe1658d95b6547b9934f4437b970db5",
-        "home_link_test.go": "f4f0e2f7a606ee41fc80a07a6077cac632bf3124c5d66e0b8e18a888ec6f31e3",
+        "home_link_test.go": "6eddaeea422871f7b25b5e7bc9cedfcec07a90681e570954c99bb59d68e94057",
         "home_link_vectors_test.go": "b6278a991bdace04cae7d4114f3bd8e23828bbb20cde0b65ad0cd44b0d623db2",
         "link_keeping_vectors_test.go": "1f15537548fe62ad46cfd27691bd1523f6f5888b3ad66cef80430779123ae7e5",
         "testdata/home-link-vectors.json": "3dc3d38020f3d1b7a2df61d0048fb13685a5361d2dff82710c1e1833cccc576f",
