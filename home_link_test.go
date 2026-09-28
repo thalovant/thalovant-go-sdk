@@ -446,7 +446,7 @@ func TestHomeHandlerOutcomes(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			replier := &capturingReplier{}
-			payload, err := AnswerHomeRequest(context.Background(), replier, event, tc.handler, 50*time.Millisecond)
+			payload, err := AnswerHomeRequest(context.Background(), replier, event, tc.handler, HomeAnswerOptions{Timeout: 50 * time.Millisecond})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -466,7 +466,7 @@ func TestHomeAnswerNotSentWhenTheLinkIsGoingAway(t *testing.T) {
 		close(started)
 		<-handlerCtx.Done()
 		return HomeAnswer{}, handlerCtx.Err()
-	}, time.Minute)
+	}, HomeAnswerOptions{Timeout: time.Minute})
 	if !errors.Is(err, context.Canceled) || len(replier.sent) != 0 {
 		t.Fatalf("err = %v, %d replies", err, len(replier.sent))
 	}
@@ -474,10 +474,13 @@ func TestHomeAnswerNotSentWhenTheLinkIsGoingAway(t *testing.T) {
 
 func TestPlainSpeech(t *testing.T) {
 	for input, want := range map[string]string{
-		"":                               "",
-		"  plain  ":                      "plain",
-		"<b>bold</b> &lt;tag&gt; &#233;": "bold <tag> é",
-		"line\none two\x1cthree":         "line one two three",
+		"":                                    "",
+		"  plain  ":                           "plain",
+		"<b>bold</b>\u00a0&lt;tag&gt; &#233;": "bold <tag> é",
+		// Unicode White_Space collapses; the information separators do not,
+		// though the ends are trimmed of them as the reference's strip() does.
+		"line\none\u2028two\x1cthree\x1c": "line one two\x1cthree",
+		"5 < 6 and 7 > 3":                 "5 < 6 and 7 > 3",
 	} {
 		if got := PlainSpeech(input); got != want {
 			t.Errorf("PlainSpeech(%q) = %q, want %q", input, got, want)
@@ -520,10 +523,10 @@ func TestAPIErrorRefusalKinds(t *testing.T) {
 
 func TestReplyContextLeavesAbsentAndNullRoutingAlone(t *testing.T) {
 	got := ReplyContext(Context{"source": nil, "destination": []any{}, "session": map[string]any{"session_id": "s"}})
-	// A null source is no source, so the destination is not turned round; an
-	// empty destination list has no first entry, so the list itself becomes
-	// the source, as in the reference.
-	want := Context{"source": []any{}, "destination": []any{}, "session": map[string]any{"session_id": "s"}}
+	// A null source is no source, so the reply has no destination; an empty
+	// destination list has no first entry, so the list itself becomes the
+	// source, as in the reference.
+	want := Context{"source": []any{}, "session": map[string]any{"session_id": "s"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ReplyContext = %v, want %v", got, want)
 	}
@@ -644,14 +647,33 @@ func (r stallingReplier) Reply(ctx context.Context, _ Event, _ string, _ Data, _
 func TestAHomeReplyGetsWhatIsLeftOfTheHubsBound(t *testing.T) {
 	replier := stallingReplier{deadline: make(chan time.Time, 1)}
 	started := time.Now()
-	_, err := AnswerHomeRequest(context.Background(), replier, Event{Name: HomeRequestEvent}, func(context.Context, HomeRequest) (HomeAnswer, error) {
+	sent, err := AnswerHomeRequest(context.Background(), replier, Event{Name: HomeRequestEvent}, func(context.Context, HomeRequest) (HomeAnswer, error) {
 		return HomeAnswer{Speech: "done"}, nil
-	}, 50*time.Millisecond)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("a stalled reply = %v", err)
+	}, HomeAnswerOptions{Timeout: time.Minute, HubTimeout: 200 * time.Millisecond})
+	if err != nil || sent != nil {
+		t.Fatalf("a reply stalled past the bound = %v, %v; want it withdrawn", sent, err)
 	}
-	if deadline := <-replier.deadline; deadline.Sub(started) > HomeRequestTimeout+time.Second {
+	// A handler timeout longer than the hub's bound does not stretch it.
+	if deadline := <-replier.deadline; deadline.Sub(started) > 200*time.Millisecond+50*time.Millisecond {
 		t.Fatalf("the reply could run until %s after the request", deadline.Sub(started))
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("answering took %s against a 200ms bound", elapsed)
+	}
+}
+
+// deafReplier never returns, whatever its context says.
+type deafReplier struct{}
+
+func (deafReplier) Reply(context.Context, Event, string, Data, Context) error { select {} }
+
+func TestAReplierThatIgnoresItsContextCannotHoldTheAnswerPastTheBound(t *testing.T) {
+	started := time.Now()
+	sent, err := AnswerHomeRequest(context.Background(), deafReplier{}, Event{Name: HomeRequestEvent}, func(context.Context, HomeRequest) (HomeAnswer, error) {
+		return HomeAnswer{Speech: "done"}, nil
+	}, HomeAnswerOptions{HubTimeout: 100 * time.Millisecond})
+	if err != nil || sent != nil || time.Since(started) > time.Second {
+		t.Fatalf("= %v, %v after %s", sent, err, time.Since(started))
 	}
 }
 

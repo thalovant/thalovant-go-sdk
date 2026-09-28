@@ -475,9 +475,11 @@ func (c *Client) Reply(ctx context.Context, event Event, msgType string, data Da
 // request's session and everything else it said, with the routing turned
 // round. The reply goes to whoever sent the request ("destination" becomes the
 // old "source") and comes from whoever it was sent to ("source" becomes the old
-// "destination", its first entry when that is a list). A hub uses this to route
-// the answer back to the peer that asked, across bridges and NAT. A key that
-// is absent or null stays as it was.
+// "destination", its first entry when that is a list). A request with a
+// destination and no source gets a reply with no destination: keeping the old
+// one would address the reply to its own sender. A hub uses this to route the
+// answer back to the peer that asked, across bridges and NAT. Otherwise a key
+// that is absent or null stays as it was.
 func ReplyContext(eventContext Context) Context {
 	swapped := Context(deepCopyMap(eventContext))
 	source, destination := swapped["source"], swapped["destination"]
@@ -492,6 +494,10 @@ func ReplyContext(eventContext Context) Context {
 	}
 	if source != nil {
 		swapped["destination"] = source
+	} else if destination != nil {
+		// Nobody to send it back to: the request said who it was for, not
+		// who sent it.
+		delete(swapped, "destination")
 	}
 	return swapped
 }

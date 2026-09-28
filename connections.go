@@ -198,12 +198,18 @@ type AdmissionOptions struct {
 //   - requested, committed, applied: it keeps reading;
 //   - no operation at all (nil), or HTTP 404 (the API no longer tracks it):
 //     admitted at once;
-//   - HTTP 429: the next read waits the retry_after_seconds the API names, or
-//     the poll interval when that is longer; asking for longer than the time
-//     left is the timeout at once;
+//   - HTTP 429: the next read waits what the API asks (APIError.RetryAfter:
+//     the body's retry_after_seconds, else Retry-After, else RateLimit-Reset),
+//     or the poll interval when that is longer; asking for longer than the
+//     time left is the timeout at once;
 //   - HTTP 5xx: ridden out;
-//   - a request that did not reach the API: returned as it is, since losing
-//     the API says nothing about the hub.
+//   - HTTP 401 or 403: the *APIError itself, since the token rather than the
+//     connection is the trouble (errors.Is ErrAuth for a revoked token or a
+//     missing scope);
+//   - any other refusal of the wait: *AdmissionFailedError, whose Err is the
+//     *APIError with the status, code and detail the API answered;
+//   - a request that did not reach the API: returned as it is (errors.Is
+//     ErrAPIUnreachable), since losing the API says nothing about the hub.
 //
 // When opts.Timeout passes first it returns *AdmissionTimeoutError, which
 // matches both ErrConnection and ErrTimeout: the connection may still be
@@ -273,16 +279,21 @@ func (c *ControlPlane) WaitForAdmission(ctx context.Context, operation *Operatio
 			// over one of them: wait what the API asks, never past the
 			// deadline. Asking for longer than is left is the same timeout,
 			// only later, so it is that timeout now.
-			if after, ok := retryAfter(apiErr.Problem); ok && after > wait {
-				wait = after
+			if apiErr.RetryAfter > wait {
+				wait = apiErr.RetryAfter
 			}
 			if wait > time.Until(deadline) {
 				return &AdmissionTimeoutError{Wait: timeout, OperationID: operationID}
 			}
 		case errors.As(err, &apiErr) && apiErr.StatusCode >= 500:
 			// The API's trouble, not a verdict on the connection.
+		case errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden):
+			// The token, not the connection: signing in again fixes it, so
+			// it is the API's own error (errors.Is ErrAuth for a revoked token
+			// or a missing scope), never a failed admission.
+			return err
 		case errors.As(err, &apiErr):
-			return &AdmissionFailedError{OperationID: operationID, ErrorCode: apiErr.Code, Err: err}
+			return &AdmissionFailedError{OperationID: operationID, Err: err}
 		case err != nil:
 			// The API out of reach says nothing about the hub, so it is not a
 			// failed admission; it is returned as it is.
@@ -302,22 +313,39 @@ func (c *ControlPlane) WaitForAdmission(ctx context.Context, operation *Operatio
 }
 
 // sameOrigin reports whether an operation link may be followed with the
-// token: a path on the API itself, or an absolute URL with the API's scheme,
-// host and port.
+// token: a path on the API itself, or an absolute URL with the API's origin --
+// its scheme, host and port, the scheme's default port spelled out, so
+// https://h and https://h:443 are one origin and http://h and https://h two.
 func (c *ControlPlane) sameOrigin(link string) bool {
 	lower := strings.ToLower(link)
 	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
 		return !strings.HasPrefix(link, "//")
 	}
 	target, err := url.Parse(link)
-	if err != nil {
+	if err != nil || target.User != nil {
 		return false
 	}
 	api, err := url.Parse(c.APIURL)
 	if err != nil {
 		return false
 	}
-	return strings.EqualFold(target.Scheme, api.Scheme) && strings.EqualFold(target.Host, api.Host) && target.User == nil
+	return urlOrigin(target) == urlOrigin(api)
+}
+
+// urlOrigin is a URL's scheme, host and port, lower-cased, with the scheme's
+// default port filled in when the URL names none.
+func urlOrigin(target *url.URL) string {
+	scheme := strings.ToLower(target.Scheme)
+	port := target.Port()
+	if port == "" {
+		switch scheme {
+		case "https":
+			port = "443"
+		case "http":
+			port = "80"
+		}
+	}
+	return scheme + "://" + strings.ToLower(target.Hostname()) + ":" + port
 }
 
 // operationIDFromLink reads the id at the end of a /v1/operations/{id} link.
@@ -336,18 +364,6 @@ func operationIDFromLink(link string) string {
 		id = unescaped
 	}
 	return id
-}
-
-// retryAfter reads a 429's retry_after_seconds, at the top of the problem or
-// inside a detail object, the way the api-errors contract reads code.
-func retryAfter(problem map[string]any) (time.Duration, bool) {
-	nested, _ := problem["detail"].(map[string]any)
-	for _, source := range []map[string]any{problem, nested} {
-		if seconds, ok := source["retry_after_seconds"].(float64); ok && seconds >= 0 && seconds <= maxDurationSeconds {
-			return time.Duration(seconds * float64(time.Second)), true
-		}
-	}
-	return 0, false
 }
 
 // optionalText is the value of an optional string field, or "".

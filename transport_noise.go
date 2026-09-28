@@ -190,7 +190,9 @@ func (n *noiseChannel) continueHandshake(ctx context.Context, params map[string]
 		return fmt.Errorf("%w: malformed Noise envelope", ErrConnection)
 	}
 	if _, err = n.handshake.readMessage(msg); err != nil {
-		return err
+		// A message that does not authenticate under the key this password
+		// derives is the hub refusing the credentials: a wrong password.
+		return fmt.Errorf("%w: %w: the hub's handshake answer did not authenticate under this connection's password: %v", ErrConnection, ErrHubRefused, err)
 	}
 	if !n.handshake.complete {
 		final, err := n.handshake.writeMessage(nil)

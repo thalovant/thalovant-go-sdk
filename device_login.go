@@ -82,15 +82,16 @@ func (t APIToken) GoString() string { return t.String() }
 // time, for a caller that runs its own loop -- a setup screen that shows the
 // code and polls on its own schedule -- and it prints and opens nothing.
 //
-// scopes are what the token will carry; nil lets the API choose its default
-// (hubs:read and clients:write). HomeAssistantScopes is what a Home Assistant
+// scopes are what the token will carry; nil or empty lets the API choose its
+// default (hubs:read and clients:write) -- the API refuses an empty list, so
+// one is never sent. HomeAssistantScopes is what a Home Assistant
 // link asks for. clientName, when set, names the device on the approval page.
 //
 // A verification URL that is not HTTP(S), has no host, or carries credentials
 // is refused: it is about to be opened in a browser.
 func (c *ControlPlane) BeginDeviceLogin(ctx context.Context, scopes []string, clientName string) (*DeviceAuthorization, error) {
 	payload := map[string]any{}
-	if scopes != nil {
+	if len(scopes) > 0 {
 		payload["scopes"] = scopes
 	}
 	if strings.TrimSpace(clientName) != "" {
@@ -173,7 +174,7 @@ func (c *ControlPlane) PollDeviceLogin(ctx context.Context, authorization *Devic
 // is none yet. interval is the authorization's polling interval; slow_down
 // lengthens it in place.
 func (c *ControlPlane) deviceTokenOnce(ctx context.Context, deviceCode string, interval *time.Duration) (map[string]any, error) {
-	status, raw, err := c.send(ctx, http.MethodPost, "/v1/auth/device/token", map[string]any{"device_code": deviceCode}, nil, false)
+	status, raw, header, err := c.send(ctx, http.MethodPost, "/v1/auth/device/token", map[string]any{"device_code": deviceCode}, nil, false)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
@@ -187,7 +188,7 @@ func (c *ControlPlane) deviceTokenOnce(ctx context.Context, deviceCode string, i
 		}
 		return result, nil
 	}
-	apiErr := apiErrorFromResponse(status, raw)
+	apiErr := apiErrorFromResponse(status, raw, header)
 	errorCode := ""
 	if status == http.StatusBadRequest && apiErr.Problem != nil {
 		errorCode, _ = apiErr.Problem["error"].(string)

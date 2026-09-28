@@ -1108,15 +1108,30 @@ match the `*APIError` that every control-plane call returns, so the same checks
 work anywhere.
 
 A hub admits a new connection about ninety seconds after it is created.
-`WaitForAdmission` follows the operation until it is `ready`; a failed one is an
-`*AdmissionFailedError` with the operation's `ErrorCode`. A 5xx is ridden out,
-and so is a 429 (a Free plan allows 60 requests a minute): the next read waits
-the `retry_after_seconds` the API names. Running out of time (180 seconds by
-default) is an `*AdmissionTimeoutError`, which matches both `ErrConnection` and
-`ErrTimeout`, because the connection may still be admitted later; a 429 asking
-for longer than the time left is that timeout at once. `control.DeleteClient(ctx, clientID, "")` removes a connection: it reads
-the etag when you pass none, retries once if the connection changed, and treats
-one that is already gone as deleted.
+`WaitForAdmission` follows the operation until it is `ready`:
+
+- a failed operation is an `*AdmissionFailedError` with the operation's
+  `ErrorCode`;
+- a 5xx is ridden out, and so is a 429 (a Free plan allows 60 requests a
+  minute): the next read waits what the API asks, `APIError.RetryAfter`, read
+  from the body's `retry_after_seconds`, then `Retry-After`, then
+  `RateLimit-Reset`;
+- a 401 or 403 is the `*APIError` itself (`errors.Is(err, thalovant.ErrAuth)`
+  for a revoked token or a missing scope): the token, not the connection, is
+  the trouble;
+- any other refusal of the wait is an `*AdmissionFailedError` whose `Err` is
+  the `*APIError`, with the status, code and detail the API answered;
+- an API out of reach is returned as it is (`errors.Is(err,
+  thalovant.ErrAPIUnreachable)`): it says nothing about the hub.
+
+Running out of time (180 seconds by default) is an `*AdmissionTimeoutError`,
+which matches both `ErrConnection` and `ErrTimeout`, because the connection may
+still be admitted later; a 429 asking for longer than the time left is that
+timeout at once, and no single read runs past it. An operation link on another
+origin -- scheme, host and port, with the default port spelled out -- is never
+fetched. `control.DeleteClient(ctx, clientID, "")` removes a connection: it
+reads the etag when you pass none, retries once if the connection changed, and
+treats one that is already gone as deleted.
 
 ### Answer the hub
 
@@ -1156,23 +1171,45 @@ defer stop()
 return session.Run(ctx)
 ```
 
-The handler has 9 seconds, under a context that ends when its time is up, so
-the SDK's own answer still reaches the hub before it gives up. Every request
-gets an answer whatever the handler does: an error or a panic is answered as
-`failed_to_handle`, running out of time as `timeout`, and an answer outside the
-contract's response types and error codes as `unknown`. In those cases the
-speech is empty and the hub says its own sentence, in the device's language.
-Speech is sent as plain text: markup is stripped, entities are decoded and
-whitespace is collapsed.
+The hub gives a request 10 seconds from its arrival, and the handler and the
+reply share them. The handler runs on its own goroutine with 9 seconds (or
+what is left of the 10, when less), under a context that ends when its time is
+up; the reply gets what the handler left. The answer goes out at the deadline
+whether or not the handler has returned, so a handler that ignores its context
+cannot hold it back. A reply is never started after the 10 seconds, and one
+still waiting to be sent then is withdrawn: the hub has already given up on it.
 
-`Run` retries a failed attempt after 10, 20, 40, 80, then 120 seconds, and
-replaces a link the moment it drops. A hub turns away a connection it has not
-admitted yet, so `Run` treats a refusal as "not yet" for 10 minutes
-(`WithRefusalGrace`) before it returns an error matching `ErrHubRefused`. A
-hub that does not know the client's key says so only by closing the socket
-right after the handshake; a link that closes within 750 ms (`WithSettle`)
-with no status, 1000, 1005 or 1008 is counted as a refusal, and any other close
-as a drop.
+Every request gets an answer while there is time: an error or a panic is
+answered as `failed_to_handle`, running out of time as `timeout`, and an answer
+outside the contract's response types and error codes as `unknown`. In those
+cases the speech is empty and the hub says its own sentence, in the device's
+language. Speech is sent as plain text, the same way in every SDK: real tags,
+comments and processing instructions are removed (so "5 < 6 and 7 > 3" stays
+whole), numeric references, the five XML entities and `&nbsp;` are decoded and
+nothing else, and every run of Unicode white space becomes one space.
+
+`Run` asks a `LinkSupervisor` after every attempt. It retries a failed attempt
+after 10, 20, 40, 80, then 120 seconds, and dials again the moment a link
+drops. A hub turns away a connection it has not admitted yet, so a refusal is
+"not yet" for 10 minutes (`WithRefusalGrace`) before `Run` returns an error
+matching `ErrHubRefused`. A hub whose Noise key is not the pinned one ends
+`Run` at once with `ErrHubKeyChanged`: retrying cannot change it, and the pin
+is never replaced for you (see `ForgetNoisePin`).
+
+A refusal is any of these:
+
+- a handshake answer that does not authenticate under the connection's
+  password, which is how a wrong password shows;
+- a WebSocket upgrade answered 401 or 403;
+- a close with no status, 1000, 1005 or 1008 during the handshake or within
+  750 ms after it (`WithSettle`), which is how a hub that does not know the
+  client's key answers.
+
+Any other close is a drop. Over WSS, a KK handshake that fails that way is
+followed at once, inside the same connect, by one XX handshake, because only
+XX tells a changed password (a refusal) from a changed hub key; the pin is
+still checked when XX completes. The HTTP and MQTT transports read a failed
+handshake and a changed key the same way, but make no XX attempt after KK.
 
 `session.On(eventType, handler)` registers a handler for any other event type;
 it keeps working across reconnects. `session.OnStateChange` reports the link
@@ -1247,7 +1284,9 @@ and `thalovant.AnswerHomeRequest` for each event.
 - `client.Reply(ctx, event, msgType, data, context)` and `ReplyContext(context)`
 - `NewHubSession(connect, policy, WithSettle(...), WithRefusalGrace(...))`
 - `session.Run(ctx)`, `session.Connect(ctx)`, `session.On(eventType, handler)`, `session.OnStateChange(notify)`, `session.Reply(...)`
-- `AnswerHomeRequests(session, handler, HomeAnswerOptions{Timeout: ..., OnReplyError: ...})` and `AnswerHomeRequest(ctx, replier, event, handler, timeout)`
+- `AnswerHomeRequests(session, handler, HomeAnswerOptions{Timeout: ..., HubTimeout: ..., OnReplyError: ...})` and `AnswerHomeRequest(ctx, replier, event, handler, options)`
+- `PlainSpeech(text)`, `DecodeReferences(text)`, `StripSSML(text)`
+- `NewLinkSupervisor(policy, refusalGrace).After(outcome, now)`
 
 ## Development
 

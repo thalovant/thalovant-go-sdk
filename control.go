@@ -15,6 +15,7 @@ import (
 	"reflect"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -268,7 +269,8 @@ func (c *ControlPlane) LoginWithOptions(ctx context.Context, email string, passw
 
 // DeviceLoginOptions carries optional device-flow sign-in inputs for
 // LoginWithBrowser. Scopes and ClientName are forwarded to the device
-// authorization request when set; the server may expand the echoed scopes
+// authorization request when set (an empty Scopes is left out, as the API
+// refuses one); the server may expand the echoed scopes
 // during normalization. OpenBrowser defaults to true when nil. Prompt, when
 // set, receives the device authorization payload instead of the default
 // message printed to stdout. Timeout bounds the whole approval wait and
@@ -298,7 +300,7 @@ type DeviceLoginOptions struct {
 // PollDeviceLogin are the same flow one step at a time.
 func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOptions) (map[string]any, error) {
 	payload := map[string]any{}
-	if opts.Scopes != nil {
+	if len(opts.Scopes) > 0 {
 		payload["scopes"] = opts.Scopes
 	}
 	if strings.TrimSpace(opts.ClientName) != "" {
@@ -725,12 +727,12 @@ func (c *ControlPlane) UpdateRuntimeGroupConfig(ctx context.Context, runtimeGrou
 	}
 	delta := stable["config"].(map[string]any)
 	for attempt := 0; ; attempt++ {
-		status, raw, err := c.send(ctx, http.MethodGet, path, nil, nil, true)
+		status, raw, header, err := c.send(ctx, http.MethodGet, path, nil, nil, true)
 		if err != nil {
 			return nil, err
 		}
 		if status < 200 || status > 299 {
-			return nil, apiErrorFromResponse(status, raw)
+			return nil, apiErrorFromResponse(status, raw, header)
 		}
 		// Preserve untouched JSON integers/decimals exactly when writing the snapshot back.
 		var snapshot map[string]any
@@ -1187,12 +1189,12 @@ func (c *ControlPlane) RequireRuntimeProtocol(result BootstrapIdentityResult, pr
 }
 
 func (c *ControlPlane) request(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool) (map[string]any, error) {
-	status, raw, err := c.send(ctx, method, path, payload, headers, auth)
+	status, raw, header, err := c.send(ctx, method, path, payload, headers, auth)
 	if err != nil {
 		return nil, err
 	}
 	if status < 200 || status > 299 {
-		return nil, apiErrorFromResponse(status, raw)
+		return nil, apiErrorFromResponse(status, raw, header)
 	}
 	result, decodeErr := decodeControlJSON(raw)
 	if decodeErr != nil {
@@ -1201,18 +1203,18 @@ func (c *ControlPlane) request(ctx context.Context, method string, path string, 
 	return result, nil
 }
 
-func (c *ControlPlane) send(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool) (int, []byte, error) {
+func (c *ControlPlane) send(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool) (int, []byte, http.Header, error) {
 	var body io.Reader
 	if payload != nil {
 		raw, err := json.Marshal(payload)
 		if err != nil {
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 		body = bytes.NewReader(raw)
 	}
 	req, err := http.NewRequestWithContext(ctx, method, c.APIURL+strings.TrimLeft(path, "/"), body)
 	if err != nil {
-		return 0, nil, fmt.Errorf("%w: invalid control request", ErrAPI)
+		return 0, nil, nil, fmt.Errorf("%w: invalid control request", ErrAPI)
 	}
 	req.Header.Set("accept", "application/json")
 	req.Header.Set("user-agent", c.UserAgent)
@@ -1224,7 +1226,7 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 	}
 	if auth {
 		if c.AccessToken == "" {
-			return 0, nil, fmt.Errorf("%w: missing access token", ErrAPI)
+			return 0, nil, nil, fmt.Errorf("%w: missing access token", ErrAPI)
 		}
 		req.Header.Set("authorization", "Bearer "+c.AccessToken)
 	}
@@ -1238,7 +1240,7 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 	sendsCookies := client.Jar != nil && len(client.Jar.Cookies(req.URL)) != 0
 	if auth || payload != nil || req.URL.User != nil || sendsCookies || req.Header.Get("authorization") != "" || req.Header.Get("cookie") != "" || req.Header.Get("proxy-authorization") != "" {
 		if err := requireControlCredentialEndpoint(req.URL); err != nil {
-			return 0, nil, err
+			return 0, nil, nil, err
 		}
 	}
 	scopedClient := *client
@@ -1251,13 +1253,15 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 		// may return arbitrary credential-bearing text. Preserve only known,
 		// safe context errors; never retain the transport cause in the chain.
 		if cause := ctx.Err(); cause == context.Canceled || cause == context.DeadlineExceeded {
-			return 0, nil, fmt.Errorf("%w: %w", ErrAPI, cause)
+			return 0, nil, nil, fmt.Errorf("%w: %w", ErrAPI, cause)
 		}
-		return 0, nil, fmt.Errorf("%w: control request failed", ErrAPI)
+		// Never answered: DNS, the connection, TLS, a proxy. It says nothing
+		// about what the API would have answered.
+		return 0, nil, nil, apiUnreachableError{}
 	}
 	defer resp.Body.Close()
 	raw, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, raw, nil
+	return resp.StatusCode, raw, resp.Header, nil
 }
 
 // requireControlCredentialEndpoint permits HTTP only for literal local development.
@@ -1297,7 +1301,7 @@ var serverErrorDetailFields = []string{"detail", "message", "error", "error_desc
 // decoded once. When it is a JSON object it rides on the error whole, as
 // Problem, with its Code and its unshortened ProblemDetail read out of it; the
 // Detail that Error() prints stays the bounded line it always was.
-func apiErrorFromResponse(status int, raw []byte) *APIError {
+func apiErrorFromResponse(status int, raw []byte, header http.Header) *APIError {
 	problem := decodeProblem(raw)
 	code, detail := problemFields(problem)
 	return &APIError{
@@ -1306,7 +1310,32 @@ func apiErrorFromResponse(status int, raw []byte) *APIError {
 		Code:          code,
 		ProblemDetail: detail,
 		Problem:       problem,
+		RetryAfter:    retryAfter(problem, header),
 	}
+}
+
+// retryAfter is how long an answer asks the caller to wait: the body's
+// retry_after_seconds, at the top or inside a detail object -- the API's
+// per-token 429 is FastAPI's envelope around a structured refusal, so it sits
+// inside detail, as code does -- else the Retry-After header in seconds, else
+// RateLimit-Reset. An HTTP-date Retry-After is not read.
+func retryAfter(problem map[string]any, header http.Header) time.Duration {
+	nested, _ := problem["detail"].(map[string]any)
+	for _, source := range []map[string]any{problem, nested} {
+		if seconds, ok := source["retry_after_seconds"].(float64); ok && seconds >= 0 && seconds <= maxDurationSeconds {
+			return time.Duration(seconds * float64(time.Second))
+		}
+	}
+	for _, name := range []string{"Retry-After", "RateLimit-Reset"} {
+		value := strings.TrimSpace(header.Get(name))
+		if value == "" || strings.TrimLeft(value, "0123456789") != "" {
+			continue
+		}
+		if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && float64(seconds) <= maxDurationSeconds {
+			return time.Duration(seconds) * time.Second
+		}
+	}
+	return 0
 }
 
 // decodeProblem is an error body decoded, exactly when it is a JSON object;

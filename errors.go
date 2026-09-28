@@ -49,6 +49,17 @@ var (
 	// until its hub admits it, so a HubSession's Run treats it as "not yet"
 	// for a grace period before returning it.
 	ErrHubRefused = errors.New("thalovant hub refused the credentials")
+	// ErrHubKeyChanged reports that a hub's Noise static key is not the one
+	// pinned for it: the hub was replaced or reinstalled, or another machine
+	// answers at its address. It always travels with ErrConnection. It is not
+	// a refusal, and retrying cannot change it; the pin is never replaced
+	// automatically (see ForgetNoisePin).
+	ErrHubKeyChanged = errors.New("thalovant hub key changed")
+	// ErrAPIUnreachable reports a control-plane request that never got an
+	// answer: DNS, the connection, TLS, a proxy. It always travels with ErrAPI
+	// and ErrConnection, and it says nothing about what the API would have
+	// answered.
+	ErrAPIUnreachable = errors.New("thalovant api unreachable")
 )
 
 // The hub's codes for the three kinds of refusal that arrive as
@@ -342,6 +353,12 @@ type APIError struct {
 	// values the body echoed back from the request, which is why Error()
 	// never prints it.
 	Problem map[string]any
+	// RetryAfter is how long the API asked the caller to wait before trying
+	// again, when it said; 0 otherwise. It is read from the body's
+	// retry_after_seconds (at the top, or inside a detail object), else from
+	// the Retry-After header in seconds, else from RateLimit-Reset: the API's
+	// own rate limiter answers a 429 in plain text with only that header.
+	RetryAfter time.Duration
 }
 
 func (e *APIError) Error() string {
@@ -525,7 +542,7 @@ type AdmissionTimeoutError struct {
 }
 
 func (e *AdmissionTimeoutError) Error() string {
-	return fmt.Sprintf("%v: %v: the hub did not admit the connection within %s; it may still admit it later", ErrConnection, ErrTimeout, e.Wait)
+	return fmt.Sprintf("%v: %v: the hub did not admit the connection within %s; it may still admit it later.", ErrConnection, ErrTimeout, e.Wait)
 }
 
 // Unwrap makes an AdmissionTimeoutError match ErrConnection and ErrTimeout.
@@ -536,18 +553,22 @@ func (e *AdmissionTimeoutError) Timeout() bool { return true }
 
 // AdmissionFailedError reports that the hub could not admit a new connection:
 // the operation carrying it ended failed or timed_out on the platform, or the
-// API refused to say how it went. It matches ErrConnection.
+// API refused the wait itself (for any reason but authentication, which
+// WaitForAdmission returns as the *APIError it is). It matches ErrConnection;
+// when the API refused the wait, errors.As also reaches its *APIError, with
+// the status, code and detail it answered.
 type AdmissionFailedError struct {
 	// OperationID is the operation that was followed.
 	OperationID string
 	// Status is the operation's final status, when it reached one.
 	Status OperationStatus
-	// ErrorCode is the operation's own code (or the API's, when the API
-	// refused the poll); "" when it had none.
+	// ErrorCode is the operation's own code, such as "gitops_push_rejected";
+	// "" when it had none, and always "" when the API refused the wait (its
+	// code is on the *APIError in Err).
 	ErrorCode string
 	// ErrorMessage is the operation's own explanation, when it gave one.
 	ErrorMessage string
-	// Err is the API's refusal of the poll, when that is what ended the wait.
+	// Err is the API's refusal of the wait, when that is what ended it.
 	Err error
 }
 
@@ -575,6 +596,19 @@ func (e *AdmissionFailedError) Unwrap() []error {
 		return []error{ErrConnection, e.Err}
 	}
 	return []error{ErrConnection}
+}
+
+// apiUnreachableError is a control-plane request that never got an answer. Its
+// message is the one this SDK has always given; it matches ErrAPI as it always
+// did, and ErrAPIUnreachable and ErrConnection besides.
+type apiUnreachableError struct{}
+
+func (apiUnreachableError) Error() string {
+	return fmt.Sprintf("%v: control request failed", ErrAPI)
+}
+
+func (apiUnreachableError) Unwrap() []error {
+	return []error{ErrAPI, ErrAPIUnreachable, ErrConnection}
 }
 
 // apiErrorOrSentinel is the API's answer when there is one, and ErrAPI when

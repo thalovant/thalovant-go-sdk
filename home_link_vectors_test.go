@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -109,6 +110,9 @@ func (a *scriptedAPI) handle(w http.ResponseWriter, r *http.Request) {
 	}
 	response := mapValue(exchange["response"])
 	answer, _ := response["body"].(string)
+	for name, value := range mapValue(response["headers"]) {
+		w.Header().Set(name, fmt.Sprint(value))
+	}
 	if answer != "" {
 		w.Header().Set("Content-Type", fmt.Sprint(response["content_type"]))
 	}
@@ -216,6 +220,9 @@ func runDeviceCase(t *testing.T, api *scriptedAPI, call map[string]any, vectors 
 	ctx := context.Background()
 	if call["op"] == "begin" {
 		var scopes []string
+		if _, listed := call["scopes"].([]any); listed {
+			scopes = []string{} // an empty list must be left out exactly as none is
+		}
 		for _, scope := range anySlice(call["scopes"]) {
 			scopes = append(scopes, fmt.Sprint(scope))
 		}
@@ -467,15 +474,50 @@ func TestConnectionAdmissionVectors(t *testing.T) {
 	}
 }
 
+// closedPort is a loopback port nothing listens on.
+func closedPort(t *testing.T) int {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	_ = listener.Close()
+	return port
+}
+
+// placed is a case's value with {api_host} and {api_port} filled in.
+func placed(value any, host, port string) any {
+	switch typed := value.(type) {
+	case string:
+		return strings.ReplaceAll(strings.ReplaceAll(typed, "{api_host}", host), "{api_port}", port)
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			out[key] = placed(item, host, port)
+		}
+		return out
+	}
+	return value
+}
+
 func runAdmissionCase(t *testing.T, api *scriptedAPI, call, expect map[string]any) map[string]any {
 	t.Helper()
-	plane := NewControlPlane(api.server.URL, "synthetic-token")
-	operation := operationFromAny(call["operation"])
+	apiURL := api.server.URL
+	if call["api"] == "unreachable" {
+		apiURL = fmt.Sprintf("http://127.0.0.1:%d", closedPort(t))
+	}
+	host, port, err := net.SplitHostPort(strings.TrimPrefix(api.server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plane := NewControlPlane(apiURL, "synthetic-token")
+	operation := operationFromAny(placed(call["operation"], host, port))
 	if call["operation"] != nil && operation == nil {
 		t.Fatal("the case's operation did not parse")
 	}
 	started := time.Now()
-	err := plane.WaitForAdmission(context.Background(), operation, AdmissionOptions{
+	err = plane.WaitForAdmission(context.Background(), operation, AdmissionOptions{
 		Timeout:      milliseconds(call["timeout_ms"]),
 		PollInterval: milliseconds(call["poll_interval_ms"]),
 	})
@@ -493,6 +535,9 @@ func runAdmissionCase(t *testing.T, api *scriptedAPI, call, expect map[string]an
 		if !errors.Is(err, ErrConnection) || !errors.Is(err, ErrTimeout) || !timeout.Timeout() {
 			t.Errorf("an admission timeout must be a connection error and a timeout: %v", err)
 		}
+		if !strings.HasSuffix(err.Error(), "it may still admit it later.") {
+			t.Errorf("the timeout's message ends %q", err.Error())
+		}
 		produced = map[string]any{"outcome": "timeout"}
 		if _, counted := expect["polls"]; counted {
 			produced["polls"] = polls
@@ -501,7 +546,23 @@ func runAdmissionCase(t *testing.T, api *scriptedAPI, call, expect map[string]an
 		if !errors.Is(err, ErrConnection) {
 			t.Errorf("a failed admission must be a connection error: %v", err)
 		}
-		produced = map[string]any{"outcome": "failed", "error_code": absentIfEmpty(failed.ErrorCode), "polls": polls}
+		produced = map[string]any{"outcome": "failed", "error_code": absentIfEmpty(failed.ErrorCode), "status": nil}
+		var refused *APIError
+		if errors.As(failed.Err, &refused) {
+			for key, value := range apiFields(refused) {
+				produced[key] = value
+			}
+		}
+		produced["polls"] = polls
+	case errors.Is(err, ErrAPIUnreachable):
+		if !errors.Is(err, ErrAPI) || !errors.Is(err, ErrConnection) {
+			t.Errorf("an unreachable API must still be an API and a connection error: %v", err)
+		}
+		produced = map[string]any{"outcome": "unreachable", "polls": polls}
+	case errors.Is(err, ErrAuth):
+		var refused *APIError
+		errors.As(err, &refused)
+		produced = map[string]any{"outcome": "auth", "status": refused.StatusCode, "polls": polls}
 	case errors.Is(err, ErrAPI):
 		produced = map[string]any{"outcome": "error", "polls": polls}
 	default:
@@ -566,9 +627,14 @@ func TestHomeLinkVectors(t *testing.T) {
 		name := fmt.Sprint(spec["name"])
 		t.Run(name, func(t *testing.T) {
 			var produced any
-			if spec["kind"] == "reply_context" {
+			switch spec["kind"] {
+			case "reply_context":
 				produced = map[string]any(ReplyContext(Context(mapValue(spec["context"]))))
-			} else {
+			case "speech":
+				produced = PlainSpeech(fmt.Sprint(spec["text"]))
+			case "deadline":
+				produced = runDeadlineCase(t, spec)
+			default:
 				replier := &capturingReplier{}
 				event := Event{Name: HomeRequestEvent, Data: Data(mapValue(spec["request"])), Context: Context{"source": "skill"}}
 				timeout := DefaultHomeHandlerTimeout
@@ -576,7 +642,7 @@ func TestHomeLinkVectors(t *testing.T) {
 					timeout = milliseconds(value)
 				}
 				started := time.Now()
-				payload, err := AnswerHomeRequest(context.Background(), replier, event, vectorHandler(mapValue(spec["handler"])), timeout)
+				payload, err := AnswerHomeRequest(context.Background(), replier, event, vectorHandler(mapValue(spec["handler"])), HomeAnswerOptions{Timeout: timeout})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -592,6 +658,54 @@ func TestHomeLinkVectors(t *testing.T) {
 			assertProduced(t, produced, spec["expect"])
 		})
 	}
+}
+
+// slowReplier takes send to put a reply on the wire, and gives up when its
+// context ends first: a reply withdrawn at the hub's bound is never recorded.
+type slowReplier struct {
+	capturingReplier
+	send time.Duration
+}
+
+func (r *slowReplier) Reply(ctx context.Context, event Event, msgType string, data Data, eventContext Context) error {
+	timer := time.NewTimer(r.send)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+	}
+	return r.capturingReplier.Reply(ctx, event, msgType, data, eventContext)
+}
+
+// runDeadlineCase answers one request inside a hub bound shorter than the
+// real one, with a transport that takes send_ms to send.
+func runDeadlineCase(t *testing.T, spec map[string]any) map[string]any {
+	t.Helper()
+	replier := &slowReplier{send: milliseconds(spec["send_ms"])}
+	event := Event{Name: HomeRequestEvent, Data: Data(mapValue(spec["request"])), Context: Context{"source": "skill"}}
+	hubTimeout := milliseconds(spec["hub_timeout_ms"])
+	started := time.Now()
+	sent, err := AnswerHomeRequest(context.Background(), replier, event, vectorHandler(mapValue(spec["handler"])), HomeAnswerOptions{
+		Timeout:    milliseconds(spec["timeout_ms"]),
+		HubTimeout: hubTimeout,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > hubTimeout+100*time.Millisecond {
+		t.Errorf("answered %s after the request, past the hub's %s bound", elapsed, hubTimeout)
+	}
+	produced := map[string]any{"replied": sent != nil}
+	if sent != nil {
+		if len(replier.sent) != 1 || !reflect.DeepEqual(replier.sent[0].data, sent) {
+			t.Fatalf("want exactly one reply carrying the payload, sent %+v", replier.sent)
+		}
+		produced["response"] = map[string]any(sent)
+	} else if len(replier.sent) != 0 {
+		t.Fatalf("a reply was sent after all: %+v", replier.sent)
+	}
+	return produced
 }
 
 func TestHomeLinkContractListsMatchTheSDK(t *testing.T) {

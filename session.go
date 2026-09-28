@@ -213,14 +213,6 @@ func (s *HubSession) stateChangeLocked(up bool) func() {
 	}
 }
 
-// backoff moves the unattended retry ladder one rung.
-func (s *HubSession) backoff() {
-	s.mu.Lock()
-	s.retryAt = s.clock().Add(s.retryWait)
-	s.retryWait = s.policy.NextWait(s.retryWait)
-	s.mu.Unlock()
-}
-
 func (s *HubSession) ensure(ctx context.Context) (HubSessionClient, error) {
 	s.mu.Lock()
 	closed, client := s.closed, s.client
@@ -402,9 +394,7 @@ func (s *HubSession) Connect(ctx context.Context) error {
 		return err
 	}
 	if err := s.settle(ctx, fresh); err != nil {
-		dropErr := s.drop(ctx)
-		s.backoff()
-		return errors.Join(err, dropErr)
+		return errors.Join(err, s.drop(ctx))
 	}
 	s.markUp(fresh)
 	return nil
@@ -456,16 +446,18 @@ func (s *HubSession) closedEarly(client HubSessionClient) error {
 }
 
 // Run keeps the link up until the session closes or ctx ends; start it in a
-// goroutine of its own. It makes the first attempt at once. After a failed
-// attempt it waits on the retry ladder (Retry, doubling up to RetryCeiling);
-// a held link is looked at continually and replaced the moment it drops. A hub
-// that refuses the credentials is retried like any other failure until the
-// refusals have lasted the refusal grace (WithRefusalGrace), since a new
-// connection is refused until its hub admits it; then Run returns the refusal
-// (ErrHubRefused). It returns nil once the session is closed, and ctx's error
-// when ctx ends first.
+// goroutine of its own. It makes the first attempt at once, and after every
+// attempt does what a LinkSupervisor decides: a link that drops is dialled
+// again at once; a failed attempt waits the retry ladder (Retry, doubling up
+// to RetryCeiling); a hub that refuses the credentials is retried the same way
+// until the refusals have lasted the refusal grace (WithRefusalGrace), since a
+// new connection is refused until its hub admits it, and then Run returns the
+// refusal (ErrHubRefused); a hub whose key changed ends Run at once with that
+// error (ErrHubKeyChanged), since retrying cannot change it. A held link is
+// looked at continually. Run returns nil once the session is closed, and
+// ctx's error when ctx ends first.
 func (s *HubSession) Run(ctx context.Context) error {
-	var refusedSince time.Time
+	supervisor := NewLinkSupervisor(s.policy, s.refusalGrace)
 	for {
 		if s.isClosed() {
 			return nil
@@ -477,36 +469,141 @@ func (s *HubSession) Run(ctx context.Context) error {
 			if err := s.watch(ctx); err != nil {
 				return err
 			}
+			if s.isClosed() {
+				return nil
+			}
+			// Dropped: the decision is to dial again at once.
+			supervisor.After(LinkDropped, time.Now())
 			continue
 		}
 		err := s.Connect(ctx)
 		switch {
-		case err == nil:
-			refusedSince = time.Time{}
-			continue
-		case s.isClosed():
+		case err != nil && s.isClosed():
 			return nil
-		case ctx.Err() != nil:
+		case err != nil && ctx.Err() != nil:
 			return ctx.Err()
-		case errors.Is(err, ErrHubRefused):
-			now := s.clock()
-			if refusedSince.IsZero() {
-				refusedSince = now
-			}
-			if now.Sub(refusedSince) >= s.refusalGrace {
-				return err
-			}
-		default:
-			refusedSince = time.Time{}
 		}
-		wait := s.RetryAt().Sub(s.clock())
-		if wait <= 0 {
-			wait = s.policy.Retry
+		decision := supervisor.After(linkOutcome(err), time.Now())
+		switch decision.Action {
+		case LinkHold:
+			continue
+		case LinkGiveUp:
+			return err
 		}
-		if err := s.pause(ctx, wait); err != nil {
+		if err := s.pause(ctx, decision.Wait); err != nil {
 			return err
 		}
 	}
+}
+
+// linkOutcome reads an attempt's error as the supervisor's outcome.
+func linkOutcome(err error) LinkOutcome {
+	switch {
+	case err == nil:
+		return LinkUp
+	case errors.Is(err, ErrHubKeyChanged):
+		return LinkKeyChanged
+	case errors.Is(err, ErrHubRefused):
+		return LinkRefused
+	}
+	return LinkFailed
+}
+
+// LinkOutcome is what one attempt to hold a link came to.
+type LinkOutcome string
+
+// The outcomes a LinkSupervisor decides on.
+const (
+	// LinkUp: the link is up.
+	LinkUp LinkOutcome = "up"
+	// LinkDropped: an established link went down.
+	LinkDropped LinkOutcome = "dropped"
+	// LinkFailed: the hub or the network could not be reached.
+	LinkFailed LinkOutcome = "failed"
+	// LinkRefused: the hub turned the credentials away (ErrHubRefused).
+	LinkRefused LinkOutcome = "refused"
+	// LinkKeyChanged: the hub's key is not the pinned one (ErrHubKeyChanged).
+	LinkKeyChanged LinkOutcome = "key_changed"
+)
+
+// LinkAction is what to do after an attempt.
+type LinkAction string
+
+// The actions a LinkSupervisor decides.
+const (
+	// LinkHold keeps the link that is up.
+	LinkHold LinkAction = "hold"
+	// LinkRetry dials again after LinkDecision.Wait.
+	LinkRetry LinkAction = "retry"
+	// LinkGiveUp stops; LinkDecision.Reason says why.
+	LinkGiveUp LinkAction = "give_up"
+)
+
+// LinkDecision is a LinkSupervisor's answer to one outcome.
+type LinkDecision struct {
+	Action LinkAction
+	// Wait is how long to wait before dialling again, for LinkRetry.
+	Wait time.Duration
+	// Reason is the outcome that ended the link, for LinkGiveUp:
+	// LinkRefused or LinkKeyChanged.
+	Reason LinkOutcome
+}
+
+// LinkSupervisor decides how a long-lived link is kept up, as a pure function
+// of what happened and when; HubSession's Run asks it after every attempt, and
+// every SDK follows the same rules (link-keeping-vectors.json):
+//
+//   - LinkUp: hold, and start the ladder and the refusal clock afresh;
+//   - LinkDropped: dial again at once;
+//   - LinkFailed: wait the ladder's step -- the policy's Retry, doubling to
+//     RetryCeiling -- and stop counting refusals;
+//   - LinkRefused: wait the ladder's step the same way, until the refusals
+//     have lasted the refusal grace since the first of them (inclusive), then
+//     give up;
+//   - LinkKeyChanged: give up at once, since retrying cannot change it.
+//
+// A LinkSupervisor is not safe for concurrent use.
+type LinkSupervisor struct {
+	policy       HubSessionPolicy
+	refusalGrace time.Duration
+	wait         time.Duration
+	refusedSince time.Time
+	refusing     bool
+}
+
+// NewLinkSupervisor is a supervisor for policy that gives refusals
+// refusalGrace (DefaultHubRefusalGrace when nonpositive).
+func NewLinkSupervisor(policy HubSessionPolicy, refusalGrace time.Duration) *LinkSupervisor {
+	if refusalGrace <= 0 {
+		refusalGrace = DefaultHubRefusalGrace
+	}
+	return &LinkSupervisor{policy: policy, refusalGrace: refusalGrace, wait: policy.Retry}
+}
+
+// After is the decision after outcome, observed at now; only the differences
+// between the times it is given matter.
+func (l *LinkSupervisor) After(outcome LinkOutcome, now time.Time) LinkDecision {
+	switch outcome {
+	case LinkUp:
+		l.wait, l.refusing = l.policy.Retry, false
+		return LinkDecision{Action: LinkHold}
+	case LinkDropped:
+		return LinkDecision{Action: LinkRetry}
+	case LinkKeyChanged:
+		return LinkDecision{Action: LinkGiveUp, Reason: LinkKeyChanged}
+	case LinkRefused:
+		if !l.refusing {
+			l.refusing, l.refusedSince = true, now
+		}
+		if now.Sub(l.refusedSince) >= l.refusalGrace {
+			return LinkDecision{Action: LinkGiveUp, Reason: LinkRefused}
+		}
+	default:
+		l.refusing = false
+	}
+	wait := l.wait
+	l.wait = l.policy.NextWait(l.wait)
+	return LinkDecision{Action: LinkRetry, Wait: wait}
 }
 
 // watch returns once the held link has dropped (and has been let go), the

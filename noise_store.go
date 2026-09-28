@@ -150,7 +150,7 @@ func pinNoisePeer(dir, nodeID, key string) error {
 		return err
 	}
 	if pinned := pins[nodeID]; pinned != "" && !strings.EqualFold(pinned, key) {
-		return fmt.Errorf("%w: the hub's Noise static key changed; verify its identity before explicitly calling ForgetNoisePin", ErrConnection)
+		return fmt.Errorf("%w: %w: the hub's Noise static key changed; verify its identity before explicitly calling ForgetNoisePin", ErrConnection, ErrHubKeyChanged)
 	}
 	if strings.EqualFold(pins[nodeID], key) {
 		return nil
