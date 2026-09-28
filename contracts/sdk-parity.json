@@ -2,14 +2,14 @@
   "capabilities": {
     "api-errors": {
       "implementation": {
-        "control.go": "e53105e67f409e8d96fed77b5fdd8b27708c9e3b0f846e6e38f653cfe89c99ca",
-        "errors.go": "e0db797fd317554186d80ba9d67e8fc0f12955ed286408412518fb75444b0a5a"
+        "control.go": "b5f50fc5ae60f9d05502595e8024aa85dd9e80ef0c2472900cbb578f0b14bbc0",
+        "errors.go": "0a001db55894dda74d3b8d9b05f39c4d4658684e80c7a2fa8108b9adb6eb49ea"
       },
       "reason": "apiErrorFromResponse() in control.go builds every non-2xx control-plane error from one decode of the body, and problemFields() in errors.go reads APIError.Code and ProblemDetail out of it beside the whole body as Problem; StatusCode, Detail and Error() are unchanged. Run against the shared api-error vectors, each served by a loopback httptest server and read back through GetHub, the configuration-merge read and the device-flow token poll, with what GetHub produced recorded.",
       "status": "required",
       "tests": {
         "api_error_vectors_test.go": "e9e77c1286fb59bab2d25857d7f46d598100707efdd5f9ec93d2c4013a43c0c9",
-        "conformance_record_test.go": "e31df0b8dd216e750764df20938252bc2cdbc64a7ec061d60e58742fb32c1bbc",
+        "conformance_record_test.go": "31f3322b202e3fe9cd265f3e8ad6929b9eaae7c167575deffd8a38e4ff7e8bbf",
         "testdata/api-error-vectors.json": "f0d2d8e6e153811f071dac6e0611f00f3c32ed772b751ccccb31904d7dc936ec"
       },
       "vectors": {
@@ -26,7 +26,7 @@
       "status": "required",
       "tests": {
         "binary_frames_test.go": "39a72c18cc89c54ca90b7a3905ef6059e11161bb22021482c4ae16798e3c942a",
-        "conformance_record_test.go": "e31df0b8dd216e750764df20938252bc2cdbc64a7ec061d60e58742fb32c1bbc"
+        "conformance_record_test.go": "31f3322b202e3fe9cd265f3e8ad6929b9eaae7c167575deffd8a38e4ff7e8bbf"
       },
       "vectors": {
         "binary-frames.json": "testdata/binary-frames.json",
@@ -37,9 +37,45 @@
       "reason": "Python command line entry point; consumers expose idiomatic language APIs or MCP tools.",
       "status": "not-applicable"
     },
+    "connection-admission": {
+      "implementation": {
+        "connections.go": "259891ac33f7bceee36ded4a10b502dde882e46109217e866714fbcd5f783a72",
+        "control.go": "b5f50fc5ae60f9d05502595e8024aa85dd9e80ef0c2472900cbb578f0b14bbc0",
+        "errors.go": "0a001db55894dda74d3b8d9b05f39c4d4658684e80c7a2fa8108b9adb6eb49ea"
+      },
+      "reason": "WaitForAdmission in connections.go follows the Operation a create returned (BootstrapIdentityResult.Operation is new): ready is admitted, failed and timed_out are *AdmissionFailedError with the operation's code, no operation and 404 are admitted at once, a 5xx or a request that never reached the API is ridden out, the deadline is *AdmissionTimeoutError -- errors.Is ErrConnection and ErrTimeout, and Timeout() true -- and a links.self on another scheme, host or port than the API's is refused unfetched. Cancelling the context ends the wait with ErrTimeout. Run against the shared connection-admission vectors over a loopback httptest server, with what the SDK produced recorded.",
+      "status": "required",
+      "tests": {
+        "conformance_record_test.go": "31f3322b202e3fe9cd265f3e8ad6929b9eaae7c167575deffd8a38e4ff7e8bbf",
+        "home_link_test.go": "4a97ada8de5341ade6a4e127dd6528c0b4fe065d932f72230c5025c011b4405c",
+        "home_link_vectors_test.go": "261f730f6b8ab137695d71cb8b8411ee9e08f67af41a8ed21dfad6bcd0b2cbc6",
+        "testdata/connection-admission-vectors.json": "d9f7ae3443a66b54e325b9f516f6bf3c6adc414506086d017c3e63496bf790d6"
+      },
+      "vectors": {
+        "connection-admission-vectors.json": "testdata/connection-admission-vectors.json"
+      }
+    },
+    "connection-kinds": {
+      "implementation": {
+        "connections.go": "259891ac33f7bceee36ded4a10b502dde882e46109217e866714fbcd5f783a72",
+        "control.go": "b5f50fc5ae60f9d05502595e8024aa85dd9e80ef0c2472900cbb578f0b14bbc0",
+        "errors.go": "0a001db55894dda74d3b8d9b05f39c4d4658684e80c7a2fa8108b9adb6eb49ea"
+      },
+      "reason": "BootstrapIdentityOptions.ConnectionType sends spec.connection_type; CreateClientIdentity checks the kind comes back and, when it does not, deletes the client with its etag and returns *UnsupportedConnectionTypeError, as it does for a 422 about the field. The other refusals stay the *APIError every call already returned and are told apart with errors.Is: APIError.Is answers ErrAuth, ErrPlan and ErrAlreadyLinked from the status, code and detail, and LinkedClientID names the client that holds the link, so no existing caller sees a different error type. GetClient and DeleteClient (connections.go): read the etag when none is given, retry once on 412, and count 404 as deleted. Run against the shared connection-kinds vectors over a loopback httptest server, with the requests the server saw recorded beside each outcome.",
+      "status": "required",
+      "tests": {
+        "api_error_vectors_test.go": "e9e77c1286fb59bab2d25857d7f46d598100707efdd5f9ec93d2c4013a43c0c9",
+        "conformance_record_test.go": "31f3322b202e3fe9cd265f3e8ad6929b9eaae7c167575deffd8a38e4ff7e8bbf",
+        "home_link_vectors_test.go": "261f730f6b8ab137695d71cb8b8411ee9e08f67af41a8ed21dfad6bcd0b2cbc6",
+        "testdata/connection-kinds-vectors.json": "3f4ea0ba37afa339fff4928d54d9797ddd4f9e252230e4bf46247082bad7e2bd"
+      },
+      "vectors": {
+        "connection-kinds-vectors.json": "testdata/connection-kinds-vectors.json"
+      }
+    },
     "control": {
       "implementation": {
-        "control.go": "e53105e67f409e8d96fed77b5fdd8b27708c9e3b0f846e6e38f653cfe89c99ca",
+        "control.go": "b5f50fc5ae60f9d05502595e8024aa85dd9e80ef0c2472900cbb578f0b14bbc0",
         "hub_skills.go": "fedcdfea962817ada46bc8281e4c70458187e2cf80b1081203e33fdd4048fa20",
         "hubs.go": "52433966442f363e691a12d973dfb3df9fdffd75fc8c3772f8fb91b937293a34",
         "native_auth.go": "59bba6733ed0aa40d90fcd6ac2136bf83c247686503f7aa24d02bd9c3a0af078"
@@ -55,17 +91,54 @@
     },
     "conversation": {
       "implementation": {
-        "client.go": "89f8df3b19a9140b473e7ab999543aa8b5fff6c9a70af865794c21321cfb6b4a",
+        "client.go": "d572f607cfcd6b15a52afbac62315c179bff2f6bb30bc07255e53349072b41c9",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc"
       },
       "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
       "status": "required",
       "tests": {
-        "conformance_record_test.go": "e31df0b8dd216e750764df20938252bc2cdbc64a7ec061d60e58742fb32c1bbc",
+        "conformance_record_test.go": "31f3322b202e3fe9cd265f3e8ad6929b9eaae7c167575deffd8a38e4ff7e8bbf",
         "conversation_carry_test.go": "637108a92a200e358b775164b836169150346a0a439ba3a8bf72ec0e70e12909"
       },
       "vectors": {
         "conversation-vectors.json": "testdata/conversation-vectors.json"
+      }
+    },
+    "device-login": {
+      "implementation": {
+        "control.go": "b5f50fc5ae60f9d05502595e8024aa85dd9e80ef0c2472900cbb578f0b14bbc0",
+        "device_login.go": "94a78d2f43a3507f2b0fa61ea6858f136f2e19f799ee1b00141d5209d41cc922",
+        "errors.go": "0a001db55894dda74d3b8d9b05f39c4d4658684e80c7a2fa8108b9adb6eb49ea"
+      },
+      "reason": "BeginDeviceLogin, PollDeviceLogin and RevokeAPIToken in device_login.go, one step each, for a caller that runs its own loop; LoginWithBrowser in control.go now runs its loop over the same one-poll path. A pending poll is a *DeviceLoginPendingError carrying Interval, and slow_down lengthens the DeviceAuthorization's Interval for good; expiry and denial are *DeviceLoginExpiredError and *DeviceLoginDeniedError (errors.go), still matching ErrDeviceCodeExpired and ErrDeviceAccessDenied, and every one of them reaches the *APIError the API answered with. The approved token and its token_id are kept on the ControlPlane (TokenID is new), and a token revokes itself. DeviceAuthorization and APIToken print with the device code and the token redacted. Run against the shared device-login vectors over a loopback httptest server, checking every request, with what the SDK produced recorded.",
+      "status": "required",
+      "tests": {
+        "api_error_vectors_test.go": "e9e77c1286fb59bab2d25857d7f46d598100707efdd5f9ec93d2c4013a43c0c9",
+        "conformance_record_test.go": "31f3322b202e3fe9cd265f3e8ad6929b9eaae7c167575deffd8a38e4ff7e8bbf",
+        "home_link_vectors_test.go": "261f730f6b8ab137695d71cb8b8411ee9e08f67af41a8ed21dfad6bcd0b2cbc6",
+        "testdata/device-login-vectors.json": "7f48cee561292aebb1ebd42ded7d6265ceb0a51f96787253b03744b7be99ca84"
+      },
+      "vectors": {
+        "device-login-vectors.json": "testdata/device-login-vectors.json"
+      }
+    },
+    "home-link": {
+      "implementation": {
+        "client.go": "d572f607cfcd6b15a52afbac62315c179bff2f6bb30bc07255e53349072b41c9",
+        "home.go": "02bde06c35b319096dc99dd2954905089a40798fd38990701c54c89bc94ca116",
+        "session.go": "fe85775052c25b1a88acdb5465674f519251c2eee0351a9e0e3edca56797f936",
+        "transport_wss.go": "0e56c8215a91f7f82e44b15fc7a70c1a4de0a3ef16417997938bafe2e1998f72"
+      },
+      "reason": "home.go: HomeRequest, HomeAnswer, HomeResponse, PlainSpeech, AnswerHomeRequest (the handler runs under a context with the 9 s deadline on its own goroutine, so a handler that ignores its context is still answered for in time; an error or a panic is failed_to_handle, the deadline timeout, an answer outside the code sets unknown) and AnswerHomeRequests over any HomeLink. client.go: Client.Reply and ReplyContext, built from the context as the hub sent it (the Go transports deliver the wire context unchanged), deep-copied. session.go: HubSession.On, OnStateChange, Reply, Connect and Run -- handlers outlive a reconnect, the settle window reads a close right after the handshake, and Run keeps the link on the retry ladder with the refusal grace. transport_wss.go records whether the last close was a refusal (no status, 1000, 1005, 1008) and marks an HTTP 401/403 upgrade and a refusal during the handshake with ErrHubRefused. Run against the shared home-link vectors, plus a request answered end to end over a real WSS Noise connection and the settle window against real close codes.",
+      "status": "required",
+      "tests": {
+        "conformance_record_test.go": "31f3322b202e3fe9cd265f3e8ad6929b9eaae7c167575deffd8a38e4ff7e8bbf",
+        "home_link_test.go": "4a97ada8de5341ade6a4e127dd6528c0b4fe065d932f72230c5025c011b4405c",
+        "home_link_vectors_test.go": "261f730f6b8ab137695d71cb8b8411ee9e08f67af41a8ed21dfad6bcd0b2cbc6",
+        "testdata/home-link-vectors.json": "1fdffb95faea854ed15d4ad27aa495e7372a0827b3dae8f5945c0be4c1bfb0f3"
+      },
+      "vectors": {
+        "home-link-vectors.json": "testdata/home-link-vectors.json"
       }
     },
     "identity": {
@@ -118,7 +191,7 @@
       "status": "required",
       "tests": {
         "binary_frames_test.go": "39a72c18cc89c54ca90b7a3905ef6059e11161bb22021482c4ae16798e3c942a",
-        "conformance_record_test.go": "e31df0b8dd216e750764df20938252bc2cdbc64a7ec061d60e58742fb32c1bbc",
+        "conformance_record_test.go": "31f3322b202e3fe9cd265f3e8ad6929b9eaae7c167575deffd8a38e4ff7e8bbf",
         "conversation_carry_test.go": "637108a92a200e358b775164b836169150346a0a439ba3a8bf72ec0e70e12909"
       },
       "vectors": {
@@ -127,8 +200,8 @@
     },
     "refusal": {
       "implementation": {
-        "client.go": "89f8df3b19a9140b473e7ab999543aa8b5fff6c9a70af865794c21321cfb6b4a",
-        "errors.go": "e0db797fd317554186d80ba9d67e8fc0f12955ed286408412518fb75444b0a5a"
+        "client.go": "d572f607cfcd6b15a52afbac62315c179bff2f6bb30bc07255e53349072b41c9",
+        "errors.go": "0a001db55894dda74d3b8d9b05f39c4d4658684e80c7a2fa8108b9adb6eb49ea"
       },
       "reason": "refusalBelongsToAsk() and failureError() in errors.go, used by AskWithOptions() in client.go, which counts asks, queries and fire-and-forget utterances inside the shared grace window -- recorded immediately before the publish and kept when the publish errors, since the transport can fail after the hub holds the frame. PolicyDeniedError carries Quota and UnansweredError is new, both still errors.Is ErrRuntime. Run against the shared refusal vectors, decoded as map[string]any so numbers arrive as float64, plus five end-to-end asks.",
       "status": "required",
@@ -142,7 +215,7 @@
     },
     "runtime": {
       "implementation": {
-        "client.go": "89f8df3b19a9140b473e7ab999543aa8b5fff6c9a70af865794c21321cfb6b4a",
+        "client.go": "d572f607cfcd6b15a52afbac62315c179bff2f6bb30bc07255e53349072b41c9",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc",
         "transport.go": "b09c658aefebb0fa4d428af962cfc3917f74659c307ef67d5c9fb0382040b0f4",
         "transport_noise.go": "e474489cdec5fd12fa2c2c179af33eb503792bb06ea4dce7a0a1c1ba9784819d"
@@ -162,7 +235,7 @@
     },
     "session": {
       "implementation": {
-        "session.go": "b8ee8d11c9f03e54b5913945c0610ba5aadde9099da99a00ad22c5e16e9b5535"
+        "session.go": "fe85775052c25b1a88acdb5465674f519251c2eee0351a9e0e3edca56797f936"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. The connected-client factory owns failed connection cleanup; Python performs that dial internally and retains failed retirement before replacement.",
       "status": "required",
@@ -183,7 +256,8 @@
     "2377330566e575bb3fda77998d943667bf0795940f9d569a5b8bc7f4f0e5e486",
     "76bc1eb9957da5a6fdf03e89f3905f8d37d3ef2fe7c841ba751718105ca30a45",
     "34a21f2ad875b220a571613e25b6a6e5f3d8de1a776f4949a7ab63ba93e07b16",
-    "f79d99e9acd2fe299e3b313102541e47b366751defe5fa0dcfa44053aa7f007d"
+    "f79d99e9acd2fe299e3b313102541e47b366751defe5fa0dcfa44053aa7f007d",
+    "b16579bd501d18147e6b74b02d67d98ce6aeb850f369de2138fbdfb598469b7c"
   ],
   "schema_version": 1
 }

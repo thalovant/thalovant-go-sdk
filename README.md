@@ -153,7 +153,12 @@ Failures are distinct sentinel errors: `errors.Is(err,
 thalovant.ErrDeviceAccessDenied)` when the request is denied in the browser,
 `thalovant.ErrDeviceCodeExpired` when the code expires unapproved (call
 `LoginWithBrowser` again for a new code), and `thalovant.ErrTimeout` when the
-wait elapses. Context cancellation is honored between polls.
+wait elapses. Context cancellation is honored between polls. The token's id is
+kept on `control.TokenID`, for `RevokeAPIToken`.
+
+A caller that shows the code on its own screen and polls on its own schedule
+uses the same flow one step at a time: see
+[Link Home Assistant](#link-home-assistant).
 
 ### CI: Direct API Token Auth
 
@@ -1022,6 +1027,153 @@ if errors.As(err, &apiErr) {
 A value the body echoes back from your request (a validation error repeats
 what it was sent) is only ever in `Problem`, never in `Error()` or `Detail`.
 
+## Link Home Assistant
+
+A Home Assistant integration (or any home controller) links to a hub in four
+steps: sign in on the device, create a connection of kind `home_assistant`,
+wait for the hub to admit it, then answer the hub's requests.
+
+### Sign in one step at a time
+
+`BeginDeviceLogin` asks for a code and returns without printing or opening
+anything. Show the person `VerificationURI` and `UserCode`, or open
+`VerificationURIComplete`, which carries the code. Then call
+`PollDeviceLogin` every `Interval` until it stops saying "pending":
+
+```go
+control := thalovant.NewDefaultControlPlane("")
+grant, err := control.BeginDeviceLogin(ctx, thalovant.HomeAssistantScopes(), "Home Assistant")
+if err != nil {
+	return err
+}
+fmt.Printf("Visit %s and enter %s\n", grant.VerificationURI, grant.UserCode)
+
+for {
+	token, err := control.PollDeviceLogin(ctx, grant)
+	var pending *thalovant.DeviceLoginPendingError
+	switch {
+	case err == nil:
+		fmt.Println("signed in until", token.ExpiresAt)
+		return nil
+	case errors.As(err, &pending):
+		time.Sleep(pending.Interval)
+	default:
+		return err // ErrDeviceCodeExpired, ErrDeviceAccessDenied, or an *APIError
+	}
+}
+```
+
+`HomeAssistantScopes()` is `hubs:read`, `clients:read` and `clients:write`,
+which is also everything a Free plan can approve. A `slow_down` answer adds
+five seconds to `grant.Interval` for good, so keep polling with the same
+`grant`. On approval the token is kept on `control.AccessToken` and its id on
+`control.TokenID`; `control.RevokeAPIToken(ctx, "")` revokes it (a token may
+always revoke itself) and forgets it. The device code and the token are
+redacted when a `DeviceAuthorization` or an `APIToken` is printed, and never
+appear in an error.
+
+### Create the connection and wait for it
+
+```go
+result, err := control.CreateClientIdentity(ctx, hub, thalovant.BootstrapIdentityOptions{
+	Name:           "Home Assistant (Kitchen hub)",
+	ConnectionType: thalovant.ConnectionTypeHomeAssistant,
+})
+var apiErr *thalovant.APIError
+switch {
+case errors.Is(err, thalovant.ErrAlreadyLinked) && errors.As(err, &apiErr):
+	return fmt.Errorf("this hub is already linked by %s", apiErr.LinkedClientID())
+case errors.Is(err, thalovant.ErrUnsupportedConnectionType):
+	return err // the API cannot make this kind of connection yet
+case errors.Is(err, thalovant.ErrPlan):
+	return err // the plan does not allow it; apiErr.Problem has the numbers
+case errors.Is(err, thalovant.ErrAuth):
+	return err // sign in again
+case err != nil:
+	return err
+}
+// Keep result.Identity: it is what the link connects with.
+err = control.WaitForAdmission(ctx, result.Operation, thalovant.AdmissionOptions{})
+```
+
+The API has to say the connection is of the kind asked for. When it makes an
+ordinary connection instead, `CreateClientIdentity` deletes it and returns an
+`*UnsupportedConnectionTypeError`. `ErrAuth`, `ErrPlan` and `ErrAlreadyLinked`
+match the `*APIError` that every control-plane call returns, so the same checks
+work anywhere.
+
+A hub admits a new connection about ninety seconds after it is created.
+`WaitForAdmission` follows the operation until it is `ready`; a failed one is an
+`*AdmissionFailedError` with the operation's `ErrorCode`. Running out of time
+(180 seconds by default) is an `*AdmissionTimeoutError`, which matches both
+`ErrConnection` and `ErrTimeout`, because the connection may still be admitted
+later. `control.DeleteClient(ctx, clientID, "")` removes a connection: it reads
+the etag when you pass none, retries once if the connection changed, and treats
+one that is already gone as deleted.
+
+### Answer the hub
+
+The hub sends `thalovant.home.request` and expects one
+`thalovant.home.response` within 10 seconds. `AnswerHomeRequests` registers a
+handler on a `HubSession`, answers each request on a goroutine of its own, and
+sends the answer as a reply, so it goes back the way the request came.
+`session.Run` keeps the link up:
+
+```go
+session, err := thalovant.NewHubSession(func(ctx context.Context) (thalovant.HubSessionClient, error) {
+	client, err := thalovant.NewClientWithOptions(result.Identity, thalovant.ClientOptions{})
+	if err != nil {
+		return nil, err
+	}
+	if err := client.Connect(ctx); err != nil {
+		_ = client.Close(context.Background())
+		return nil, err
+	}
+	return client, nil
+}, thalovant.DefaultHubSessionPolicy())
+if err != nil {
+	return err
+}
+defer session.Close(context.Background())
+
+stop := thalovant.AnswerHomeRequests(session, func(ctx context.Context, request thalovant.HomeRequest) (thalovant.HomeAnswer, error) {
+	// askAssist is your call into Home Assistant's conversation agent.
+	speech, err := askAssist(ctx, request.Utterance, request.Lang, request.ConversationID)
+	if err != nil {
+		return thalovant.HomeAnswer{}, err
+	}
+	return thalovant.HomeAnswer{Speech: speech, ResponseType: thalovant.HomeActionDone}, nil
+}, thalovant.HomeAnswerOptions{})
+defer stop()
+
+return session.Run(ctx)
+```
+
+The handler has 9 seconds, under a context that ends when its time is up, so
+the SDK's own answer still reaches the hub before it gives up. Every request
+gets an answer whatever the handler does: an error or a panic is answered as
+`failed_to_handle`, running out of time as `timeout`, and an answer outside the
+contract's response types and error codes as `unknown`. In those cases the
+speech is empty and the hub says its own sentence, in the device's language.
+Speech is sent as plain text: markup is stripped, entities are decoded and
+whitespace is collapsed.
+
+`Run` retries a failed attempt after 10, 20, 40, 80, then 120 seconds, and
+replaces a link the moment it drops. A hub turns away a connection it has not
+admitted yet, so `Run` treats a refusal as "not yet" for 10 minutes
+(`WithRefusalGrace`) before it returns an error matching `ErrHubRefused`. A
+hub that does not know the client's key says so only by closing the socket
+right after the handshake; a link that closes within 750 ms (`WithSettle`)
+with no status, 1000, 1005 or 1008 is counted as a refusal, and any other close
+as a drop.
+
+`session.On(eventType, handler)` registers a handler for any other event type;
+it keeps working across reconnects. `session.OnStateChange` reports the link
+going up and down, and `session.Reply` or `client.Reply` answers any event back
+along its route (`ReplyContext` is the routing rule on its own). A bare
+`Client` has no `On`; use `client.Listen(ctx, thalovant.HomeRequestEvent, ...)`
+and `thalovant.AnswerHomeRequest` for each event.
+
 ## API Shape
 
 - `NewDefaultControlPlane(accessToken)`
@@ -1029,6 +1181,8 @@ what it was sent) is only ever in `Problem`, never in `Error()` or `Detail`.
 - `control.Login(ctx, email, password, scope)`
 - `control.LoginWithOptions(ctx, email, password, LoginOptions{Scope: ..., OTPCode: ..., RecoveryCode: ...})`
 - `control.LoginWithBrowser(ctx, DeviceLoginOptions{Scopes: ..., ClientName: ..., OpenBrowser: ..., Prompt: ..., Timeout: ...})`
+- `control.BeginDeviceLogin(ctx, scopes, clientName)` and `control.PollDeviceLogin(ctx, grant)`
+- `control.RevokeAPIToken(ctx, tokenID)`
 - `control.ListPublicHubs(ctx, limit, cursor)`
 - `control.GetPublicHub(ctx, hubRef)`
 - `control.ListHubs(ctx, limit, cursor, ownerID)`
@@ -1062,6 +1216,10 @@ what it was sent) is only ever in `Problem`, never in `Error()` or `Detail`.
 - `control.UpdateMemoryItem(ctx, memoryID, payload)`
 - `control.DeleteMemoryItem(ctx, memoryID)`
 - `control.CreateClientIdentityForHubID(ctx, hubID, options)`
+- `control.CreateClientIdentity(ctx, hub, BootstrapIdentityOptions{Name: ..., ConnectionType: ...})`
+- `control.WaitForAdmission(ctx, result.Operation, AdmissionOptions{Timeout: ..., PollInterval: ...})`
+- `control.GetClient(ctx, clientID)`
+- `control.DeleteClient(ctx, clientID, etag)`
 - `IdentityFromConfig(path, profile)`
 - `IdentityFromFile(path)`
 - `NewClientFromConfig(path, profile)`
@@ -1079,6 +1237,10 @@ what it was sent) is only ever in `Problem`, never in `Error()` or `Detail`.
 - `client.Intents(ctx, languages, IntentOptions{Timeout: ..., Describe: ..., Fallback: ...})`
 - `client.ListIntents(ctx, lang, IntentOptions{Timeout: ..., IncludeDefinitions: ...})`
 - `client.DescribeIntent(ctx, skillID, intentName, lang, IntentOptions{Timeout: ...})`
+- `client.Reply(ctx, event, msgType, data, context)` and `ReplyContext(context)`
+- `NewHubSession(connect, policy, WithSettle(...), WithRefusalGrace(...))`
+- `session.Run(ctx)`, `session.Connect(ctx)`, `session.On(eventType, handler)`, `session.OnStateChange(notify)`, `session.Reply(...)`
+- `AnswerHomeRequests(session, handler, HomeAnswerOptions{Timeout: ..., OnReplyError: ...})` and `AnswerHomeRequest(ctx, replier, event, handler, timeout)`
 
 ## Development
 
@@ -1221,12 +1383,15 @@ for example Spanish `qué hora es` becomes `Qué hora es?`, while French
 `HubSession` owns one reusable hub connection. Supply a factory that returns a
 connected client and cleans up a failed or cancelled connection attempt. Event
 subscriptions survive client replacement. Go and Rust expose a persistent event
-stream; the other managed SDKs expose subscription handles. Close the session
+stream; the other managed SDKs expose subscription handles. Go also takes a
+handler per event type with `session.On`. Close the session
 when its owner shuts down; close waits for admitted operations and is terminal.
 
 Background connection attempts back off for 10, 20, 40, 80, then 120 seconds.
-Foreground calls can try immediately. Your application owns probe scheduling:
-use the reported probe delay (60 seconds while held, 5 seconds while down).
+Foreground calls can try immediately. Either run `session.Run(ctx)` in a
+goroutine, which keeps the link up by that policy (see
+[Answer the hub](#answer-the-hub)), or schedule probes yourself with the
+reported probe delay (60 seconds while held, 5 seconds while down).
 The SDK never replays an admitted Ask or Emit after a lost response, because an
 Ask can trigger an action. A request timeout applies to the underlying operation;
 waiting for session admission and your connection factory are separate budgets.

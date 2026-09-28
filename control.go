@@ -67,6 +67,9 @@ type ControlPlane struct {
 	AccessToken string
 	UserAgent   string
 	HTTPClient  *http.Client
+	// TokenID names the API token a device sign-in stored in AccessToken, for
+	// RevokeAPIToken; "" when the token came from elsewhere.
+	TokenID string
 }
 
 // String implements fmt.Stringer so the %v, %s, and %+v verbs render a
@@ -88,6 +91,12 @@ type BootstrapIdentityOptions struct {
 	Active             *bool
 	PreferredProtocols []HubProtocol
 	IdempotencyKey     string
+	// ConnectionType is the kind of connection to create, such as
+	// ConnectionTypeHomeAssistant, sent as spec.connection_type; "" leaves the
+	// API's default. The API must say the connection is of that kind: when it
+	// does not, CreateClientIdentity deletes what it made and returns an
+	// *UnsupportedConnectionTypeError.
+	ConnectionType string
 }
 
 type BootstrapIdentityResult struct {
@@ -95,6 +104,9 @@ type BootstrapIdentityResult struct {
 	Hub      map[string]any
 	Client   map[string]any
 	Endpoint *SelectedHubEndpoint
+	// Operation tracks the hub admitting the new connection, about ninety
+	// seconds; WaitForAdmission follows it. nil when the API sent none.
+	Operation *OperationResource
 }
 
 type AnalyticsOverviewOptions struct {
@@ -275,9 +287,11 @@ type DeviceLoginOptions struct {
 // approved, denied, expired, the timeout elapses, or ctx is cancelled.
 //
 // On approval the returned access_token is a durable scoped API token and is
-// stored on ControlPlane.AccessToken exactly like Login. Denial, expiry, and
-// timeout are reported as ErrDeviceAccessDenied, ErrDeviceCodeExpired, and
-// ErrTimeout respectively.
+// stored on ControlPlane.AccessToken exactly like Login, with its token_id on
+// ControlPlane.TokenID. Denial, expiry, and timeout are reported as
+// ErrDeviceAccessDenied (a *DeviceLoginDeniedError), ErrDeviceCodeExpired (a
+// *DeviceLoginExpiredError), and ErrTimeout respectively. BeginDeviceLogin and
+// PollDeviceLogin are the same flow one step at a time.
 func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOptions) (map[string]any, error) {
 	payload := map[string]any{}
 	if opts.Scopes != nil {
@@ -290,32 +304,18 @@ func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOpt
 	if err != nil {
 		return nil, err
 	}
-	deviceCode := optional(grant["device_code"])
-	userCode := optional(grant["user_code"])
-	verificationURI := optional(grant["verification_uri"])
-	if deviceCode == "" || userCode == "" || verificationURI == "" {
-		return nil, fmt.Errorf("%w: device authorization response was incomplete", ErrAPI)
-	}
-	if err := validateBrowserURL(verificationURI); err != nil {
+	authorization, err := deviceAuthorizationFromGrant(grant)
+	if err != nil {
 		return nil, err
-	}
-	if completeURI := optional(grant["verification_uri_complete"]); completeURI != "" {
-		if err := validateBrowserURL(completeURI); err != nil {
-			return nil, err
-		}
-	}
-	interval := defaultDevicePollInterval
-	if raw, ok := grant["interval"].(float64); ok && raw >= 0 {
-		interval = time.Duration(raw * float64(time.Second))
 	}
 
 	if opts.Prompt != nil {
 		opts.Prompt(grant)
 	} else {
-		fmt.Printf("To sign in, visit %s and enter the code %s\n", verificationURI, userCode)
+		fmt.Printf("To sign in, visit %s and enter the code %s\n", authorization.VerificationURI, authorization.UserCode)
 	}
 	if opts.OpenBrowser == nil || *opts.OpenBrowser {
-		if completeURI := optional(grant["verification_uri_complete"]); completeURI != "" {
+		if completeURI := authorization.VerificationURIComplete; completeURI != "" {
 			// Browser availability is best-effort; a headless host is fine.
 			_ = openBrowser(completeURI)
 		}
@@ -325,15 +325,13 @@ func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOpt
 	if timeout <= 0 {
 		timeout = DefaultDeviceLoginTimeout
 	}
-	token, err := c.pollDeviceToken(ctx, deviceCode, interval, timeout, sleepContext, time.Now)
+	token, err := c.pollDeviceToken(ctx, authorization.DeviceCode, authorization.Interval, timeout, sleepContext, time.Now)
 	if err != nil {
 		return nil, err
 	}
-	accessToken, _ := token["access_token"].(string)
-	if accessToken == "" {
-		return nil, fmt.Errorf("%w: token response did not include access_token", ErrAPI)
+	if _, err := c.acceptDeviceToken(token); err != nil {
+		return nil, err
 	}
-	c.AccessToken = accessToken
 	return token, nil
 }
 
@@ -349,39 +347,14 @@ func (c *ControlPlane) pollDeviceToken(
 	now func() time.Time,
 ) (map[string]any, error) {
 	deadline := now().Add(timeout)
-	wait := interval
 	for {
-		status, raw, err := c.send(ctx, http.MethodPost, "/v1/auth/device/token", map[string]any{"device_code": deviceCode}, nil, false)
-		if err != nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				return nil, ctxErr
-			}
+		token, err := c.deviceTokenOnce(ctx, deviceCode, &interval)
+		if err == nil {
+			return token, nil
+		}
+		wait, pending := devicePending(err)
+		if !pending {
 			return nil, err
-		}
-		if status >= 200 && status <= 299 {
-			result, decodeErr := decodeControlJSON(raw)
-			if decodeErr != nil {
-				return nil, &APIError{StatusCode: status, Detail: "invalid JSON response"}
-			}
-			return result, nil
-		}
-		errorCode := ""
-		if status == http.StatusBadRequest {
-			if body, decodeErr := decodeControlJSON(raw); decodeErr == nil {
-				errorCode, _ = body["error"].(string)
-			}
-		}
-		switch errorCode {
-		case "authorization_pending":
-			// Keep polling.
-		case "slow_down":
-			wait += deviceSlowDownIncrement
-		case "access_denied":
-			return nil, fmt.Errorf("%w: the device sign-in request was denied in the browser", ErrDeviceAccessDenied)
-		case "expired_token":
-			return nil, fmt.Errorf("%w: the device sign-in code expired before it was approved; call LoginWithBrowser again to request a new code", ErrDeviceCodeExpired)
-		default:
-			return nil, apiErrorFromResponse(status, raw)
 		}
 		remaining := deadline.Sub(now())
 		if remaining <= 0 {
@@ -965,6 +938,21 @@ func (c *ControlPlane) CreateClientIdentityForHubID(ctx context.Context, hubID s
 	return c.CreateClientIdentity(ctx, hub, opts)
 }
 
+// CreateClientIdentity provisions a connection to a hub and returns the
+// identity to connect with. The secrets are generated here and sent to the API
+// once; the usable identity is in the result.
+//
+// With opts.ConnectionType set, the connection is of that kind, and the
+// refusals a caller can branch on come back as errors to test with errors.Is:
+// ErrUnsupportedConnectionType (an *UnsupportedConnectionTypeError: the API
+// does not know the kind, or made an ordinary connection instead, which is
+// deleted), ErrPlan (the plan does not allow it), ErrAlreadyLinked (the hub
+// already holds the one link of its kind; APIError.LinkedClientID names it) and
+// ErrAuth (sign in again). Each still carries the *APIError the API answered
+// with.
+//
+// The result's Operation tracks the hub admitting the connection, about ninety
+// seconds; WaitForAdmission waits for it.
 func (c *ControlPlane) CreateClientIdentity(ctx context.Context, hub map[string]any, opts BootstrapIdentityOptions) (BootstrapIdentityResult, error) {
 	if strings.TrimSpace(opts.Name) == "" {
 		return BootstrapIdentityResult{}, fmt.Errorf("%w: client name is required", ErrAPI)
@@ -993,6 +981,10 @@ func (c *ControlPlane) CreateClientIdentity(ctx context.Context, hub map[string]
 		}
 		spec[key] = val
 	}
+	connectionType := strings.TrimSpace(opts.ConnectionType)
+	if connectionType != "" {
+		spec["connection_type"] = connectionType
+	}
 	spec["apiKey"] = apiKey
 	spec["password"] = password
 	spec["siteId"] = siteID
@@ -1012,7 +1004,17 @@ func (c *ControlPlane) CreateClientIdentity(ctx context.Context, hub map[string]
 	}
 	client, err := c.CreateClient(ctx, payload, opts.IdempotencyKey)
 	if err != nil {
+		if connectionType != "" {
+			if apiErr, refused := refusesConnectionType(err); refused {
+				return BootstrapIdentityResult{}, &UnsupportedConnectionTypeError{ConnectionType: connectionType, APIError: apiErr}
+			}
+		}
 		return BootstrapIdentityResult{}, err
+	}
+	if connectionType != "" {
+		if err := c.requireConnectionType(ctx, client, connectionType); err != nil {
+			return BootstrapIdentityResult{}, err
+		}
 	}
 
 	protocols := ProtocolSettingsFromMap(hub)
@@ -1041,7 +1043,13 @@ func (c *ControlPlane) CreateClientIdentity(ctx context.Context, hub map[string]
 			Protocols:          protocols,
 		}
 	}
-	return BootstrapIdentityResult{Identity: identity, Hub: hub, Client: client, Endpoint: selected}, nil
+	return BootstrapIdentityResult{
+		Identity:  identity,
+		Hub:       hub,
+		Client:    client,
+		Endpoint:  selected,
+		Operation: operationFromAny(client["operation"]),
+	}, nil
 }
 
 func (r BootstrapIdentityResult) SelectedProtocol() HubProtocol {

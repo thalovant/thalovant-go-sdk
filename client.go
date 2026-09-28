@@ -456,6 +456,104 @@ func (c *Client) Emit(ctx context.Context, eventType string, data Data, eventCon
 	})
 }
 
+// Reply answers an event the hub sent, back along the route it came
+// (OVOS-MSG-1 §5.2). The reply carries a deep copy of the event's context as
+// the hub sent it -- its session, its request id, everything a skill waiting
+// on the answer matches -- with the routing turned round by ReplyContext.
+// eventContext entries, when given, are laid over the copy before the turn.
+// Like Emit, a reply is never replayed.
+func (c *Client) Reply(ctx context.Context, event Event, msgType string, data Data, eventContext Context) error {
+	msgType = strings.TrimSpace(msgType)
+	if msgType == "" {
+		return fmt.Errorf("%w: a reply needs a message type", ErrRuntime)
+	}
+	return c.Emit(ctx, msgType, data, replyTo(event, eventContext))
+}
+
+// ReplyContext is the context of a reply to a message that carried
+// eventContext (OVOS-MSG-1 §5.2): a deep copy, so the reply keeps the
+// request's session and everything else it said, with the routing turned
+// round. The reply goes to whoever sent the request ("destination" becomes the
+// old "source") and comes from whoever it was sent to ("source" becomes the old
+// "destination", its first entry when that is a list). A hub uses this to route
+// the answer back to the peer that asked, across bridges and NAT. A key that
+// is absent or null stays as it was.
+func ReplyContext(eventContext Context) Context {
+	swapped := Context(deepCopyMap(eventContext))
+	source, destination := swapped["source"], swapped["destination"]
+	if destination != nil {
+		if entries, ok := destination.([]any); ok && len(entries) > 0 {
+			swapped["source"] = entries[0]
+		} else if entries, ok := destination.([]string); ok && len(entries) > 0 {
+			swapped["source"] = entries[0]
+		} else {
+			swapped["source"] = destination
+		}
+	}
+	if source != nil {
+		swapped["destination"] = source
+	}
+	return swapped
+}
+
+// replyTo is the context of a reply to event: the context the hub sent, with
+// the caller's entries laid over it, turned round.
+func replyTo(event Event, eventContext Context) Context {
+	base := Context(deepCopyMap(event.Context))
+	for key, value := range eventContext {
+		base[key] = deepCopyValue(value)
+	}
+	return ReplyContext(base)
+}
+
+// deepCopyMap copies a decoded JSON object all the way down, so a reply never
+// shares a map or a slice with the event every other subscriber also holds.
+func deepCopyMap[M ~map[string]any](source M) map[string]any {
+	copied := make(map[string]any, len(source))
+	for key, value := range source {
+		copied[key] = deepCopyValue(value)
+	}
+	return copied
+}
+
+func deepCopyValue(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		return deepCopyMap(typed)
+	case Context:
+		return Context(deepCopyMap(typed))
+	case Data:
+		return Data(deepCopyMap(typed))
+	case []any:
+		copied := make([]any, len(typed))
+		for index, item := range typed {
+			copied[index] = deepCopyValue(item)
+		}
+		return copied
+	case []string:
+		return append([]string(nil), typed...)
+	case map[string]string:
+		copied := make(map[string]string, len(typed))
+		for key, item := range typed {
+			copied[key] = item
+		}
+		return copied
+	}
+	return value
+}
+
+// ClosedRefused reports whether the hub closed this client's last connection
+// the way it refuses credentials: a close with no status, 1000, 1005 or 1008.
+// A hub that does not know a client's static key says so only by closing
+// right after the handshake, so a caller that has just connected can tell a
+// refusal from a drop. It is false for a transport that cannot tell.
+func (c *Client) ClosedRefused() bool {
+	if refuser, ok := c.Transport.(interface{ ClosedRefused() bool }); ok {
+		return refuser.ClosedRefused()
+	}
+	return false
+}
+
 // emit publishes without recording a fire-and-forget utterance: the ask uses
 // it for its own, which it tracks for as long as it waits.
 func (c *Client) emit(ctx context.Context, eventType string, data Data, eventContext Context) error {

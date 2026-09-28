@@ -6,8 +6,10 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"sync"
 	"time"
@@ -30,6 +32,7 @@ type WSSTransport struct {
 	connected      bool
 	handshake      bool
 	lastError      error
+	closedRefused  bool
 	connection     connectionTelemetry
 	handshakeReady chan struct{}
 	readDone       chan struct{}
@@ -141,10 +144,16 @@ func (t *WSSTransport) connectGeneration(ctx context.Context, generation uint64)
 	if err != nil {
 		return err
 	}
-	conn, _, err = websocket.DefaultDialer.DialContext(ctx, endpointURL, nil)
+	conn, response, err := websocket.DefaultDialer.DialContext(ctx, endpointURL, nil)
 	if err != nil {
+		if response != nil && response.Body != nil {
+			_ = response.Body.Close()
+		}
 		if ctx.Err() != nil {
 			return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+		}
+		if response != nil && (response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
+			return fmt.Errorf("%w: %w (HTTP %d)", ErrConnection, ErrHubRefused, response.StatusCode)
 		}
 		return fmt.Errorf("%w: %v", ErrConnection, scrubTransportError(err))
 	}
@@ -164,8 +173,11 @@ func (t *WSSTransport) connectGeneration(ctx context.Context, generation uint64)
 		return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
 	case <-closed:
 		t.mu.RLock()
-		cause := t.lastError
+		cause, refused := t.lastError, t.closedRefused
 		t.mu.RUnlock()
+		if refused {
+			return fmt.Errorf("%w: %w: the hub closed the link during the handshake: %v", ErrConnection, ErrHubRefused, cause)
+		}
 		return fmt.Errorf("%w: v3 Noise handshake did not complete: %v", ErrConnection, cause)
 	case <-ready:
 		t.mu.Lock()
@@ -799,6 +811,7 @@ func (t *WSSTransport) beginConnectionLocked() *websocket.Conn {
 	t.conn = nil
 	t.generation++
 	t.lastError = nil
+	t.closedRefused = false
 	t.connected = false
 	t.handshake = false
 	t.session = nil
@@ -821,11 +834,40 @@ func (t *WSSTransport) recordReadFailure(generation uint64, err error) {
 		return
 	}
 	t.lastError = err
+	t.closedRefused = refusalClose(err)
 	t.connected = false
 	t.handshake = false
 	t.session = nil
 	t.noiseHandshake = nil
 	t.connection.fail(time.Now(), err)
+}
+
+// refusalCloseCodes are how a hub closes a socket whose credentials it
+// refuses: no status for an access key it does not know and after a Noise
+// abort, 1008 for a malformed authorization. Anything else -- 1011, 1013, a
+// dropped socket -- is the hub's trouble or the network's, not a verdict on
+// the credentials.
+var refusalCloseCodes = map[int]bool{
+	websocket.CloseNormalClosure:    true,
+	websocket.CloseNoStatusReceived: true,
+	websocket.ClosePolicyViolation:  true,
+}
+
+// refusalClose reports a read that ended on a close frame a hub refuses with.
+func refusalClose(err error) bool {
+	var closed *websocket.CloseError
+	return errors.As(err, &closed) && refusalCloseCodes[closed.Code]
+}
+
+// ClosedRefused reports whether the hub closed the last connection the way it
+// refuses credentials (a close frame with no status, 1000, 1005 or 1008).
+// A hub that does not know a client's static key says so only by closing
+// right after the handshake, so a caller that just connected can tell a
+// refusal from a drop. A new connection attempt clears it.
+func (t *WSSTransport) ClosedRefused() bool {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.closedRefused
 }
 
 // signalReadDone unblocks a Connect still waiting on the handshake once the
