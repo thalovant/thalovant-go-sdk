@@ -67,9 +67,13 @@ type ControlPlane struct {
 	AccessToken string
 	UserAgent   string
 	HTTPClient  *http.Client
-	// TokenID names the API token a device sign-in stored in AccessToken, for
-	// RevokeAPIToken; "" when the token came from elsewhere.
+	// TokenID names the API token in AccessToken when the sign-in that stored
+	// it said which one (a device login does), for RevokeAPIToken; "" otherwise.
+	// Every sign-in sets it from its own answer.
 	TokenID string
+	// revokedOwn records that the token this ControlPlane signed in with was
+	// revoked and forgotten, so revoking it again is the no-op it should be.
+	revokedOwn bool
 }
 
 // String implements fmt.Stringer so the %v, %s, and %+v verbs render a
@@ -254,11 +258,11 @@ func (c *ControlPlane) LoginWithOptions(ctx context.Context, email string, passw
 	if err != nil {
 		return nil, err
 	}
-	accessToken, _ := token["access_token"].(string)
-	if accessToken == "" {
-		return nil, fmt.Errorf("%w: token response did not include access_token", ErrAPI)
+	// A password sign-in answers with a session token, which has no token_id:
+	// the id of a device-login token signed in with earlier must not outlive it.
+	if _, err := c.acceptToken(token); err != nil {
+		return nil, err
 	}
-	c.AccessToken = accessToken
 	return token, nil
 }
 
@@ -329,7 +333,7 @@ func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOpt
 	if err != nil {
 		return nil, err
 	}
-	if _, err := c.acceptDeviceToken(token); err != nil {
+	if _, err := c.acceptToken(token); err != nil {
 		return nil, err
 	}
 	return token, nil

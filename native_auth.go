@@ -208,11 +208,9 @@ func (c *ControlPlane) CompleteNativeSignIn(ctx context.Context, code string, ve
 	if err != nil {
 		return nil, err
 	}
-	accessToken, _ := token["access_token"].(string)
-	if accessToken == "" {
-		return nil, fmt.Errorf("%w: token response did not include access_token", ErrAPI)
+	if _, err := c.acceptToken(token); err != nil {
+		return nil, err
 	}
-	c.AccessToken = accessToken
 	return token, nil
 }
 

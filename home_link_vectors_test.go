@@ -183,9 +183,11 @@ func assertExcluded(t *testing.T, err error, vectors map[string]any) {
 	}
 }
 
-func seconds(value any) time.Duration {
+// milliseconds reads a vector's duration: every one is whole milliseconds,
+// since only a whole number reads the same in every language.
+func milliseconds(value any) time.Duration {
 	number, _ := value.(float64)
-	return time.Duration(number * float64(time.Second))
+	return time.Duration(number) * time.Millisecond
 }
 
 // -- device login --------------------------------------------------------------
@@ -241,8 +243,9 @@ func runDeviceCase(t *testing.T, api *scriptedAPI, call map[string]any, vectors 
 	grant := &DeviceAuthorization{
 		DeviceCode:      fmt.Sprint(authorization["device_code"]),
 		VerificationURI: "https://x",
-		Interval:        seconds(authorization["interval"]),
-		ExpiresIn:       900 * time.Second,
+		// The API's own field, in seconds on the wire (RFC 8628).
+		Interval:  milliseconds(authorization["interval"]) * 1000,
+		ExpiresIn: 900 * time.Second,
 	}
 	times := 1
 	if count, ok := call["times"].(float64); ok {
@@ -260,6 +263,11 @@ func runDeviceCase(t *testing.T, api *scriptedAPI, call map[string]any, vectors 
 			t.Error("the revoked token is still held")
 		}
 		produced = []any{map[string]any{"outcome": "revoked"}}
+		// Idempotent: revoking again sends nothing and succeeds. The scripted
+		// API flags any request past the case's exchanges.
+		if err := plane.RevokeAPIToken(ctx, ""); err != nil {
+			t.Fatalf("revoking again: %v", err)
+		}
 	}
 	return produced
 }
@@ -451,7 +459,7 @@ func TestConnectionAdmissionVectors(t *testing.T) {
 		name := fmt.Sprint(spec["name"])
 		t.Run(name, func(t *testing.T) {
 			api := newScriptedAPI(t, anySlice(spec["exchanges"]))
-			produced := runAdmissionCase(t, api, mapValue(spec["call"]))
+			produced := runAdmissionCase(t, api, mapValue(spec["call"]), mapValue(spec["expect"]))
 			recordConformance(t, "connection-admission-vectors.json", name, produced)
 			api.check(t, false)
 			assertProduced(t, produced, spec["expect"])
@@ -459,40 +467,55 @@ func TestConnectionAdmissionVectors(t *testing.T) {
 	}
 }
 
-func runAdmissionCase(t *testing.T, api *scriptedAPI, call map[string]any) map[string]any {
+func runAdmissionCase(t *testing.T, api *scriptedAPI, call, expect map[string]any) map[string]any {
 	t.Helper()
 	plane := NewControlPlane(api.server.URL, "synthetic-token")
 	operation := operationFromAny(call["operation"])
 	if call["operation"] != nil && operation == nil {
 		t.Fatal("the case's operation did not parse")
 	}
+	started := time.Now()
 	err := plane.WaitForAdmission(context.Background(), operation, AdmissionOptions{
-		Timeout:      seconds(call["timeout_seconds"]),
-		PollInterval: seconds(call["poll_interval_seconds"]),
+		Timeout:      milliseconds(call["timeout_ms"]),
+		PollInterval: milliseconds(call["poll_interval_ms"]),
 	})
+	waited := time.Since(started)
 	polls := len(api.requests())
 	var (
-		timeout *AdmissionTimeoutError
-		failed  *AdmissionFailedError
+		timeout  *AdmissionTimeoutError
+		failed   *AdmissionFailedError
+		produced map[string]any
 	)
 	switch {
 	case err == nil:
-		return map[string]any{"outcome": "admitted", "polls": polls}
+		produced = map[string]any{"outcome": "admitted", "polls": polls}
 	case errors.As(err, &timeout):
 		if !errors.Is(err, ErrConnection) || !errors.Is(err, ErrTimeout) || !timeout.Timeout() {
 			t.Errorf("an admission timeout must be a connection error and a timeout: %v", err)
 		}
-		return map[string]any{"outcome": "timeout"}
+		produced = map[string]any{"outcome": "timeout"}
+		if _, counted := expect["polls"]; counted {
+			produced["polls"] = polls
+		}
 	case errors.As(err, &failed):
 		if !errors.Is(err, ErrConnection) {
 			t.Errorf("a failed admission must be a connection error: %v", err)
 		}
-		return map[string]any{"outcome": "failed", "error_code": absentIfEmpty(failed.ErrorCode), "polls": polls}
+		produced = map[string]any{"outcome": "failed", "error_code": absentIfEmpty(failed.ErrorCode), "polls": polls}
 	case errors.Is(err, ErrAPI):
-		return map[string]any{"outcome": "error", "polls": polls}
+		produced = map[string]any{"outcome": "error", "polls": polls}
+	default:
+		t.Fatalf("unexpected admission error %T %v", err, err)
 	}
-	t.Fatalf("unexpected admission error %T %v", err, err)
-	return nil
+	if bound, present := expect["waited_at_least_ms"]; present {
+		// Recorded as the bound it met, so every SDK records the same value.
+		if waited >= milliseconds(bound) {
+			produced["waited_at_least_ms"] = bound
+		} else {
+			produced["waited_at_least_ms"] = waited.Milliseconds()
+		}
+	}
+	return produced
 }
 
 // -- the home link ------------------------------------------------------------------
@@ -520,7 +543,7 @@ func vectorHandler(spec map[string]any) HomeHandler {
 		if raises, _ := spec["raises"].(bool); raises {
 			return HomeAnswer{}, errors.New("the conversation agent is gone")
 		}
-		if wait := seconds(spec["sleep_seconds"]); wait > 0 {
+		if wait := milliseconds(spec["sleep_ms"]); wait > 0 {
 			// Deliberately deaf to its context: the answer must still go out
 			// on time.
 			time.Sleep(wait)
@@ -549,8 +572,8 @@ func TestHomeLinkVectors(t *testing.T) {
 				replier := &capturingReplier{}
 				event := Event{Name: HomeRequestEvent, Data: Data(mapValue(spec["request"])), Context: Context{"source": "skill"}}
 				timeout := DefaultHomeHandlerTimeout
-				if value, ok := spec["timeout_seconds"]; ok {
-					timeout = seconds(value)
+				if value, ok := spec["timeout_ms"]; ok {
+					timeout = milliseconds(value)
 				}
 				started := time.Now()
 				payload, err := AnswerHomeRequest(context.Background(), replier, event, vectorHandler(mapValue(spec["handler"])), timeout)
@@ -582,7 +605,10 @@ func TestHomeLinkContractListsMatchTheSDK(t *testing.T) {
 	if vectors["request_type"] != HomeRequestEvent || vectors["response_type"] != HomeResponseEvent {
 		t.Error("the event names differ from the contract")
 	}
-	if seconds(vectors["reply_timeout_seconds"]) != HomeRequestTimeout {
-		t.Errorf("HomeRequestTimeout = %s, contract %v s", HomeRequestTimeout, vectors["reply_timeout_seconds"])
+	if milliseconds(vectors["reply_timeout_ms"]) != HomeRequestTimeout {
+		t.Errorf("HomeRequestTimeout = %s, contract %v ms", HomeRequestTimeout, vectors["reply_timeout_ms"])
+	}
+	if DefaultHomeHandlerTimeout != 9000*time.Millisecond {
+		t.Errorf("DefaultHomeHandlerTimeout = %s, the reference gives a handler 9000 ms", DefaultHomeHandlerTimeout)
 	}
 }

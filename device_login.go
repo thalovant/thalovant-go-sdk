@@ -166,7 +166,7 @@ func (c *ControlPlane) PollDeviceLogin(ctx context.Context, authorization *Devic
 	if err != nil {
 		return nil, err
 	}
-	return c.acceptDeviceToken(token)
+	return c.acceptToken(token)
 }
 
 // deviceTokenOnce sends one POST /v1/auth/device/token: the token, or why there
@@ -207,9 +207,13 @@ func (c *ControlPlane) deviceTokenOnce(ctx context.Context, deviceCode string, i
 	return nil, apiErr
 }
 
-// acceptDeviceToken keeps an approved token on the ControlPlane and reads what
-// it may do.
-func (c *ControlPlane) acceptDeviceToken(token map[string]any) (*APIToken, error) {
+// acceptToken keeps a sign-in's token on the ControlPlane, with the id it came
+// with or none, and reads what it may do. Every sign-in goes through here, so
+// TokenID always names the token in AccessToken -- or nothing, for a password
+// sign-in's session token -- and never one signed in with before: otherwise a
+// later RevokeAPIToken("") would revoke a token this ControlPlane no longer
+// holds.
+func (c *ControlPlane) acceptToken(token map[string]any) (*APIToken, error) {
 	accessToken, _ := token["access_token"].(string)
 	if accessToken == "" {
 		return nil, fmt.Errorf("%w: token response did not include access_token", ErrAPI)
@@ -217,6 +221,7 @@ func (c *ControlPlane) acceptDeviceToken(token map[string]any) (*APIToken, error
 	c.AccessToken = accessToken
 	tokenID, _ := token["token_id"].(string)
 	c.TokenID = tokenID
+	c.revokedOwn = false
 	result := &APIToken{AccessToken: accessToken, TokenID: tokenID, Scopes: []string{}}
 	result.TokenType, _ = token["token_type"].(string)
 	for _, scope := range anySlice(token["scopes"]) {
@@ -236,20 +241,34 @@ func (c *ControlPlane) acceptDeviceToken(token map[string]any) (*APIToken, error
 // ControlPlane signed in with (TokenID). A token may always revoke itself,
 // whatever its scopes. Revoking the token in use forgets it here too, so a
 // later call fails locally rather than with an HTTP 401.
+//
+// Revoking the token in use is idempotent. A token already revoked, or
+// expired, cannot authenticate its own revoke, so the API answers 401; the
+// token is dead either way, so that counts as revoked and the token is
+// forgotten. Revoking it again then sends nothing and returns nil, until the
+// next sign-in. Revoking another token by id is not idempotent: the API's own
+// answer, such as a 404 for a token it does not know, is returned as usual.
 func (c *ControlPlane) RevokeAPIToken(ctx context.Context, tokenID string) error {
 	target := strings.TrimSpace(tokenID)
 	if target == "" {
 		target = c.TokenID
 	}
 	if target == "" {
+		if c.revokedOwn && c.AccessToken == "" {
+			return nil // already revoked and forgotten: revoking again changes nothing
+		}
 		return fmt.Errorf("%w: no API token id to revoke: pass one, or sign in with a device login first", ErrAPI)
 	}
+	own := target == c.TokenID
 	if _, err := c.request(ctx, http.MethodDelete, "/v1/auth/api-tokens/"+url.PathEscape(target), nil, nil, true); err != nil {
-		return err
+		if !own || !isAPIStatus(err, http.StatusUnauthorized) {
+			return err
+		}
 	}
-	if target == c.TokenID {
+	if own {
 		c.AccessToken = ""
 		c.TokenID = ""
+		c.revokedOwn = true
 	}
 	return nil
 }

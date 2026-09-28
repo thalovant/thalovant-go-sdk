@@ -611,3 +611,22 @@ func TestAConnectionTypeRefusalIsReadFromWhereTheAPISaysWhatIsWrong(t *testing.T
 		t.Error("a 400 read as a connection-type refusal")
 	}
 }
+
+func TestEverySignInSetsTheTokenIDFromItsOwnAnswer(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("content-type", "application/json")
+		_, _ = w.Write([]byte(`{"access_token":"session-token"}`))
+	}))
+	defer server.Close()
+	plane := NewControlPlane(server.URL, "device-token")
+	plane.TokenID = "device-token-id"
+	if _, err := plane.Login(context.Background(), "me@example.com", "pw", ""); err != nil {
+		t.Fatal(err)
+	}
+	if plane.AccessToken != "session-token" || plane.TokenID != "" {
+		t.Fatalf("after a password sign-in: %q / %q", plane.AccessToken, plane.TokenID)
+	}
+	if err := plane.RevokeAPIToken(context.Background(), ""); !errors.Is(err, ErrAPI) {
+		t.Fatalf("revoking with no device token = %v, want a local refusal", err)
+	}
+}

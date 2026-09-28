@@ -69,29 +69,42 @@ func operationFromAny(raw any) *OperationResource {
 // refusesConnectionType reports a 422 whose problem is about the connection
 // type: the API does not know the kind yet.
 //
-// Only where the API says what is wrong counts: its detail sentence, and the
-// loc of each entry of a FastAPI validation list. Never the whole body, since
-// a validation error can echo the request back, and the request always
-// carries spec.connection_type -- a 422 about any other spec field would then
-// read as this one.
+// Only where the API says what is wrong counts: the problem's detail and code,
+// and the loc and msg of each validation error, under "errors" or under
+// "detail" when that is a list. Never the rest of the body: a validation error
+// echoes what was sent as its input, and the request always carries
+// spec.connection_type, so a 422 about any other field would read as this one.
 func refusesConnectionType(err error) (*APIError, bool) {
 	var apiErr *APIError
 	if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusUnprocessableEntity {
 		return nil, false
 	}
-	names := func(text string) bool {
-		return strings.Contains(text, "connection_type") || strings.Contains(text, "connectionType")
-	}
-	_, bodyDetail := problemFields(apiErr.Problem)
-	if names(firstNonEmpty(apiErr.ProblemDetail, bodyDetail)) {
-		return apiErr, true
-	}
-	for _, item := range anySlice(apiErr.Problem["detail"]) {
-		entry, _ := item.(map[string]any)
-		for _, part := range anySlice(entry["loc"]) {
-			if text, ok := part.(string); ok && names(text) {
-				return apiErr, true
+	bodyCode, bodyDetail := problemFields(apiErr.Problem)
+	said := []string{firstNonEmpty(apiErr.ProblemDetail, bodyDetail), firstNonEmpty(apiErr.Code, bodyCode)}
+	for _, key := range []string{"errors", "detail"} {
+		for _, item := range anySlice(apiErr.Problem[key]) {
+			entry, ok := item.(map[string]any)
+			if !ok {
+				continue
 			}
+			switch location := entry["loc"].(type) {
+			case []any:
+				parts := make([]string, 0, len(location))
+				for _, part := range location {
+					parts = append(parts, fmt.Sprint(part))
+				}
+				said = append(said, strings.Join(parts, "."))
+			case string:
+				said = append(said, location)
+			}
+			if message, ok := entry["msg"].(string); ok {
+				said = append(said, message)
+			}
+		}
+	}
+	for _, text := range said {
+		if strings.Contains(text, "connection_type") || strings.Contains(text, "connectionType") {
+			return apiErr, true
 		}
 	}
 	return apiErr, false
@@ -185,7 +198,12 @@ type AdmissionOptions struct {
 //   - requested, committed, applied: it keeps reading;
 //   - no operation at all (nil), or HTTP 404 (the API no longer tracks it):
 //     admitted at once;
-//   - HTTP 5xx, or a request that did not reach the API: ridden out.
+//   - HTTP 429: the next read waits the retry_after_seconds the API names, or
+//     the poll interval when that is longer; asking for longer than the time
+//     left is the timeout at once;
+//   - HTTP 5xx: ridden out;
+//   - a request that did not reach the API: returned as it is, since losing
+//     the API says nothing about the hub.
 //
 // When opts.Timeout passes first it returns *AdmissionTimeoutError, which
 // matches both ErrConnection and ErrTimeout: the connection may still be
@@ -223,6 +241,7 @@ func (c *ControlPlane) WaitForAdmission(ctx context.Context, operation *Operatio
 	}
 	deadline := time.Now().Add(timeout)
 	for {
+		wait := interval
 		current, err := c.GetOperation(ctx, operationID)
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return fmt.Errorf("%w: %w", ErrTimeout, ctxErr)
@@ -242,20 +261,32 @@ func (c *ControlPlane) WaitForAdmission(ctx context.Context, operation *Operatio
 			// requested, committed, applied: still on its way.
 		case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound:
 			return nil
+		case errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusTooManyRequests:
+			// A Free plan allows 60 requests a minute, and a wait must not end
+			// over one of them: wait what the API asks, never past the
+			// deadline. Asking for longer than is left is the same timeout,
+			// only later, so it is that timeout now.
+			if after, ok := retryAfter(apiErr.Problem); ok && after > wait {
+				wait = after
+			}
+			if wait > time.Until(deadline) {
+				return &AdmissionTimeoutError{Wait: timeout, OperationID: operationID}
+			}
 		case errors.As(err, &apiErr) && apiErr.StatusCode >= 500:
 			// The API's trouble, not a verdict on the connection.
 		case errors.As(err, &apiErr):
 			return &AdmissionFailedError{OperationID: operationID, ErrorCode: apiErr.Code, Err: err}
+		case err != nil:
+			// The API out of reach says nothing about the hub, so it is not a
+			// failed admission; it is returned as it is.
+			return err
 		}
-		// A request that did not reach the API is ridden out like a 5xx: a
-		// dropped request is not a verdict either, and the deadline still
-		// holds.
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
 			return &AdmissionTimeoutError{Wait: timeout, OperationID: operationID}
 		}
-		if interval < remaining {
-			remaining = interval
+		if wait < remaining {
+			remaining = wait
 		}
 		if err := sleepContext(ctx, remaining); err != nil {
 			return fmt.Errorf("%w: %w", ErrTimeout, err)
@@ -298,6 +329,18 @@ func operationIDFromLink(link string) string {
 		id = unescaped
 	}
 	return id
+}
+
+// retryAfter reads a 429's retry_after_seconds, at the top of the problem or
+// inside a detail object, the way the api-errors contract reads code.
+func retryAfter(problem map[string]any) (time.Duration, bool) {
+	nested, _ := problem["detail"].(map[string]any)
+	for _, source := range []map[string]any{problem, nested} {
+		if seconds, ok := source["retry_after_seconds"].(float64); ok && seconds >= 0 && seconds <= maxDurationSeconds {
+			return time.Duration(seconds * float64(time.Second)), true
+		}
+	}
+	return 0, false
 }
 
 // optionalText is the value of an optional string field, or "".

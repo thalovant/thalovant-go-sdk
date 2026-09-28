@@ -45,52 +45,6 @@ func canonicalDigest(value any) string {
 		return "bytes:" + hex.EncodeToString(sha256Sum(raw))
 	}
 	mustBeSpellableEverywhere(value)
-	return canonicalJSONDigest(value)
-}
-
-// vectorDigest is the digest of a parsed vector file, which ties the recorded
-// results to the exact input that produced them.
-//
-// Unlike a produced value, a vector file is input, and the reference's own
-// files carry fractional numbers: the admission and home-link vectors give
-// timeouts and poll intervals such as 0.01, 0.02, 0.2 and 0.05 seconds. The
-// reference spells a float with Python's repr, the shortest digits that read
-// back to the same value, positionally from 1e-4 up to 1e16 and with an
-// exponent outside that. encoding/json writes the same shortest digits,
-// positionally from 1e-6 up to 1e21. So inside [1e-4, 1e16) the two agree
-// digit for digit, and a fractional number there is accepted; outside it the
-// exponents are spelled differently ("1e-05" against "1e-5"), which still
-// panics rather than digest a spelling nobody else would.
-func vectorDigest(value any) string {
-	mustBeSpelledLikeTheReference(value)
-	return canonicalJSONDigest(value)
-}
-
-func mustBeSpelledLikeTheReference(value any) {
-	switch typed := value.(type) {
-	case float64:
-		if typed == math.Trunc(typed) {
-			mustBeSpellableEverywhere(typed)
-			return
-		}
-		if magnitude := math.Abs(typed); math.IsNaN(typed) || magnitude < 1e-4 || magnitude >= 1e16 {
-			panic(fmt.Sprintf("conformance: cannot spell %v the way the reference does", typed))
-		}
-	case []any:
-		for _, item := range typed {
-			mustBeSpelledLikeTheReference(item)
-		}
-	case map[string]any:
-		for _, item := range typed {
-			mustBeSpelledLikeTheReference(item)
-		}
-	}
-}
-
-// canonicalJSONDigest hashes value as canonical JSON: keys sorted at every
-// depth, no insignificant whitespace, non-ASCII and "<", ">", "&" as
-// themselves.
-func canonicalJSONDigest(value any) string {
 	var buffer bytes.Buffer
 	encoder := json.NewEncoder(&buffer)
 	// Without this, "a & b" is written as "a & b" and no other language
@@ -204,7 +158,7 @@ func writeConformance() {
 		// in indentation and line endings, and the checker accepts it on the
 		// same terms.
 		results[vectorFile] = map[string]any{
-			"digest": vectorDigest(parsed),
+			"digest": canonicalDigest(parsed),
 			"cases":  recorded,
 		}
 	}

@@ -1068,9 +1068,13 @@ which is also everything a Free plan can approve. A `slow_down` answer adds
 five seconds to `grant.Interval` for good, so keep polling with the same
 `grant`. On approval the token is kept on `control.AccessToken` and its id on
 `control.TokenID`; `control.RevokeAPIToken(ctx, "")` revokes it (a token may
-always revoke itself) and forgets it. The device code and the token are
-redacted when a `DeviceAuthorization` or an `APIToken` is printed, and never
-appear in an error.
+always revoke itself) and forgets it. Revoking it is idempotent: a token
+already revoked or expired cannot authenticate its own revoke, so the API's
+401 counts as revoked too, and revoking again sends nothing. Every sign-in sets
+`TokenID` from its own answer, so a later password sign-in clears it rather
+than leave the id of a token the control plane no longer holds. The device
+code and the token are redacted when a `DeviceAuthorization` or an `APIToken`
+is printed, and never appear in an error.
 
 ### Create the connection and wait for it
 
@@ -1105,10 +1109,12 @@ work anywhere.
 
 A hub admits a new connection about ninety seconds after it is created.
 `WaitForAdmission` follows the operation until it is `ready`; a failed one is an
-`*AdmissionFailedError` with the operation's `ErrorCode`. Running out of time
-(180 seconds by default) is an `*AdmissionTimeoutError`, which matches both
-`ErrConnection` and `ErrTimeout`, because the connection may still be admitted
-later. `control.DeleteClient(ctx, clientID, "")` removes a connection: it reads
+`*AdmissionFailedError` with the operation's `ErrorCode`. A 5xx is ridden out,
+and so is a 429 (a Free plan allows 60 requests a minute): the next read waits
+the `retry_after_seconds` the API names. Running out of time (180 seconds by
+default) is an `*AdmissionTimeoutError`, which matches both `ErrConnection` and
+`ErrTimeout`, because the connection may still be admitted later; a 429 asking
+for longer than the time left is that timeout at once. `control.DeleteClient(ctx, clientID, "")` removes a connection: it reads
 the etag when you pass none, retries once if the connection changed, and treats
 one that is already gone as deleted.
 
