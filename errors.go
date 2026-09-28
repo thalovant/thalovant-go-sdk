@@ -525,7 +525,7 @@ type AdmissionTimeoutError struct {
 }
 
 func (e *AdmissionTimeoutError) Error() string {
-	return fmt.Sprintf("%v: %v: the hub did not admit the connection within %s; it may still", ErrConnection, ErrTimeout, e.Wait)
+	return fmt.Sprintf("%v: %v: the hub did not admit the connection within %s; it may still admit it later", ErrConnection, ErrTimeout, e.Wait)
 }
 
 // Unwrap makes an AdmissionTimeoutError match ErrConnection and ErrTimeout.

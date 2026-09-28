@@ -3,7 +3,7 @@
     "api-errors": {
       "implementation": {
         "control.go": "49dc20d3e5695b0ea6e555d2b5a46835398576d35e1bff6604a24fc9f2922b12",
-        "errors.go": "0a001db55894dda74d3b8d9b05f39c4d4658684e80c7a2fa8108b9adb6eb49ea"
+        "errors.go": "39e14dac7294f9e92fbc85074be6230caf38ed34610a7d256612c78f961947c6"
       },
       "reason": "apiErrorFromResponse() in control.go builds every non-2xx control-plane error from one decode of the body, and problemFields() in errors.go reads APIError.Code and ProblemDetail out of it beside the whole body as Problem; StatusCode, Detail and Error() are unchanged. Run against the shared api-error vectors, each served by a loopback httptest server and read back through GetHub, the configuration-merge read and the device-flow token poll, with what GetHub produced recorded.",
       "status": "required",
@@ -41,7 +41,7 @@
       "implementation": {
         "connections.go": "4fbfb196744eaa701a46d19c0d57e9fc00697ed321bd8d2439e357b94da4529a",
         "control.go": "49dc20d3e5695b0ea6e555d2b5a46835398576d35e1bff6604a24fc9f2922b12",
-        "errors.go": "0a001db55894dda74d3b8d9b05f39c4d4658684e80c7a2fa8108b9adb6eb49ea"
+        "errors.go": "39e14dac7294f9e92fbc85074be6230caf38ed34610a7d256612c78f961947c6"
       },
       "reason": "WaitForAdmission in connections.go follows the Operation a create returned (BootstrapIdentityResult.Operation is new): ready is admitted, failed and timed_out are *AdmissionFailedError with the operation's code, no operation and 404 are admitted at once, a 5xx is ridden out, a 429 waits the retry_after_seconds the API names (top level or inside a detail object) or the poll interval when that is longer and is a timeout at once when that is more than the time left, an API out of reach is returned as it is, the deadline is *AdmissionTimeoutError -- errors.Is ErrConnection and ErrTimeout, and Timeout() true -- and a links.self on another scheme, host or port than the API's is refused unfetched. Cancelling the context ends the wait with ErrTimeout. Run against the shared connection-admission vectors over a loopback httptest server, with what the SDK produced recorded.",
       "status": "required",
@@ -59,7 +59,7 @@
       "implementation": {
         "connections.go": "4fbfb196744eaa701a46d19c0d57e9fc00697ed321bd8d2439e357b94da4529a",
         "control.go": "49dc20d3e5695b0ea6e555d2b5a46835398576d35e1bff6604a24fc9f2922b12",
-        "errors.go": "0a001db55894dda74d3b8d9b05f39c4d4658684e80c7a2fa8108b9adb6eb49ea"
+        "errors.go": "39e14dac7294f9e92fbc85074be6230caf38ed34610a7d256612c78f961947c6"
       },
       "reason": "BootstrapIdentityOptions.ConnectionType sends spec.connection_type; CreateClientIdentity checks the kind comes back and, when it does not, deletes the client with its etag and returns *UnsupportedConnectionTypeError, as it does for a 422 whose detail or code, or a validation error's loc or msg (under errors, or under detail when that is a list), names the field -- never an echoed input. The other refusals stay the *APIError every call already returned and are told apart with errors.Is: APIError.Is answers ErrAuth, ErrPlan and ErrAlreadyLinked from the status, code and detail, and LinkedClientID names the client that holds the link, so no existing caller sees a different error type. GetClient and DeleteClient (connections.go): read the etag when none is given, retry once on 412, and count 404 as deleted. Run against the shared connection-kinds vectors over a loopback httptest server, with the requests the server saw recorded beside each outcome.",
       "status": "required",
@@ -108,7 +108,7 @@
       "implementation": {
         "control.go": "49dc20d3e5695b0ea6e555d2b5a46835398576d35e1bff6604a24fc9f2922b12",
         "device_login.go": "533eff225436f1dc55d79935c17c287a7f81461aa37be784ce14297aaefd8b4f",
-        "errors.go": "0a001db55894dda74d3b8d9b05f39c4d4658684e80c7a2fa8108b9adb6eb49ea",
+        "errors.go": "39e14dac7294f9e92fbc85074be6230caf38ed34610a7d256612c78f961947c6",
         "native_auth.go": "9d6b0af21bfa1614aa36c28c48dc932c69b41a0e670f4a286d983f84f18bf228"
       },
       "reason": "BeginDeviceLogin, PollDeviceLogin and RevokeAPIToken in device_login.go, one step each, for a caller that runs its own loop; LoginWithBrowser in control.go now runs its loop over the same one-poll path. A pending poll is a *DeviceLoginPendingError carrying Interval, and slow_down lengthens the DeviceAuthorization's Interval for good; expiry and denial are *DeviceLoginExpiredError and *DeviceLoginDeniedError (errors.go), still matching ErrDeviceCodeExpired and ErrDeviceAccessDenied, and every one of them reaches the *APIError the API answered with. Every sign-in (password, native in native_auth.go, browser, device poll) goes through acceptToken, which sets AccessToken and TokenID from its own answer. Revoking the token in use is idempotent: a 401 on its own revoke counts as revoked, and revoking again sends nothing until the next sign-in. DeviceAuthorization and APIToken print with the device code and the token redacted. Run against the shared device-login vectors over a loopback httptest server, checking every request, with what the SDK produced recorded.",
@@ -202,7 +202,7 @@
     "refusal": {
       "implementation": {
         "client.go": "09491ad6a6a609e7a0b5d408eb106ed987610fc05f3d80a3f1040bb93cbe18d0",
-        "errors.go": "0a001db55894dda74d3b8d9b05f39c4d4658684e80c7a2fa8108b9adb6eb49ea"
+        "errors.go": "39e14dac7294f9e92fbc85074be6230caf38ed34610a7d256612c78f961947c6"
       },
       "reason": "refusalBelongsToAsk() and failureError() in errors.go, used by AskWithOptions() in client.go, which counts asks, queries and fire-and-forget utterances inside the shared grace window -- recorded immediately before the publish and kept when the publish errors, since the transport can fail after the hub holds the frame. PolicyDeniedError carries Quota and UnansweredError is new, both still errors.Is ErrRuntime. Run against the shared refusal vectors, decoded as map[string]any so numbers arrive as float64, plus five end-to-end asks.",
       "status": "required",
