@@ -676,3 +676,25 @@ func TestAStalledOperationReadEndsTheAdmissionWaitOnTime(t *testing.T) {
 		t.Fatalf("a stalled read held the wait for %s", elapsed)
 	}
 }
+
+func TestAnUnsubscribedHandlerIsNeverCalledAgain(t *testing.T) {
+	session, err := NewHubSession(func(context.Context) (HubSessionClient, error) { return &linkFixture{}, nil }, quickPolicy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close(context.Background())
+	calls := atomic.Int32{}
+	unsubscribe := session.On("ping", func(Event) { calls.Add(1) })
+	session.mu.Lock()
+	copied := append([]*sessionHandler(nil), session.handlers["ping"]...)
+	session.mu.Unlock()
+	// A delivery that copied the handler just before the unsubscribe reaches
+	// it after: it must not call it.
+	unsubscribe()
+	for _, handler := range copied {
+		deliver(handler, Event{Name: "ping"})
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("an unsubscribed handler was called %d times", calls.Load())
+	}
+}

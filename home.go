@@ -273,6 +273,9 @@ type HomeAnswerOptions struct {
 func AnswerHomeRequests(link HomeLink, handler HomeHandler, opts HomeAnswerOptions) (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
 	unsubscribe := link.On(HomeRequestEvent, func(event Event) {
+		if ctx.Err() != nil {
+			return // stopped: nothing new starts
+		}
 		go func() {
 			_, err := AnswerHomeRequest(ctx, link, event, handler, opts.Timeout)
 			if err != nil && ctx.Err() == nil && opts.OnReplyError != nil {

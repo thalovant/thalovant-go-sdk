@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -69,7 +70,12 @@ type HubSession struct {
 }
 
 // sessionHandler is one On registration; its address is its identity.
-type sessionHandler struct{ handle func(Event) }
+// removed is set when it is unsubscribed, so a delivery that copied it just
+// before does not call it after the unsubscribe has returned.
+type sessionHandler struct {
+	handle  func(Event)
+	removed atomic.Bool
+}
 
 // stateWatcher is one OnStateChange registration.
 type stateWatcher struct{ notify func(up bool) }
@@ -292,15 +298,19 @@ func (s *HubSession) ensure(ctx context.Context) (HubSessionClient, error) {
 // deliver runs one On handler. A handler that panics is skipped rather than
 // taking the session's delivery, and every later event, down with it.
 func deliver(handler *sessionHandler, event Event) {
+	if handler.removed.Load() {
+		return
+	}
 	defer func() { _ = recover() }()
 	handler.handle(event)
 }
 
 // On calls handler for every event named eventType the session receives, on
 // the client it holds now and on every client it builds after a reconnect,
-// until the returned function is called. Handlers run one at a time, in
-// order, on the session's delivery goroutine, so a handler that does slow work
-// starts a goroutine of its own. Events and their maps are read-only.
+// until the returned function is called; once it has returned, no delivery
+// calls handler again. Handlers run one at a time, in order, on the session's
+// delivery goroutine, so a handler that does slow work starts a goroutine of
+// its own. Events and their maps are read-only.
 func (s *HubSession) On(eventType string, handler func(Event)) (unsubscribe func()) {
 	if handler == nil || strings.TrimSpace(eventType) == "" {
 		return func() {}
@@ -312,6 +322,7 @@ func (s *HubSession) On(eventType string, handler func(Event)) (unsubscribe func
 	var once sync.Once
 	return func() {
 		once.Do(func() {
+			entry.removed.Store(true)
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			current := s.handlers[eventType]

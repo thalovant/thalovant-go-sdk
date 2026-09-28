@@ -47,7 +47,7 @@
       "status": "required",
       "tests": {
         "conformance_record_test.go": "e31df0b8dd216e750764df20938252bc2cdbc64a7ec061d60e58742fb32c1bbc",
-        "home_link_test.go": "f40ada9d9a905a0e0bf5a78d033a416e7d0cce68dede432a4f09a8fbb43f8035",
+        "home_link_test.go": "06540afb7d4f7e2145798e4e1695856b04fcf9de3ebdb40a9d5a913e8d04241f",
         "home_link_vectors_test.go": "e07617b95646f22fdac1181cae466857207fc52cdbb2d3bb84b3c305fb16fc89",
         "testdata/connection-admission-vectors.json": "07c362b5de849d5f85a20b3b4f961271b7b7fe13a13a58ee1d195e6da8a6cbbf"
       },
@@ -126,15 +126,15 @@
     "home-link": {
       "implementation": {
         "client.go": "09491ad6a6a609e7a0b5d408eb106ed987610fc05f3d80a3f1040bb93cbe18d0",
-        "home.go": "bb98f8398e84753c502ce5afa6ff9132d3174f8460b40278e70c9e9bb4bd54f4",
-        "session.go": "fe85775052c25b1a88acdb5465674f519251c2eee0351a9e0e3edca56797f936",
+        "home.go": "717a8c911e2572920a6c140e220a0dad3e1b11c86c970752df21766c74599720",
+        "session.go": "3b425038b8a2c7c2e6630e8285b72415e0d9aab74344666de0989db5f283e6df",
         "transport_wss.go": "2bcd7223bd7bd5fcc1d479bc91f658086116b6e8069ef1f968976f7f12305297"
       },
       "reason": "home.go: HomeRequest, HomeAnswer, HomeResponse, PlainSpeech, AnswerHomeRequest (the handler runs under a context with the 9 s deadline on its own goroutine, so a handler that ignores its context is still answered for in time; an error or a panic is failed_to_handle, the deadline timeout, an answer outside the code sets unknown) and AnswerHomeRequests over any HomeLink. client.go: Client.Reply and ReplyContext, built from the context as the hub sent it (the Go transports deliver the wire context unchanged), deep-copied. session.go: HubSession.On, OnStateChange, Reply, Connect and Run -- handlers outlive a reconnect, the settle window reads a close right after the handshake, and Run keeps the link on the retry ladder with the refusal grace. transport_wss.go records whether the last close was a refusal (no status, 1000, 1005, 1008) and marks an HTTP 401/403 upgrade and a refusal during the handshake with ErrHubRefused. Run against the shared home-link vectors, plus a request answered end to end over a real WSS Noise connection and the settle window against real close codes.",
       "status": "required",
       "tests": {
         "conformance_record_test.go": "e31df0b8dd216e750764df20938252bc2cdbc64a7ec061d60e58742fb32c1bbc",
-        "home_link_test.go": "f40ada9d9a905a0e0bf5a78d033a416e7d0cce68dede432a4f09a8fbb43f8035",
+        "home_link_test.go": "06540afb7d4f7e2145798e4e1695856b04fcf9de3ebdb40a9d5a913e8d04241f",
         "home_link_vectors_test.go": "e07617b95646f22fdac1181cae466857207fc52cdbb2d3bb84b3c305fb16fc89",
         "testdata/home-link-vectors.json": "e3fb5129970190fba82061db41109c20096e8f2999b2eeac8c742cceb38ddb64"
       },
@@ -236,7 +236,7 @@
     },
     "session": {
       "implementation": {
-        "session.go": "fe85775052c25b1a88acdb5465674f519251c2eee0351a9e0e3edca56797f936"
+        "session.go": "3b425038b8a2c7c2e6630e8285b72415e0d9aab74344666de0989db5f283e6df"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. The connected-client factory owns failed connection cleanup; Python performs that dial internally and retains failed retirement before replacement.",
       "status": "required",
