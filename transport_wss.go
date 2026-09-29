@@ -495,7 +495,10 @@ func (t *WSSTransport) startNoiseHandshake(ctx context.Context, handshakePayload
 
 	// The first use of the identity file's directory takes the key this
 	// identity had in the old default, once the hub it meets is known.
-	stateDir := resolveNoiseStateDir(t.NoiseStateDir, t.Identity, nodeID)
+	stateDir, err := resolveNoiseStateDir(t.NoiseStateDir, t.Identity, nodeID)
+	if err != nil {
+		return err
+	}
 	pinned, err := LoadNoisePin(stateDir, nodeID)
 	if err != nil {
 		return err

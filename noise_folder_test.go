@@ -121,8 +121,8 @@ func TestTheOldKeyIsCopiedOnceAndOnlyWhenItMetThisHub(t *testing.T) {
 	// It met this hub: copied, pins and all, and the old folder is left as it was.
 	target := t.TempDir()
 	identity := writeIdentityFile(t, target, Identity{AccessKey: "test-access", Password: "test-password"})
-	if dir := resolveNoiseStateDir("", identity, "test-hub"); dir != target {
-		t.Fatalf("resolved %s", dir)
+	if dir, err := resolveNoiseStateDir("", identity, "test-hub"); dir != target || err != nil {
+		t.Fatalf("resolved %s: %v", dir, err)
 	}
 	if readKey(t, target) != old {
 		t.Fatal("the key that met this hub was not copied")
@@ -145,9 +145,44 @@ func TestTheOldKeyIsCopiedOnceAndOnlyWhenItMetThisHub(t *testing.T) {
 	// It never met this hub: nothing to keep, and the folder starts afresh.
 	fresh := t.TempDir()
 	other := writeIdentityFile(t, fresh, Identity{AccessKey: "test-access", Password: "test-password"})
-	resolveNoiseStateDir("", other, "another-hub")
+	if _, err := resolveNoiseStateDir("", other, "another-hub"); err != nil {
+		t.Fatal(err)
+	}
 	if readKey(t, fresh) != "" {
 		t.Fatal("a key that never met this hub was copied")
+	}
+}
+
+// The pins go first and the key last. A key write that fails fails the
+// connect and leaves no key, so the next one copies again -- rather than going
+// on to make a key of its own beside the pin, which the hub would refuse.
+func TestACopyCutShortBeforeTheKeyFailsAndIsMadeAgain(t *testing.T) {
+	config := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", config)
+	legacy := filepath.Join(config, "thalovant")
+	old := seedKeyFolder(t, legacy, "test-hub")
+	target := t.TempDir()
+	identity := writeIdentityFile(t, target, Identity{AccessKey: "test-access", Password: "test-password"})
+
+	publish := publishAdoptedKey
+	t.Cleanup(func() { publishAdoptedKey = publish })
+	publishAdoptedKey = func(string, []byte, bool) error { return errors.New("no space left on device") }
+	if _, err := resolveNoiseStateDir("", identity, "test-hub"); err == nil {
+		t.Fatal("a copy that failed writing the key did not fail the connect")
+	}
+	if pin, err := LoadNoisePin(target, "test-hub"); err != nil || pin == "" {
+		t.Fatalf("the pins did not go first: %q %v", pin, err)
+	}
+	if readKey(t, target) != "" {
+		t.Fatal("a key was left behind by a copy that failed")
+	}
+
+	publishAdoptedKey = publish
+	if dir, err := resolveNoiseStateDir("", identity, "test-hub"); dir != target || err != nil {
+		t.Fatalf("resolved %s: %v", dir, err)
+	}
+	if readKey(t, target) != old {
+		t.Fatal("the next connect did not copy the key the hub pinned")
 	}
 }
 

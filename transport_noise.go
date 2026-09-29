@@ -227,7 +227,11 @@ func (n *noiseChannel) start(ctx context.Context, offer, params map[string]any) 
 	}
 	// The first use of the identity file's directory takes the key this
 	// identity had in the old default, once the hub it meets is known.
-	n.stateDir = resolveNoiseStateDir(n.stateDir, n.identity, n.nodeID)
+	stateDir, err := resolveNoiseStateDir(n.stateDir, n.identity, n.nodeID)
+	if err != nil {
+		return err
+	}
+	n.stateDir = stateDir
 	pinned, err := LoadNoisePin(n.stateDir, n.nodeID)
 	if err != nil {
 		return err

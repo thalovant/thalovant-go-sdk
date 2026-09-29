@@ -110,18 +110,27 @@ func writableDirectory(dir string) bool {
 
 // resolveNoiseStateDir is noiseStateDirFor, and on the way the one-time copy
 // of this identity's old key into the identity file's directory once the hub
-// it is about to meet (nodeID) is known. A failed copy is never a reason to
-// fail the connection: the transport then makes a key of its own, as it did
-// before 0.9.1 for a new directory.
-func resolveNoiseStateDir(explicit string, identity Identity, nodeID string) string {
+// it is about to meet (nodeID) is known. An old directory it cannot read
+// copies nothing and is no reason to fail, but a copy that fails writing is:
+// the pins go first and the key last, so going on would make a key of the
+// transport's own beside the hub's pin, which the hub refuses, and the copy
+// would never be made again. The error fails this connect and leaves no key,
+// so the next one copies again.
+func resolveNoiseStateDir(explicit string, identity Identity, nodeID string) (string, error) {
 	dir, adopt := noiseStateDirFor(explicit, identity)
 	if adopt && nodeID != "" {
 		if legacy, err := NoiseStateDir(); err == nil {
-			_, _ = adoptLegacyNoiseKey(dir, legacy, nodeID)
+			if _, err := adoptLegacyNoiseKey(dir, legacy, nodeID); err != nil {
+				return "", err
+			}
 		}
 	}
-	return dir
+	return dir, nil
 }
+
+// publishAdoptedKey writes the copied key; a variable so a test can make the
+// write fail after the pins went in.
+var publishAdoptedKey = publishNoiseFile
 
 // adoptLegacyNoiseKey copies the key and hub pins from legacy into target,
 // once: only when target holds no key yet and legacy holds a key that has met
@@ -183,7 +192,7 @@ func adoptLegacyNoiseKey(target, legacy, nodeID string) (bool, error) {
 	if err := writeNoisePinsLocked(pinsPath, existing); err != nil {
 		return false, err
 	}
-	if err := publishNoiseFile(targetKey, []byte(hex.EncodeToString(private)), false); err != nil {
+	if err := publishAdoptedKey(targetKey, []byte(hex.EncodeToString(private)), false); err != nil {
 		return false, fmt.Errorf("%w: unable to write Noise key file %s: %v", ErrIdentity, targetKey, err)
 	}
 	return true, nil
