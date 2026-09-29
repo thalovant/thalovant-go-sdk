@@ -350,9 +350,12 @@ func (t *MQTTTransport) sendHiveMessage(ctx context.Context, message HiveMessage
 	if channel == nil || !connected {
 		return fmt.Errorf("%w: MQTT transport is not connected", ErrConnection)
 	}
-	if err := channel.send(sendCtx, message); err != nil {
+	// A write that fails after its caller left retires the generation too;
+	// failGeneration ignores a generation already replaced or already failed.
+	retire := func(err error) { t.failGeneration(generation, err) }
+	if err := channel.sendRetiring(sendCtx, message, retire); err != nil {
 		if !errors.Is(err, errNothingSent) && !errors.Is(err, errFinishing) {
-			t.failGeneration(generation, err)
+			retire(err)
 		}
 		return err
 	}

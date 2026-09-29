@@ -1078,3 +1078,96 @@ func TestHTTPFailureReadsTheVerdictOutsideTheTransportLock(t *testing.T) {
 		t.Fatal("the verdict was lost")
 	}
 }
+
+// stalledWrite is a Noise channel whose next write blocks until released and
+// then fails, as an HTTP POST or an MQTT publish that dies mid-frame.
+func stalledWrite(t *testing.T) (channel *noiseChannel, started chan struct{}, release chan struct{}) {
+	t.Helper()
+	session, _ := newTestSessionPair(t)
+	started, release = make(chan struct{}, 1), make(chan struct{})
+	channel = &noiseChannel{session: session, write: func(context.Context, []byte, bool) error {
+		started <- struct{}{}
+		<-release
+		return fmt.Errorf("%w: the write died", ErrConnection)
+	}}
+	return channel, started, release
+}
+
+// A frame whose caller left mid-write (errFinishing) and whose write then
+// fails retires the HTTP and MQTT session, as the WebSocket's does, instead
+// of leaving Healthcheck reporting a session whose Noise channel is dead; a
+// late failure never retires a session that has replaced it.
+func TestAWriteThatFailsAfterItsCallerLeftRetiresTheSession(t *testing.T) {
+	type carrier struct {
+		send    func(context.Context) error
+		up      func() bool
+		replace func()
+	}
+	carriers := map[string]func(*testing.T, *noiseChannel) carrier{
+		"https": func(t *testing.T, channel *noiseChannel) carrier {
+			transport := NewHTTPTransport(Identity{})
+			transport.noise, transport.connected, transport.handshake = channel, true, true
+			return carrier{
+				send: func(ctx context.Context) error {
+					return transport.sendHiveMessage(ctx, HiveMessage{MsgType: "bus"}, true)
+				},
+				up: func() bool { return transport.Healthcheck().Connected },
+				replace: func() {
+					transport.mu.Lock()
+					transport.noise = &noiseChannel{}
+					transport.mu.Unlock()
+				},
+			}
+		},
+		"mqtt": func(t *testing.T, channel *noiseChannel) carrier {
+			transport, err := NewMQTTTransport(Identity{AccessKey: "test-access", Password: "test-password", MQTT: &MqttBrokerCredentials{Endpoint: "mqtts://example.invalid", TLS: true, TopicPrefix: "test"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			transport.noise, transport.connected, transport.handshake = channel, true, true
+			transport.failureReady = make(chan struct{})
+			return carrier{
+				send: func(ctx context.Context) error {
+					return transport.sendHiveMessage(ctx, HiveMessage{MsgType: "bus"}, true)
+				},
+				up: func() bool { return transport.Healthcheck().Connected },
+				replace: func() {
+					transport.mu.Lock()
+					transport.generation++
+					transport.mu.Unlock()
+				},
+			}
+		},
+	}
+	for name, build := range carriers {
+		for _, replaced := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/replaced=%v", name, replaced), func(t *testing.T) {
+				channel, started, release := stalledWrite(t)
+				c := build(t, channel)
+				ctx, cancel := context.WithCancel(context.Background())
+				result := make(chan error, 1)
+				go func() { result <- c.send(ctx) }()
+				<-started
+				cancel()
+				if err := <-result; !errors.Is(err, errFinishing) {
+					t.Fatalf("a caller that left mid-write = %v, want errFinishing", err)
+				}
+				if !c.up() {
+					t.Fatal("the session was retired while its frame was still being written")
+				}
+				if replaced {
+					c.replace()
+				}
+				close(release)
+				if !replaced {
+					waitFor(t, func() bool { return !c.up() })
+					return
+				}
+				time.Sleep(100 * time.Millisecond) // time for a wrong retire to land
+				if !c.up() {
+					t.Fatal("a late write failure retired the session that replaced its own")
+				}
+			})
+		}
+	}
+}

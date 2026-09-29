@@ -95,7 +95,16 @@ func (n *noiseChannel) ready() bool {
 // returns errNothingSent, and the session is as it was. Once the channel is
 // held the frame is written to the end, bounded by noiseSendTimeout alone,
 // since half of one would break the Noise stream.
-func (n *noiseChannel) send(ctx context.Context, message HiveMessage) (err error) {
+func (n *noiseChannel) send(ctx context.Context, message HiveMessage) error {
+	return n.sendRetiring(ctx, message, nil)
+}
+
+// sendRetiring is send, with retire called when a frame that began to be
+// written fails, after the channel's lock is released: whether or not its
+// caller still waits, so a carrier retires its session for a write that
+// failed after the caller left (errFinishing) as it does for one that failed
+// in front of it.
+func (n *noiseChannel) sendRetiring(ctx context.Context, message HiveMessage, retire func(error)) (err error) {
 	if err := n.mu.LockContext(ctx); err != nil {
 		return fmt.Errorf("%w: %w: %w", ErrTimeout, errNothingSent, err)
 	}
@@ -112,6 +121,9 @@ func (n *noiseChannel) send(ctx context.Context, message HiveMessage) (err error
 			n.failed = true
 		}
 		n.mu.Unlock()
+		if err != nil && retire != nil {
+			retire(err)
+		}
 	})
 }
 

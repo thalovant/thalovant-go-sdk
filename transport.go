@@ -614,6 +614,25 @@ func (t *HTTPTransport) readVerdict(err error) (channel *noiseChannel, refused, 
 func (t *HTTPTransport) failConnection(err error) {
 	channel, refused, rejected := t.readVerdict(err)
 	t.mu.Lock()
+	t.failLocked(channel, refused, rejected, err)
+	t.mu.Unlock()
+}
+
+// failSession is failConnection for the session channel belongs to only: a
+// failure reported late, by a write that finished after its caller left, must
+// not end a session that has replaced it, nor end the same one twice.
+func (t *HTTPTransport) failSession(channel *noiseChannel, err error) {
+	refused, rejected := channel.verdict(err)
+	t.mu.Lock()
+	if t.noise == channel {
+		t.failLocked(channel, refused, rejected, err)
+	}
+	t.mu.Unlock()
+}
+
+// failLocked ends the session with err, t.mu held; refused and rejected are
+// channel's verdict on err, kept while channel is still the session's.
+func (t *HTTPTransport) failLocked(channel *noiseChannel, refused, rejected bool, err error) {
 	if channel != nil && t.noise == channel {
 		// Read once, by the failure that ended the session.
 		t.closedRefused, t.closedKeyRejected = refused, rejected
@@ -622,7 +641,6 @@ func (t *HTTPTransport) failConnection(err error) {
 	t.noise = nil
 	t.lastError = err
 	t.connection.fail(time.Now(), err)
-	t.mu.Unlock()
 }
 
 type connectionTelemetry struct {
@@ -723,9 +741,10 @@ func (t *HTTPTransport) sendHiveMessage(ctx context.Context, message HiveMessage
 	if channel == nil || !connected {
 		return fmt.Errorf("%w: HTTP transport is not connected", ErrConnection)
 	}
-	if err := channel.send(ctx, message); err != nil {
+	retire := func(err error) { t.failSession(channel, err) }
+	if err := channel.sendRetiring(ctx, message, retire); err != nil {
 		if !errors.Is(err, errNothingSent) && !errors.Is(err, errFinishing) {
-			t.failConnection(err)
+			retire(err)
 		}
 		return err
 	}
