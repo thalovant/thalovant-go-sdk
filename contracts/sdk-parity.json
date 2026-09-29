@@ -19,7 +19,7 @@
     "binary": {
       "implementation": {
         "hive.go": "def23f2bf2bd0dd8907de62ca913b94edb85d70c026a3f9a2a67d9685eebd1c3",
-        "transport.go": "1d9ab6d6034352217b6a87706d68d41fb44c3f11ec4def7609eac690736c2e98",
+        "transport.go": "aaa79e977b85595fa526f11953fa6afc67b7574f635ad62f99e9e9475c778d81",
         "wire.go": "9711532f7e819688d3b72caf59830d72060e393f94e20c1aa5a6816decd968a7"
       },
       "reason": "DecodeHiveBinaryFrame branches on BINARY: four bits of payload type, then the clip itself, never parsed or inflated. A compressed part of any other frame inflates to at most 32 MiB (wire.go), and one that would inflate further, or is truncated, is refused. ListenBinary delivers it. Run against the shared binary vectors and against binary-frames.json, which is hivemind-bus-client's own encoder output rather than frames this SDK built for itself.",
@@ -91,7 +91,7 @@
     },
     "conversation": {
       "implementation": {
-        "client.go": "b1c765326b0bfcef54c846f02f0a9e8683f4728b619269216c9cc382ca0cb4aa",
+        "client.go": "a1c0c470ccf7e5ccd592e5cedaa2d4f5708196b354f195bf248953af68a046b6",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc"
       },
       "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
@@ -125,7 +125,7 @@
     },
     "home-link": {
       "implementation": {
-        "client.go": "b1c765326b0bfcef54c846f02f0a9e8683f4728b619269216c9cc382ca0cb4aa",
+        "client.go": "a1c0c470ccf7e5ccd592e5cedaa2d4f5708196b354f195bf248953af68a046b6",
         "context_mutex.go": "7e6043dbb6efc73d4e83d7edf8d709a26fec95453ba000900f7e053d60310065",
         "errors.go": "d9116690488d7ecc8969df45808f48807c412f3870b8512ca2285ee23db989ce",
         "home.go": "3b8b4d9d4eacaa9f6ec8224c1a2c2b55cf207e01a45d343da7876111f781408e",
@@ -133,9 +133,9 @@
         "noise_store.go": "7e241a9e43cfb13587dcecde0b04258ddc765e88b48c886be2a9979219f5159a",
         "rich.go": "c92c7bc4e0c5b644822b24fc30b67e1ebd91f46858427d368cac01ed1427e613",
         "session.go": "f9dc84f90210810902ee80bc59bd19a0ad0ef171b35fbb91c83336bfad84de35",
-        "transport.go": "1d9ab6d6034352217b6a87706d68d41fb44c3f11ec4def7609eac690736c2e98",
-        "transport_mqtt.go": "4351698f5c4bfff6e2c4d0537b2d220cc25df95b34d71918642ee97c708c4a48",
-        "transport_noise.go": "3dfc28999807fa0e96e6940250010dba9bf2af259f040ef3951618f29f8dc436",
+        "transport.go": "aaa79e977b85595fa526f11953fa6afc67b7574f635ad62f99e9e9475c778d81",
+        "transport_mqtt.go": "020eb64fb1526709d251af9ec0b7744dd146394ea62b318103792d06cb7bcfeb",
+        "transport_noise.go": "08c0d930dd890970078abdf55535918604b4c2015240d207b2bc76d1301da0fc",
         "transport_wss.go": "a31fdce0a7835866f215bc48500f3df0f35a3ce9f47d8ead0823804da81dd64e"
       },
       "reason": "home.go: HomeRequest, HomeAnswer, HomeResponse, PlainSpeech and DecodeReferences (real tags only, via rich.go's StripSSML; numeric references, the XML five and &nbsp;; Unicode White_Space), AnswerHomeRequest and AnswerHomeRequests. The hub's 10 s run from arrival: the handler gets its 9 s or what is left, on its own goroutine, and the answer goes out at the deadline whatever the handler does; the reply gets what the handler left, is never started after the bound, and is withdrawn when it passes. client.go: Client.Reply and ReplyContext, built from the context as the hub sent it; a destination with no source gets no destination. session.go: HubSession.On, OnStateChange, Reply, Connect and Run, and LinkSupervisor, the pure decision Run follows after every attempt (drop: at once; failure: the ladder; refusal: the ladder through a 600 s grace; changed key: stop). transport_wss.go: closeRefuses, the pure close rule (1000/1005/1008 during the handshake or within 750 ms after it, a code up to 250 ms late), a handshake answer that does not authenticate is a refusal, a 401/403 upgrade is a refusal, and a failed KK is followed at once by one XX in the same connect -- as it is over HTTP (transport.go) and MQTT (transport_mqtt.go), through the shared noiseChannel in transport_noise.go, which reads a failed handshake as a refusal the same way. noise_store.go: a pin mismatch is ErrHubKeyChanged, never a refusal. Run against the shared home-link vectors and link-keeping vectors: the close and supervise cases through the pure functions, the handshake cases over real WSS Noise against a loopback hub that records the patterns it saw. 0.9.1: a close after a frame that decrypted under the session's keys -- any frame, a chunk and the hub's encrypted HELLO included -- is a drop (closeRefuses' afterAuthenticatedFrame). A refusal right as an XX handshake ends, with nothing from the hub in between, is a *ClientKeyRejectedError (errors.go: ErrClientKeyRejected wraps ErrHubRefused), naming the key folder and the other likely one (noise_folder.go); after KK the same close is a plain refusal; LinkSupervisor gives up at once on LinkClientKeyRejected. Over HTTPS a 401/403 while or right after the last XX frames go out is the same verdict, and HTTPTransport.ClosedRefused reports the HTTP refusal. A reply's wait for the send path is withdrawable; a frame already being written is finished whole (errFinishing), on every transport, and the link is kept. The queued cases run over a real WSS link.",
@@ -144,10 +144,10 @@
         "conformance_record_test.go": "a12d62d75c6a8f6ff7f606d9941bc7e81fe1658d95b6547b9934f4437b970db5",
         "home_link_test.go": "6eddaeea422871f7b25b5e7bc9cedfcec07a90681e570954c99bb59d68e94057",
         "home_link_vectors_test.go": "fbc11e89bffad994d29b1456fb73f828897bd3a9a8f854605c97244afa79b1bf",
-        "link_keeping_vectors_test.go": "224b5145a92af83b79761beb3d542403eadb641817d3d3ed527286c3f447d29d",
+        "link_keeping_vectors_test.go": "cc84252ca5a819beeb666ff670d59942ba70df4e596bb9e8572a2c0dba509e16",
         "testdata/home-link-vectors.json": "bfaadf8f9c588ae79c02263743c8d3be0d80f8fad2db8ebce81158d0c336c547",
         "testdata/link-keeping-vectors.json": "eea7f573e802cf447b6776868d513ad1fb086c1ec7300629ab5f9ec09c9c3257",
-        "transport_noise_test.go": "5162ff434a46beea2be8981b0902b96cf4c335fbcc93206e886752b6ae020709"
+        "transport_noise_test.go": "51d780e4871b79380741b2747e385c206bab0794328d424638b7cd540866c22e"
       },
       "vectors": {
         "home-link-vectors.json": "testdata/home-link-vectors.json",
@@ -188,9 +188,9 @@
         "errors.go": "d9116690488d7ecc8969df45808f48807c412f3870b8512ca2285ee23db989ce",
         "noise_folder.go": "e0404dee79e2daa8fee4b1dbcb2181e74595ce43bb4127a1126d896fa646d89e",
         "session.go": "f9dc84f90210810902ee80bc59bd19a0ad0ef171b35fbb91c83336bfad84de35",
-        "transport.go": "1d9ab6d6034352217b6a87706d68d41fb44c3f11ec4def7609eac690736c2e98",
-        "transport_mqtt.go": "4351698f5c4bfff6e2c4d0537b2d220cc25df95b34d71918642ee97c708c4a48",
-        "transport_noise.go": "3dfc28999807fa0e96e6940250010dba9bf2af259f040ef3951618f29f8dc436"
+        "transport.go": "aaa79e977b85595fa526f11953fa6afc67b7574f635ad62f99e9e9475c778d81",
+        "transport_mqtt.go": "020eb64fb1526709d251af9ec0b7744dd146394ea62b318103792d06cb7bcfeb",
+        "transport_noise.go": "08c0d930dd890970078abdf55535918604b4c2015240d207b2bc76d1301da0fc"
       },
       "reason": "KK then XX on HTTPS polling (transport.go) and MQTT (transport_mqtt.go), through the shared noiseChannel in transport_noise.go: a KK answer that does not authenticate, or over HTTPS a request answered 401 or 403 during the exchange, is followed at once by one XX attempt in the same connect, whose outcome is the connect's. Over HTTPS a 401 or 403 while or right after the last frames of a completed XX handshake go out, before anything from the hub decrypted, is the hub refusing this client's own key: a *ClientKeyRejectedError, at Connect or through HubSession's settle window (HTTPTransport.ClosedRefused and the key-rejected verdict). MQTT reads only an answer that does not authenticate, since a broker relays no refusal. Run against link-carrier-vectors.json, one connect as a kept link makes it, over the real HTTPS polling transport against a TLS loopback hub that answers every request of an aborted session 401, and over the real MQTT transport against a TLS loopback broker, both driving a Noise responder that pins the client's key.",
       "status": "required",
@@ -198,7 +198,7 @@
         "conformance_record_test.go": "a12d62d75c6a8f6ff7f606d9941bc7e81fe1658d95b6547b9934f4437b970db5",
         "link_carrier_vectors_test.go": "28298bbea5e0dbed5ec9517b85ca6c23735fec5fc8f0571a006d6d9e227f55c8",
         "testdata/link-carrier-vectors.json": "dae55b50c45c69b47a1c08eec472dd2e8eb2844251d1dc2951e7c5440f87e260",
-        "transport_noise_test.go": "5162ff434a46beea2be8981b0902b96cf4c335fbcc93206e886752b6ae020709"
+        "transport_noise_test.go": "51d780e4871b79380741b2747e385c206bab0794328d424638b7cd540866c22e"
       },
       "vectors": {
         "link-carrier-vectors.json": "testdata/link-carrier-vectors.json"
@@ -222,7 +222,7 @@
     "mesh": {
       "implementation": {
         "hive.go": "def23f2bf2bd0dd8907de62ca913b94edb85d70c026a3f9a2a67d9685eebd1c3",
-        "transport.go": "1d9ab6d6034352217b6a87706d68d41fb44c3f11ec4def7609eac690736c2e98"
+        "transport.go": "aaa79e977b85595fa526f11953fa6afc67b7574f635ad62f99e9e9475c778d81"
       },
       "reason": "ListenHive over the five hive kinds, and Propagate/Escalate/Broadcast. The kinds used to fall off the end of dispatchNoiseMessage with no case and no log line. Run against the shared mesh vectors.",
       "status": "required",
@@ -237,7 +237,7 @@
     },
     "refusal": {
       "implementation": {
-        "client.go": "b1c765326b0bfcef54c846f02f0a9e8683f4728b619269216c9cc382ca0cb4aa",
+        "client.go": "a1c0c470ccf7e5ccd592e5cedaa2d4f5708196b354f195bf248953af68a046b6",
         "errors.go": "d9116690488d7ecc8969df45808f48807c412f3870b8512ca2285ee23db989ce"
       },
       "reason": "refusalBelongsToAsk() and failureError() in errors.go, used by AskWithOptions() in client.go, which counts asks, queries and fire-and-forget utterances inside the shared grace window -- recorded immediately before the publish and kept when the publish errors, since the transport can fail after the hub holds the frame. PolicyDeniedError carries Quota and UnansweredError is new, both still errors.Is ErrRuntime. Run against the shared refusal vectors, decoded as map[string]any so numbers arrive as float64, plus five end-to-end asks.",
@@ -252,10 +252,10 @@
     },
     "runtime": {
       "implementation": {
-        "client.go": "b1c765326b0bfcef54c846f02f0a9e8683f4728b619269216c9cc382ca0cb4aa",
+        "client.go": "a1c0c470ccf7e5ccd592e5cedaa2d4f5708196b354f195bf248953af68a046b6",
         "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc",
-        "transport.go": "1d9ab6d6034352217b6a87706d68d41fb44c3f11ec4def7609eac690736c2e98",
-        "transport_noise.go": "3dfc28999807fa0e96e6940250010dba9bf2af259f040ef3951618f29f8dc436"
+        "transport.go": "aaa79e977b85595fa526f11953fa6afc67b7574f635ad62f99e9e9475c778d81",
+        "transport_noise.go": "08c0d930dd890970078abdf55535918604b4c2015240d207b2bc76d1301da0fc"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs.",
       "status": "required",
@@ -264,7 +264,7 @@
         "reply_deadline_test.go": "1ffc64edc55e7cd2a0d71b4d11cddd464f445c51c530eea01f10cf7f11d4cdab",
         "runtime_parity_test.go": "ae735757282afa9070143663ce0e266b6f660a411f4afd9cfcadede04425b324",
         "testdata/reply-claim-vectors.json": "45f2731589e612d5a849376d94073c57b0fef426a92e1d065c58c48442b1ffdc",
-        "transport_noise_test.go": "5162ff434a46beea2be8981b0902b96cf4c335fbcc93206e886752b6ae020709"
+        "transport_noise_test.go": "51d780e4871b79380741b2747e385c206bab0794328d424638b7cd540866c22e"
       },
       "vectors": {
         "reply-claim-vectors.json": "testdata/reply-claim-vectors.json"
@@ -295,7 +295,8 @@
     "34a21f2ad875b220a571613e25b6a6e5f3d8de1a776f4949a7ab63ba93e07b16",
     "f79d99e9acd2fe299e3b313102541e47b366751defe5fa0dcfa44053aa7f007d",
     "2460eb90bd56b1b182be3db365ba29bfef712d4ea2748061652ba0f28dcf6f50",
-    "d33dc2be8b0074be4e16d89a4b615f0e6bc32d99fb513cb75e20c09cd0fab4b6"
+    "d33dc2be8b0074be4e16d89a4b615f0e6bc32d99fb513cb75e20c09cd0fab4b6",
+    "3b0acf7c8b2f03bec95d9e9bba4f82e88c79ad3d98590988852e6c06deb48af0"
   ],
   "schema_version": 1
 }
