@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sync"
+	"time"
 )
 
 // noiseChannel implements the transport-independent v3 exchange. Its lock spans
@@ -14,7 +14,7 @@ import (
 // A failed write poisons the channel: counters must never be reused after an
 // uncertain delivery. A reconnect creates a fresh channel with the same key store.
 type noiseChannel struct {
-	mu        sync.Mutex
+	mu        noiseLock
 	identity  Identity
 	stateDir  string
 	hello     map[string]any
@@ -28,6 +28,32 @@ type noiseChannel struct {
 	// hub key. pattern is what the channel chose.
 	forceXX bool
 	pattern string
+	// finalSent is whether this channel sent the last message of an XX
+	// handshake, the one that shows the hub this client's static key; heard
+	// is whether a frame from the hub has decrypted under the session's keys.
+	finalSent bool
+	heard     bool
+}
+
+// verdict reads the failure err that ended this channel's session: whether
+// it was the hub refusing the credentials, and whether it was the hub
+// refusing this client's own key. A refusal counts only while the hub has
+// sent nothing that decrypted, since a hub that has spoken accepted the
+// credentials; it is the client's key it refused when it came once this
+// client had sent the last message of an XX handshake.
+func (n *noiseChannel) verdict(err error) (refused, keyRejected bool) {
+	if n == nil || err == nil || !errors.Is(err, ErrHubRefused) {
+		return false, false
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.heard {
+		return false, false
+	}
+	if errors.Is(err, ErrClientKeyRejected) {
+		return true, true
+	}
+	return true, n.pattern == noisePatternXX && n.finalSent
 }
 
 // triedKK reports whether this channel's handshake was a KK attempt.
@@ -64,19 +90,46 @@ func (n *noiseChannel) ready() bool {
 	return n.session != nil && !n.failed
 }
 
-func (n *noiseChannel) send(ctx context.Context, message HiveMessage) (err error) {
-	n.mu.Lock()
-	defer n.mu.Unlock()
+// send encrypts and writes message. Only the wait for the channel is
+// withdrawn when ctx ends: a send still queued behind another frame then
+// returns errNothingSent, and the session is as it was. Once the channel is
+// held the frame is written to the end, bounded by noiseSendTimeout alone,
+// since half of one would break the Noise stream.
+func (n *noiseChannel) send(ctx context.Context, message HiveMessage) error {
+	return n.sendRetiring(ctx, message, nil)
+}
+
+// sendRetiring is send, with retire called when a frame that began to be
+// written fails, after the channel's lock is released: whether or not its
+// caller still waits, so a carrier retires its session for a write that
+// failed after the caller left (errFinishing) as it does for one that failed
+// in front of it.
+func (n *noiseChannel) sendRetiring(ctx context.Context, message HiveMessage, retire func(error)) (err error) {
+	if err := n.mu.LockContext(ctx); err != nil {
+		return fmt.Errorf("%w: %w: %w", ErrTimeout, errNothingSent, err)
+	}
 	if n.failed || n.session == nil {
+		n.mu.Unlock()
 		return fmt.Errorf("%w: refusing to send before the v3 Noise session is established", ErrConnection)
 	}
-	defer func() {
+	return finishWithout(ctx, func() error {
+		write, cancel := context.WithTimeout(context.WithoutCancel(ctx), noiseSendTimeout)
+		defer cancel()
+		return n.sendLocked(write, message)
+	}, func(err error) {
 		if err != nil {
 			n.failed = true
 		}
-	}()
-	return n.sendLocked(ctx, message)
+		n.mu.Unlock()
+		if err != nil && retire != nil {
+			retire(err)
+		}
+	})
 }
+
+// noiseSendTimeout bounds the physical write of one message once it has
+// started.
+const noiseSendTimeout = 20 * time.Second
 
 func (n *noiseChannel) sendLocked(ctx context.Context, message HiveMessage) error {
 	raw, err := json.Marshal(message)
@@ -115,6 +168,9 @@ func (n *noiseChannel) receive(ctx context.Context, raw []byte, binary bool) (me
 		if decryptErr != nil {
 			return nil, decryptErr
 		}
+		// Any frame that decrypts counts, a chunk and the hub's encrypted
+		// HELLO included.
+		n.heard = true
 		if !complete {
 			return nil, nil
 		}
@@ -169,6 +225,13 @@ func (n *noiseChannel) start(ctx context.Context, offer, params map[string]any) 
 	if n.identity.Password == "" {
 		return fmt.Errorf("%w: v3 Noise requires the identity password", ErrIdentity)
 	}
+	// The first use of the identity file's directory takes the key this
+	// identity had in the old default, once the hub it meets is known.
+	stateDir, err := resolveNoiseStateDir(n.stateDir, n.identity, n.nodeID)
+	if err != nil {
+		return err
+	}
+	n.stateDir = stateDir
 	pinned, err := LoadNoisePin(n.stateDir, n.nodeID)
 	if err != nil {
 		return err
@@ -230,6 +293,9 @@ func (n *noiseChannel) continueHandshake(ctx context.Context, params map[string]
 		if err != nil {
 			return err
 		}
+		// Marked before it goes out: the hub may read it and refuse the
+		// request carrying it.
+		n.finalSent = true
 		if err := n.clear(ctx, map[string]any{"msg": hex.EncodeToString(final)}); err != nil {
 			return err
 		}

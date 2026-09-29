@@ -301,3 +301,30 @@ func TestAPIErrorVectorsCoverEveryShapeTheRulesName(t *testing.T) {
 		}
 	}
 }
+
+// %#v used to print the whole Problem map, echoed request included.
+func TestAPIErrorGoStringLeavesProblemOut(t *testing.T) {
+	const secret = "synthetic-echoed-secret-do-not-log"
+	err := apiErrorFromResponse(422, []byte(`{"detail":[{"loc":["body","password"],"msg":"too short","input":"`+secret+`"}],"code":"validation_error"}`), nil)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.Problem == nil {
+		t.Fatalf("not an APIError with a problem: %#v", err)
+	}
+	for _, printed := range []string{
+		fmt.Sprintf("%#v", err),
+		fmt.Sprintf("%#v", apiErr),
+		fmt.Sprintf("%#v", &DeviceLoginDeniedError{APIError: apiErr}),
+		fmt.Sprintf("%+v", err),
+		fmt.Sprintf("%v", err),
+	} {
+		if strings.Contains(printed, secret) {
+			t.Errorf("printed the echoed input: %s", printed)
+		}
+	}
+	if printed := fmt.Sprintf("%#v", apiErr); !strings.Contains(printed, "StatusCode:422") || !strings.Contains(printed, `Code:"validation_error"`) {
+		t.Errorf("%%#v lost the status or the code: %s", printed)
+	}
+	if printed := fmt.Sprintf("%#v", (*APIError)(nil)); printed != "(*thalovant.APIError)(nil)" {
+		t.Errorf("nil: %s", printed)
+	}
+}

@@ -14,10 +14,14 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -73,7 +77,8 @@ func TestLinkKeepingCloseVectors(t *testing.T) {
 		name := fmt.Sprint(spec["name"])
 		t.Run(name, func(t *testing.T) {
 			code, _ := spec["code"].(float64) // null: no close frame, which is 0 here
-			refused := closeRefuses(int(code), spec["when"] == "handshake", milliseconds(spec["after_ms"]), milliseconds(spec["code_late_ms"]))
+			spoken, _ := spec["after_authenticated_frame"].(bool)
+			refused := closeRefuses(int(code), spec["when"] == "handshake", milliseconds(spec["after_ms"]), milliseconds(spec["code_late_ms"]), spoken)
 			produced := map[string]any{"outcome": "dropped"}
 			if refused {
 				produced["outcome"] = "refused"
@@ -118,19 +123,29 @@ func TestLinkKeepingSuperviseVectors(t *testing.T) {
 // keepingHub is a loopback hub over WSS with real Noise, whose key, password
 // and offer a case can change between connects, and which records the pattern
 // each handshake chose. A KK first message it cannot read ends the socket with
-// a close frame and no status, as hivemind-core does after a Noise abort.
+// a close frame and no status, as hivemind-core does after a Noise abort; so
+// does a completed handshake that shows another client key than the one it
+// pinned on first contact.
+//
+// speakThenClose makes it send one encrypted frame as a handshake completes,
+// and close with no status at once after it.
 type keepingHub struct {
 	server   *httptest.Server
 	identity Identity
 
-	mu            sync.Mutex
-	key           noise.DHKey
-	psk           []byte
-	peer          []byte
-	offerKK       bool
-	upgradeStatus int
-	patterns      []string
-	sockets       sync.WaitGroup
+	mu             sync.Mutex
+	key            noise.DHKey
+	psk            []byte
+	peer           []byte
+	offerKK        bool
+	speakThenClose bool
+	upgradeStatus  int
+	patterns       []string
+	sockets        sync.WaitGroup
+	// connections counts the upgrades it accepted, and bus is every bus
+	// message a client sent over them, in order.
+	connections int
+	bus         []HiveMessage
 }
 
 func newKeepingHub(t *testing.T) *keepingHub {
@@ -161,10 +176,11 @@ func newHubKey(t *testing.T) noise.DHKey {
 func (h *keepingHub) serve(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
 	status := h.upgradeStatus
-	responder := &transportResponder{key: h.key, psk: h.psk}
+	responder := &transportResponder{key: h.key, psk: h.psk, pinnedClient: append([]byte(nil), h.peer...)}
 	if h.offerKK {
 		responder.peer = append([]byte(nil), h.peer...)
 	}
+	speak := h.speakThenClose
 	h.mu.Unlock()
 	if status != 0 {
 		http.Error(w, http.StatusText(status), status)
@@ -177,6 +193,9 @@ func (h *keepingHub) serve(w http.ResponseWriter, r *http.Request) {
 	h.sockets.Add(1)
 	defer h.sockets.Done()
 	defer conn.Close()
+	h.mu.Lock()
+	h.connections++
+	h.mu.Unlock()
 	responder.reset()
 	flush := func() error {
 		for _, raw := range responder.plain {
@@ -203,7 +222,14 @@ func (h *keepingHub) serve(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			return
 		}
+		wasUp := responder.session != nil
 		failure := responder.receive(raw, kind == websocket.BinaryMessage)
+		if len(responder.received) > 0 {
+			h.mu.Lock()
+			h.bus = append(h.bus, responder.received...)
+			h.mu.Unlock()
+			responder.received = nil
+		}
 		if len(responder.patterns) > seen {
 			h.mu.Lock()
 			h.patterns = append(h.patterns, responder.patterns[seen:]...)
@@ -212,7 +238,7 @@ func (h *keepingHub) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		if failure != nil {
 			// A handshake message it cannot read: a close frame with no status.
-			_ = conn.WriteMessage(websocket.CloseMessage, []byte{})
+			closeLikeAHub(conn)
 			return
 		}
 		if responder.session != nil && len(responder.peer) > 0 {
@@ -220,7 +246,46 @@ func (h *keepingHub) serve(w http.ResponseWriter, r *http.Request) {
 			h.peer = append([]byte(nil), responder.peer...)
 			h.mu.Unlock()
 		}
+		if speak && !wasUp && responder.session != nil {
+			// The hub speaks first -- one frame under the new keys -- then
+			// closes with no status inside the settle window.
+			raw, _ := json.Marshal(HiveMessage{MsgType: "bus", Payload: map[string]any{"type": "hub.ready", "data": map[string]any{}, "context": map[string]any{}}, Metadata: map[string]any{}, Route: []any{}})
+			_ = responder.session.sendMessage(raw, true, func(frame []byte) error {
+				responder.binary = append(responder.binary, base64.StdEncoding.EncodeToString(frame))
+				return nil
+			})
+			if flush() != nil {
+				return
+			}
+			closeLikeAHub(conn)
+			return
+		}
 		if flush() != nil {
+			return
+		}
+	}
+}
+
+// closeLikeAHub sends a close frame with no status and finishes the closing
+// handshake before the socket goes, as a hub's WebSocket server does (RFC
+// 6455 section 7.1.1): it reads, dropping whatever the client already had in
+// flight, until the client's own close answers or a grace period passes.
+//
+// Dropping the socket straight after the close frame is not a hub a client
+// can meet, and on Windows it loses the close. The client sends its encrypted
+// HELLO right behind the last XX message, so that frame is still unread when
+// the hub fails the handshake; closing a socket with unread data sends a TCP
+// reset instead of a FIN, and Windows discards everything the client had
+// received but not yet read when a reset arrives -- the close frame included.
+// The client then sees a socket that ended with no close frame (1006), which
+// is a drop by the vectors, not a refusal.
+func closeLikeAHub(conn *websocket.Conn) {
+	if conn.WriteMessage(websocket.CloseMessage, []byte{}) != nil {
+		return
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
 			return
 		}
 	}
@@ -244,14 +309,28 @@ func (h *keepingHub) seen() []string {
 	return append([]string(nil), h.patterns...)
 }
 
-// connectOnce is one client connect with a fresh transport over the case's
-// key store, closed afterwards.
+// connectOnce is one connect as a kept link makes it -- the handshake, then
+// the settle window -- with a fresh transport over the case's key store,
+// closed afterwards. A close that lands just after the handshake would
+// otherwise race the connect returning.
 func (h *keepingHub) connectOnce(identity Identity, stateDir string) error {
-	transport := NewWSSTransport(identity)
-	transport.NoiseStateDir = stateDir
-	client := &Client{Identity: identity, Transport: transport, ConnectTimeout: 20 * time.Second}
-	err := client.Connect(context.Background())
-	_ = client.Close(context.Background())
+	session, err := NewHubSession(func(ctx context.Context) (HubSessionClient, error) {
+		transport := NewWSSTransport(identity)
+		transport.NoiseStateDir = stateDir
+		client := &Client{Identity: identity, Transport: transport, ConnectTimeout: 20 * time.Second}
+		if err := client.Connect(ctx); err != nil {
+			_ = client.Close(context.Background())
+			return nil, err
+		}
+		return client, nil
+	}, DefaultHubSessionPolicy())
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	err = session.Connect(ctx)
+	_ = session.Close(context.Background())
 	return err
 }
 
@@ -260,6 +339,12 @@ func handshakeOutcome(t *testing.T, err error) string {
 	switch {
 	case err == nil:
 		return "connected"
+	case errors.Is(err, ErrClientKeyRejected):
+		var rejected *ClientKeyRejectedError
+		if !errors.As(err, &rejected) || rejected.KeyFolder == "" || !errors.Is(err, ErrHubRefused) || !errors.Is(err, ErrConnection) {
+			t.Errorf("a rejected client key must be a refusal naming its folder: %#v", err)
+		}
+		return "client_key_rejected"
 	case errors.Is(err, ErrHubKeyChanged):
 		if errors.Is(err, ErrHubRefused) {
 			t.Errorf("a changed key must not read as a refusal: %v", err)
@@ -283,7 +368,7 @@ func TestLinkKeepingHandshakeVectors(t *testing.T) {
 			identity := hub.identity
 			situation := spec["situation"]
 			switch situation {
-			case "pinned", "password_changed_since_pinning", "hub_key_changed":
+			case "pinned", "password_changed_since_pinning", "hub_key_changed", "client_key_changed", "client_key_changed_pinned_here":
 				// First contact pins both ways.
 				if err := hub.connectOnce(identity, stateDir); err != nil {
 					t.Fatalf("first contact: %v", err)
@@ -302,6 +387,12 @@ func TestLinkKeepingHandshakeVectors(t *testing.T) {
 			case "upgrade_status":
 				status, _ := spec["status"].(float64)
 				hub.upgradeStatus = int(status)
+			case "client_key_changed":
+				stateDir = t.TempDir() // another program: its own folder, its own key
+			case "client_key_changed_pinned_here":
+				replaceClientKey(t, stateDir) // a new key, the same hub pins
+			case "closed_after_first_frame":
+				hub.speakThenClose = true
 			}
 			before := len(hub.patterns)
 			hub.mu.Unlock()
@@ -322,6 +413,16 @@ func TestLinkKeepingHandshakeVectors(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// replaceClientKey gives the client in stateDir a new static key, keeping
+// the hub pins it has.
+func replaceClientKey(t *testing.T, stateDir string) {
+	t.Helper()
+	key := newHubKey(t)
+	if err := os.WriteFile(filepath.Join(stateDir, NoiseKeyFilename), []byte(hex.EncodeToString(key.Private)), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }
 

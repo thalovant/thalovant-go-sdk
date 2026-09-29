@@ -201,6 +201,9 @@ func TestDeviceLoginVectors(t *testing.T) {
 	if got, want := HomeAssistantScopes(), anySlice(vectors["home_assistant_scopes"]); fmt.Sprint(got) != fmt.Sprint(want) {
 		t.Fatalf("HomeAssistantScopes() = %v, want %v", got, want)
 	}
+	if got, want := HomeAssistantClientID, vectors["home_assistant_client_id"]; got != want {
+		t.Fatalf("HomeAssistantClientID = %q, want %v", got, want)
+	}
 	for _, raw := range anySlice(vectors["cases"]) {
 		spec := mapValue(raw)
 		name := fmt.Sprint(spec["name"])
@@ -218,6 +221,23 @@ func runDeviceCase(t *testing.T, api *scriptedAPI, call map[string]any, vectors 
 	t.Helper()
 	plane := NewControlPlane(api.server.URL, "")
 	ctx := context.Background()
+	if call["op"] == "describe" {
+		// Only the approver's read is signed in; a device signing in has no
+		// token yet.
+		plane.AccessToken = "synthetic-token"
+		request, err := plane.DescribeDeviceLogin(ctx, fmt.Sprint(call["user_code"]))
+		if err != nil {
+			return []any{deviceErrorOutcome(err)}
+		}
+		return []any{map[string]any{
+			"outcome":         "described",
+			"scopes":          request.Scopes,
+			"client_name":     absentIfEmpty(request.ClientName),
+			"client_id":       absentIfEmpty(request.ClientID),
+			"client_verified": request.ClientVerified,
+			"device_name":     absentIfEmpty(request.DeviceName),
+		}}
+	}
 	if call["op"] == "begin" {
 		var scopes []string
 		if _, listed := call["scopes"].([]any); listed {
@@ -227,12 +247,19 @@ func runDeviceCase(t *testing.T, api *scriptedAPI, call map[string]any, vectors 
 			scopes = append(scopes, fmt.Sprint(scope))
 		}
 		clientName, _ := call["client_name"].(string)
-		grant, err := plane.BeginDeviceLogin(ctx, scopes, clientName)
+		clientID, _ := call["client_id"].(string)
+		var (
+			grant *DeviceAuthorization
+			err   error
+		)
+		if clientID == "" {
+			grant, err = plane.BeginDeviceLogin(ctx, scopes, clientName)
+		} else {
+			grant, err = plane.BeginDeviceLoginWithOptions(ctx, DeviceLoginOptions{Scopes: scopes, ClientName: clientName, ClientID: clientID})
+		}
 		if err != nil {
 			assertExcluded(t, err, vectors)
-			// The reference records only the status for a refused start.
-			failed := deviceErrorOutcome(err)
-			return []any{map[string]any{"outcome": "error", "status": failed["status"]}}
+			return []any{deviceErrorOutcome(err)}
 		}
 		if strings.Contains(fmt.Sprint(grant), grant.DeviceCode) || strings.Contains(fmt.Sprintf("%#v", grant), grant.DeviceCode) {
 			t.Error("a printed DeviceAuthorization carries the device code")
@@ -648,6 +675,8 @@ func TestHomeLinkVectors(t *testing.T) {
 				produced = PlainSpeech(fmt.Sprint(spec["text"]))
 			case "deadline":
 				produced = runDeadlineCase(t, spec)
+			case "queued":
+				produced = runQueuedCase(t, spec)
 			default:
 				replier := &capturingReplier{}
 				event := Event{Name: HomeRequestEvent, Data: Data(mapValue(spec["request"])), Context: Context{"source": "skill"}}
@@ -739,4 +768,77 @@ func TestHomeLinkContractListsMatchTheSDK(t *testing.T) {
 	if DefaultHomeHandlerTimeout != 9000*time.Millisecond {
 		t.Errorf("DefaultHomeHandlerTimeout = %s, the reference gives a handler 9000 ms", DefaultHomeHandlerTimeout)
 	}
+}
+
+// runQueuedCase answers one request over a real link while another frame
+// holds the transport's send path for busy_ms: a reply withdrawn at the bound
+// is never sent, late or at all, and the same link then carries another
+// message.
+func runQueuedCase(t *testing.T, spec map[string]any) map[string]any {
+	t.Helper()
+	hub := newKeepingHub(t)
+	transport := NewWSSTransport(hub.identity)
+	transport.NoiseStateDir = t.TempDir()
+	client := &Client{Identity: hub.identity, Transport: transport, ConnectTimeout: 20 * time.Second}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close(context.Background())
+
+	if err := transport.writeMu.Lock(ctx); err != nil { // another frame is being written ...
+		t.Fatal(err)
+	}
+	busy := make(chan struct{})
+	go func() {
+		defer close(busy)
+		time.Sleep(milliseconds(spec["busy_ms"]))
+		transport.writeMu.Unlock() // ... for busy_ms
+	}()
+	event := Event{Name: HomeRequestEvent, Data: Data(mapValue(spec["request"])), Context: Context{"source": "skill", "destination": "ha"}}
+	sent, err := AnswerHomeRequest(ctx, client, event, vectorHandler(mapValue(spec["handler"])), HomeAnswerOptions{HubTimeout: milliseconds(spec["hub_timeout_ms"])})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-busy
+	time.Sleep(200 * time.Millisecond) // time enough for a withdrawn reply to go out late, if it would
+
+	if err := client.Emit(ctx, "still.there", Data{}, Context{}); err != nil {
+		t.Fatalf("the link did not carry the next message: %v", err)
+	}
+	var responses []string
+	stillThere := false
+	waitFor(t, func() bool {
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		responses, stillThere = nil, false
+		for _, message := range hub.bus {
+			switch message.Payload["type"] {
+			case HomeResponseEvent:
+				responses = append(responses, fmt.Sprint(message.Payload["data"]))
+			case "still.there":
+				stillThere = true
+			}
+		}
+		return stillThere
+	})
+	var want []string
+	if sent != nil {
+		want = append(want, fmt.Sprint(map[string]any(sent)))
+	}
+	if fmt.Sprint(responses) != fmt.Sprint(want) {
+		t.Fatalf("the hub got %v, want %v: never sent late, never twice", responses, want)
+	}
+	hub.mu.Lock()
+	connections := hub.connections
+	hub.mu.Unlock()
+	produced := map[string]any{
+		"replied":   sent != nil,
+		"link_kept": stillThere && connections == 1 && transport.Healthcheck().HandshakeComplete,
+	}
+	if sent != nil {
+		produced["response"] = map[string]any(sent)
+	}
+	return produced
 }

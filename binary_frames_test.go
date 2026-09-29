@@ -12,6 +12,7 @@ package thalovant
 
 import (
 	"bytes"
+	"compress/zlib"
 	"encoding/base64"
 	"slices"
 	"sort"
@@ -185,5 +186,34 @@ func TestOnlyTheMeshKindsAreSubscribable(t *testing.T) {
 		if got := slices.Contains(HiveKinds, kind); got != accepted {
 			t.Fatalf("%v: subscribable=%v, want %v", test["name"], got, accepted)
 		}
+	}
+}
+
+// A compressed part inflates to at most 32 MiB, and a truncated one is
+// refused rather than read as far as it goes.
+func TestACompressedPartIsCappedAndMustBeWhole(t *testing.T) {
+	compress := func(size int) []byte {
+		var buffer bytes.Buffer
+		writer := zlib.NewWriter(&buffer)
+		if _, err := writer.Write(make([]byte, size)); err != nil {
+			t.Fatal(err)
+		}
+		if err := writer.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return buffer.Bytes()
+	}
+	if text, err := decodeWireText(compress(maxInflatedWire), true); err != nil || len(text) != maxInflatedWire {
+		t.Fatalf("exactly the cap: %d bytes, %v", len(text), err)
+	}
+	if _, err := decodeWireText(compress(maxInflatedWire+1), true); err == nil {
+		t.Fatal("one byte past the cap was inflated")
+	}
+	whole := compress(1024)
+	if _, err := decodeWireText(whole[:len(whole)-6], true); err == nil {
+		t.Fatal("a truncated stream was read as far as it goes")
+	}
+	if text, err := decodeWireText(whole, true); err != nil || len(text) != 1024 {
+		t.Fatalf("a whole stream: %d bytes, %v", len(text), err)
 	}
 }

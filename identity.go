@@ -26,6 +26,30 @@ type Identity struct {
 	DataPlaneEndpoints HubDataPlaneEndpoints  `json:"data_plane_endpoints,omitempty"`
 	Protocols          HubProtocolSettings    `json:"protocols,omitempty"`
 	MQTT               *MqttBrokerCredentials `json:"mqtt,omitempty"`
+
+	// sourcePath is the file this identity was read from; see SourcePath.
+	sourcePath string
+}
+
+// SourcePath is the file this identity was read from (IdentityFromFile,
+// IdentityFromConfig), as an absolute path, or "" when it came from anywhere
+// else. With no NoiseStateDir named, a transport keeps this identity's Noise
+// key and hub pins in that file's directory, so every program that reads the
+// same file presents the same key to the hub. It is not identity material:
+// never serialized.
+func (i Identity) SourcePath() string { return i.sourcePath }
+
+// withSource records the file an identity was read from.
+func withSource(identity Identity, err error, path string) (Identity, error) {
+	if err != nil {
+		return identity, err
+	}
+	if absolute, absErr := filepath.Abs(path); absErr == nil {
+		identity.sourcePath = absolute
+	} else {
+		identity.sourcePath = path
+	}
+	return identity, nil
 }
 
 type MqttBrokerCredentials struct {
@@ -144,7 +168,8 @@ func IdentityFromFile(path string) (Identity, error) {
 	if err := json.Unmarshal(raw, &values); err != nil {
 		return Identity{}, fmt.Errorf("%w: identity file is not valid JSON", ErrIdentity)
 	}
-	return IdentityFromMap(values)
+	identity, err := IdentityFromMap(values)
+	return withSource(identity, err, path)
 }
 
 func DefaultConfigPath() (string, error) {
@@ -186,7 +211,8 @@ func IdentityFromConfig(path string, profile string) (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	return IdentityFromMap(selected)
+	identity, err := IdentityFromMap(selected)
+	return withSource(identity, err, path)
 }
 
 func IdentityFromEnv(prefix string) (Identity, error) {

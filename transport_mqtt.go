@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"sync"
@@ -26,6 +27,8 @@ type MQTTTransport struct {
 	connection     connectionTelemetry
 	handshakeReady chan struct{}
 	// NoiseStateDir selects the persistent client key and hub pin directory.
+	// Empty uses the directory of the file the identity was read from
+	// (Identity.SourcePath), else NoiseStateDir().
 	NoiseStateDir string
 	// TLSConfig optionally supplies broker trust roots or a client certificate.
 	TLSConfig    *tls.Config
@@ -347,8 +350,13 @@ func (t *MQTTTransport) sendHiveMessage(ctx context.Context, message HiveMessage
 	if channel == nil || !connected {
 		return fmt.Errorf("%w: MQTT transport is not connected", ErrConnection)
 	}
-	if err := channel.send(sendCtx, message); err != nil {
-		t.failGeneration(generation, err)
+	// A write that fails after its caller left retires the generation too;
+	// failGeneration ignores a generation already replaced or already failed.
+	retire := func(err error) { t.failGeneration(generation, err) }
+	if err := channel.sendRetiring(sendCtx, message, retire); err != nil {
+		if !errors.Is(err, errNothingSent) && !errors.Is(err, errFinishing) {
+			retire(err)
+		}
 		return err
 	}
 	return nil

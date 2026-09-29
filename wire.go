@@ -156,6 +156,12 @@ func DecodeHiveBinaryFrame(payload []byte) (HiveMessage, error) {
 	}, nil
 }
 
+// maxInflatedWire is the most a compressed part of a binary frame may
+// inflate to. A reassembled Noise message is itself capped at 32 MiB; without
+// a cap here, a small frame of zeros from a hub could make the client
+// allocate gigabytes.
+const maxInflatedWire = 32 << 20
+
 func decodeWireText(payload []byte, compressed bool) (string, error) {
 	if !compressed {
 		return string(payload), nil
@@ -165,9 +171,14 @@ func decodeWireText(payload []byte, compressed bool) (string, error) {
 		return "", err
 	}
 	defer reader.Close()
-	decoded, err := io.ReadAll(reader)
+	// One byte past the cap tells a part that fits from one that does not. A
+	// truncated stream fails the read: zlib reports io.ErrUnexpectedEOF.
+	decoded, err := io.ReadAll(io.LimitReader(reader, maxInflatedWire+1))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("HiveMind binary frame holds a truncated or corrupt compressed stream: %w", err)
+	}
+	if len(decoded) > maxInflatedWire {
+		return "", fmt.Errorf("HiveMind binary frame inflates past the %d MiB limit", maxInflatedWire>>20)
 	}
 	return string(decoded), nil
 }

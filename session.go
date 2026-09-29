@@ -439,6 +439,11 @@ func (s *HubSession) settle(ctx context.Context, client HubSessionClient) error 
 
 // closedEarly is the error for a link that closed inside the settle window.
 func (s *HubSession) closedEarly(client HubSessionClient) error {
+	if rejecter, ok := client.(interface{ keyRejection() error }); ok {
+		if err := rejecter.keyRejection(); err != nil {
+			return err
+		}
+	}
 	if refuser, ok := client.(interface{ ClosedRefused() bool }); ok && refuser.ClosedRefused() {
 		return fmt.Errorf("%w: %w: the hub closed the link right after the handshake: it does not accept these credentials, or not yet", ErrConnection, ErrHubRefused)
 	}
@@ -453,7 +458,8 @@ func (s *HubSession) closedEarly(client HubSessionClient) error {
 // until the refusals have lasted the refusal grace (WithRefusalGrace), since a
 // new connection is refused until its hub admits it, and then Run returns the
 // refusal (ErrHubRefused); a hub whose key changed ends Run at once with that
-// error (ErrHubKeyChanged), since retrying cannot change it. A held link is
+// error (ErrHubKeyChanged), since retrying cannot change it, and so does a hub
+// that refused this client's own key (ErrClientKeyRejected). A held link is
 // looked at continually. Run returns nil once the session is closed, and
 // ctx's error when ctx ends first.
 func (s *HubSession) Run(ctx context.Context) error {
@@ -503,6 +509,8 @@ func linkOutcome(err error) LinkOutcome {
 		return LinkUp
 	case errors.Is(err, ErrHubKeyChanged):
 		return LinkKeyChanged
+	case errors.Is(err, ErrClientKeyRejected):
+		return LinkClientKeyRejected
 	case errors.Is(err, ErrHubRefused):
 		return LinkRefused
 	}
@@ -524,6 +532,9 @@ const (
 	LinkRefused LinkOutcome = "refused"
 	// LinkKeyChanged: the hub's key is not the pinned one (ErrHubKeyChanged).
 	LinkKeyChanged LinkOutcome = "key_changed"
+	// LinkClientKeyRejected: the hub refused this client's own key, having
+	// pinned another one for the connection (ErrClientKeyRejected).
+	LinkClientKeyRejected LinkOutcome = "client_key_rejected"
 )
 
 // LinkAction is what to do after an attempt.
@@ -545,7 +556,7 @@ type LinkDecision struct {
 	// Wait is how long to wait before dialling again, for LinkRetry.
 	Wait time.Duration
 	// Reason is the outcome that ended the link, for LinkGiveUp:
-	// LinkRefused or LinkKeyChanged.
+	// LinkRefused, LinkKeyChanged or LinkClientKeyRejected.
 	Reason LinkOutcome
 }
 
@@ -560,7 +571,9 @@ type LinkDecision struct {
 //   - LinkRefused: wait the ladder's step the same way, until the refusals
 //     have lasted the refusal grace since the first of them (inclusive), then
 //     give up;
-//   - LinkKeyChanged: give up at once, since retrying cannot change it.
+//   - LinkKeyChanged: give up at once, since retrying cannot change it;
+//   - LinkClientKeyRejected: give up at once too: no handshake can make the
+//     hub accept a key it did not pin.
 //
 // A LinkSupervisor is not safe for concurrent use.
 type LinkSupervisor struct {
@@ -589,8 +602,8 @@ func (l *LinkSupervisor) After(outcome LinkOutcome, now time.Time) LinkDecision 
 		return LinkDecision{Action: LinkHold}
 	case LinkDropped:
 		return LinkDecision{Action: LinkRetry}
-	case LinkKeyChanged:
-		return LinkDecision{Action: LinkGiveUp, Reason: LinkKeyChanged}
+	case LinkKeyChanged, LinkClientKeyRejected:
+		return LinkDecision{Action: LinkGiveUp, Reason: outcome}
 	case LinkRefused:
 		if !l.refusing {
 			l.refusing, l.refusedSince = true, now

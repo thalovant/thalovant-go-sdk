@@ -28,3 +28,12 @@ func (m *contextMutex) Lock(ctx context.Context) error {
 	}
 }
 func (m *contextMutex) Unlock() { <-m.token }
+
+// noiseLock is a noiseChannel's lock: a plain mutex for its short sections,
+// whose wait a send can also withdraw (LockContext) while it is still queued
+// behind another frame.
+type noiseLock struct{ inner contextMutex }
+
+func (m *noiseLock) Lock()                                 { _ = m.inner.Lock(context.Background()) }
+func (m *noiseLock) Unlock()                               { m.inner.Unlock() }
+func (m *noiseLock) LockContext(ctx context.Context) error { return m.inner.Lock(ctx) }

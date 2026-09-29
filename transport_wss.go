@@ -23,7 +23,9 @@ type WSSTransport struct {
 	UserAgent string
 
 	// NoiseStateDir overrides where the persistent static key and the server
-	// pin file live. Empty uses the directory holding the SDK config file.
+	// pin file live. Empty uses the directory of the file the identity was
+	// read from (Identity.SourcePath), else the directory holding the SDK
+	// config file (NoiseStateDir()).
 	NoiseStateDir string
 
 	BusEvents     chan Event
@@ -33,7 +35,17 @@ type WSSTransport struct {
 	handshake     bool
 	lastError     error
 	closedRefused bool
-	connection    connectionTelemetry
+	// closedKeyRejected is closedRefused right as an XX handshake ended: the
+	// hub refusing this client's own static key (ClientKeyRejectedError).
+	closedKeyRejected bool
+	// heard is whether a frame from the hub decrypted under the current
+	// session's keys: a hub that has spoken accepted the credentials, so no
+	// close after that is a refusal.
+	heard bool
+	// finalSent is whether this attempt sent the last message of an XX
+	// handshake: the one that shows the hub this client's static key.
+	finalSent  bool
+	connection connectionTelemetry
 	// handshakeAt is when the Noise handshake completed, the start of the
 	// window in which a close is still the hub's answer to it.
 	handshakeAt time.Time
@@ -201,9 +213,11 @@ func (t *WSSTransport) connectGeneration(ctx context.Context, generation uint64)
 		return fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
 	case <-closed:
 		t.mu.RLock()
-		cause, refused := t.lastError, t.closedRefused
+		cause, refused, keyRejected := t.lastError, t.closedRefused, t.closedKeyRejected
 		t.mu.RUnlock()
 		switch {
+		case keyRejected:
+			return clientKeyRejected(t.NoiseStateDir, t.Identity)
 		case errors.Is(cause, ErrHubKeyChanged), errors.Is(cause, ErrHubRefused):
 			// This SDK's own verdict on the handshake, already worded.
 			return cause
@@ -222,6 +236,8 @@ func (t *WSSTransport) connectGeneration(ctx context.Context, generation uint64)
 			// is read as it would be a moment later.
 			if t.generation == generation {
 				switch cause := t.lastError; {
+				case t.closedKeyRejected:
+					return clientKeyRejected(t.NoiseStateDir, t.Identity)
 				case errors.Is(cause, ErrHubKeyChanged), errors.Is(cause, ErrHubRefused):
 					return cause
 				case t.closedRefused:
@@ -376,6 +392,13 @@ func (t *WSSTransport) handleRawMessage(ctx context.Context, raw []byte) error {
 		if err != nil {
 			return err
 		}
+		// Any frame that decrypts counts, a chunk of a larger message and the
+		// hub's own encrypted HELLO included.
+		t.mu.Lock()
+		if t.generationCurrentLocked(ctx) {
+			t.heard = true
+		}
+		t.mu.Unlock()
 		if !complete {
 			return nil
 		}
@@ -470,7 +493,12 @@ func (t *WSSTransport) startNoiseHandshake(ctx context.Context, handshakePayload
 		return fmt.Errorf("%w: the hub sent its HANDSHAKE parameters before a HELLO carrying node_id", ErrConnection)
 	}
 
-	stateDir := t.NoiseStateDir
+	// The first use of the identity file's directory takes the key this
+	// identity had in the old default, once the hub it meets is known.
+	stateDir, err := resolveNoiseStateDir(t.NoiseStateDir, t.Identity, nodeID)
+	if err != nil {
+		return err
+	}
 	pinned, err := LoadNoisePin(stateDir, nodeID)
 	if err != nil {
 		return err
@@ -588,6 +616,13 @@ func (t *WSSTransport) continueNoiseHandshake(ctx context.Context, noiseParams m
 		if err != nil {
 			return err
 		}
+		// Marked before it goes out: the hub may read it and close before
+		// the write returns.
+		t.mu.Lock()
+		if t.generationCurrentLocked(ctx) {
+			t.finalSent = true
+		}
+		t.mu.Unlock()
 		if err := t.sendCleartext(ctx, HiveMessage{
 			MsgType:  "shake",
 			Payload:  map[string]any{"noise": map[string]any{"msg": hex.EncodeToString(final)}},
@@ -648,7 +683,14 @@ func (t *WSSTransport) continueNoiseHandshake(ctx context.Context, noiseParams m
 // answering at this address. The SDK cannot tell those apart, so it refuses and
 // leaves clearing the pin (ForgetNoisePin) as a deliberate act.
 func (t *WSSTransport) pinServerKey(nodeID, remoteStaticKey string) error {
-	return pinNoisePeer(t.NoiseStateDir, nodeID, remoteStaticKey)
+	return pinNoisePeer(t.stateDir(), nodeID, remoteStaticKey)
+}
+
+// stateDir is where this transport keeps its key and hub pins; see
+// NoiseStateDir.
+func (t *WSSTransport) stateDir() string {
+	dir, _ := noiseStateDirFor(t.NoiseStateDir, t.Identity)
+	return dir
 }
 
 // pskFor derives (or reuses) the pre-shared key for a hub.
@@ -667,8 +709,8 @@ func (t *WSSTransport) pskForGeneration(ctx context.Context, nodeID string) ([]b
 	}
 	cached, sameHub := t.cachedPSK, t.cachedPSKNodeID == nodeID
 	samePassword := t.cachedPSKPassword == password
-	stateDir := t.NoiseStateDir
 	t.mu.Unlock()
+	stateDir := t.stateDir()
 
 	if cached != nil && sameHub && samePassword {
 		return cached, nil
@@ -714,9 +756,8 @@ func (t *WSSTransport) forgetPSK(nodeID string) {
 	if t.cachedPSKNodeID == nodeID {
 		t.cachedPSK, t.cachedPSKNodeID, t.cachedPSKPassword = nil, "", ""
 	}
-	stateDir := t.NoiseStateDir
 	t.mu.Unlock()
-	_ = ForgetCachedPSK(stateDir, nodeID)
+	_ = ForgetCachedPSK(t.stateDir(), nodeID)
 }
 
 // sendCleartext writes a handshake message as a JSON text frame. Only the
@@ -759,6 +800,9 @@ func (t *WSSTransport) sendHiveMessage(ctx context.Context, message HiveMessage,
 	})
 }
 
+// wssWriteTimeout bounds the physical write of one frame once it has started.
+const wssWriteTimeout = 20 * time.Second
+
 // Cancellation while queued never advances a cipher. After admission, failed or
 // cancelled writes poison only this captured generation, because delivery is uncertain.
 func (t *WSSTransport) writeGeneration(ctx context.Context, generation uint64, conn *websocket.Conn, write func() error) error {
@@ -772,31 +816,41 @@ func (t *WSSTransport) writeGeneration(ctx context.Context, generation uint64, c
 		// encrypted or written, so the Noise stream is intact.
 		return fmt.Errorf("%w: %w: %w", ErrTimeout, errNothingSent, err)
 	}
-	defer t.writeMu.Unlock()
 	t.mu.RLock()
 	current := t.generation == generation && t.conn == conn && t.connected
 	t.mu.RUnlock()
 	if !current {
+		t.writeMu.Unlock()
 		return staleWSSGeneration()
 	}
-	deadline, _ := bounded.Deadline()
-	_ = conn.SetWriteDeadline(deadline)
-	finished := make(chan struct{})
-	stop := context.AfterFunc(bounded, func() { _ = conn.Close(); close(finished) })
-	err := write()
-	if !stop() {
-		<-finished
-	}
-	_ = conn.SetWriteDeadline(time.Time{})
-	if bounded.Err() != nil {
-		err = fmt.Errorf("%w: %w", ErrTimeout, bounded.Err())
-	} else if timeoutErr, ok := err.(net.Error); ok && timeoutErr.Timeout() {
-		err = fmt.Errorf("%w: %w", ErrTimeout, err)
-	}
-	if err != nil {
-		t.poisonGeneration(generation, conn, err)
-	}
-	return err
+	// Held: the frame is written to the end whatever becomes of the caller,
+	// bounded by the physical send timeout alone -- half of one would break
+	// the Noise stream. Only the wait above may be withdrawn; a caller that
+	// leaves now gets errFinishing, and the link is kept.
+	return finishWithout(ctx, func() error {
+		physical, stopPhysical := context.WithTimeout(context.Background(), wssWriteTimeout)
+		defer stopPhysical()
+		deadline, _ := physical.Deadline()
+		_ = conn.SetWriteDeadline(deadline)
+		finished := make(chan struct{})
+		stop := context.AfterFunc(physical, func() { _ = conn.Close(); close(finished) })
+		err := write()
+		if !stop() {
+			<-finished
+		}
+		_ = conn.SetWriteDeadline(time.Time{})
+		if physical.Err() != nil {
+			err = fmt.Errorf("%w: %w", ErrTimeout, physical.Err())
+		} else if timeoutErr, ok := err.(net.Error); ok && timeoutErr.Timeout() {
+			err = fmt.Errorf("%w: %w", ErrTimeout, err)
+		}
+		return err
+	}, func(err error) {
+		if err != nil {
+			t.poisonGeneration(generation, conn, err)
+		}
+		t.writeMu.Unlock()
+	})
 }
 
 // decodeJSONNumbers decodes a JSON object keeping numbers as their original
@@ -868,6 +922,9 @@ func (t *WSSTransport) beginConnectionLocked() *websocket.Conn {
 	t.generation++
 	t.lastError = nil
 	t.closedRefused = false
+	t.closedKeyRejected = false
+	t.heard = false
+	t.finalSent = false
 	t.handshakeAt = time.Time{}
 	t.pattern = ""
 	t.connected = false
@@ -900,7 +957,12 @@ func (t *WSSTransport) recordReadFailure(generation uint64, err error) {
 	// The close's own time decides: gorilla learns the code with the close,
 	// so it is never late here.
 	t.closedRefused = errors.Is(err, ErrHubRefused) ||
-		closeRefuses(code, !t.handshake, time.Since(t.handshakeAt), 0)
+		closeRefuses(code, !t.handshake, time.Since(t.handshakeAt), 0, t.heard)
+	// A refusal once this client has sent the last message of an XX
+	// handshake, with nothing from the hub since: the hub read this client's
+	// static key and refused it (it pinned another one for the connection).
+	t.closedKeyRejected = t.closedRefused && t.pattern == noisePatternXX && t.finalSent && !t.heard &&
+		!errors.Is(err, ErrHubRefused)
 	t.connected = false
 	t.handshake = false
 	t.session = nil
@@ -928,9 +990,12 @@ const closeCodeGrace = 250 * time.Millisecond
 // code, 0 when the socket ended with no close frame. A refusal code counts
 // during the handshake -- any step of it -- or within DefaultHubSettle after
 // it, by the close's own time (afterHandshake), when the code was learnt no
-// more than closeCodeGrace after the close (codeLate).
-func closeRefuses(code int, duringHandshake bool, afterHandshake, codeLate time.Duration) bool {
-	if !refusalCloseCodes[code] || codeLate > closeCodeGrace {
+// more than closeCodeGrace after the close (codeLate), and only while the hub
+// has sent nothing that decrypted under the session's keys
+// (afterAuthenticatedFrame): a hub refuses a key before it sends anything, so
+// one that has spoken accepted it, and its close is a drop.
+func closeRefuses(code int, duringHandshake bool, afterHandshake, codeLate time.Duration, afterAuthenticatedFrame bool) bool {
+	if afterAuthenticatedFrame || !refusalCloseCodes[code] || codeLate > closeCodeGrace {
 		return false
 	}
 	return duringHandshake || afterHandshake <= DefaultHubSettle
@@ -946,6 +1011,18 @@ func (t *WSSTransport) ClosedRefused() bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.closedRefused
+}
+
+// keyRejection is a *ClientKeyRejectedError when the last close refused this
+// client's own key, and nil otherwise.
+func (t *WSSTransport) keyRejection() error {
+	t.mu.RLock()
+	rejected, explicit := t.closedKeyRejected, t.NoiseStateDir
+	t.mu.RUnlock()
+	if !rejected {
+		return nil
+	}
+	return clientKeyRejected(explicit, t.Identity)
 }
 
 // signalReadDone unblocks a Connect still waiting on the handshake once the
