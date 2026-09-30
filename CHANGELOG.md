@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.1 — 2026-09-30
+
+The Python reference's 0.9.2 round.
+
+- `Reply.Claimed` treated any fallback-tier reply as "nothing understood," because OVOS's fallback priority band (`match_low`, 90-101) holds a skill that genuinely vocabulary-gates its own narrow answers in the same tier as the fleet's generic catch-all -- the pipeline id alone cannot tell them apart. A skill's own speak event may now carry `meta={"thalovant_claimed": true}` (thalovant-skillkit's `speak_to`/`emit_speech` already thread a `meta` map onto that message) to positively assert a genuine claim; `Claimed` checks it first, before the existing pipeline-tier heuristic. It is opt-in and additive: only a literal `true` under the new `ThalovantClaimedMetaKey` ("thalovant_claimed") counts, it can never turn a failed or unhandled reply into a claimed one, and a reply that never sets it -- including the fleet's own generic catch-all -- is judged exactly as before. No existing signature changes.
+- Seven new `reply-claim-vectors.json` cases cover the assertion and its edges (false, a string, a second event, a failed reply, a non-fallback reply); all 23 cases pass.
+
 ## 0.12.0 — 2026-09-28
 
 The Python reference's 0.9.1 round. Everything is new API; no existing call changes its signature or the error it matches.

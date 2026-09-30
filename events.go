@@ -29,6 +29,12 @@ type Reply struct {
 	FailureEvent *Event
 }
 
+// ThalovantClaimedMetaKey is the meta key a skill's own speak event may set to
+// true to positively assert that it genuinely answered, even from the
+// fallback tier. thalovant-skillkit's speak_to/emit_speech already thread a
+// meta dict (with skill_id) onto every speak message, so this is additive.
+const ThalovantClaimedMetaKey = "thalovant_claimed"
+
 // PipelineIDs reports nonempty string stage stamps in first-seen order.
 func (r Reply) PipelineIDs() []string { return r.contextIdentifiers("pipeline_id") }
 
@@ -37,9 +43,18 @@ func (r Reply) SkillIDs() []string { return r.contextIdentifiers("skill_id") }
 
 // Claimed is advisory: an OK reply from any non-fallback stage is claimed.
 // An older hub without stage stamps retains its existing OK behavior.
+//
+// A skill may positively assert a claim from the fallback tier by setting
+// meta={"thalovant_claimed": true} on its own speak event; that assertion is
+// checked first. It is opt-in and additive: a reply that never sets it is
+// judged exactly as before, only a literal true counts, and it can never
+// rescue a reply that already fails the ok/handled/no-failure gate.
 func (r Reply) Claimed() bool {
 	if !r.Handled || !r.OK || r.FailureEvent != nil {
 		return false
+	}
+	if r.hasAssertedClaim() {
+		return true
 	}
 	stages := r.PipelineIDs()
 	if len(stages) == 0 {
@@ -47,6 +62,19 @@ func (r Reply) Claimed() bool {
 	}
 	for _, stage := range stages {
 		if !strings.Contains(stage, "fallback") {
+			return true
+		}
+	}
+	return false
+}
+
+func (r Reply) hasAssertedClaim() bool {
+	for _, event := range r.Events {
+		meta, ok := event.Data["meta"].(map[string]any)
+		if !ok {
+			continue
+		}
+		if claimed, ok := meta[ThalovantClaimedMetaKey].(bool); ok && claimed {
 			return true
 		}
 	}
