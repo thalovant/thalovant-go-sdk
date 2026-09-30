@@ -19,6 +19,7 @@ func TestReplyClaimVectors(t *testing.T) {
 			Failed   bool
 			Contexts []Context
 			Metas    []map[string]any
+			Names    []*string
 			Expected struct {
 				PipelineIDs []string `json:"pipeline_ids"`
 				SkillIDs    []string `json:"skill_ids"`
@@ -36,7 +37,11 @@ func TestReplyClaimVectors(t *testing.T) {
 				reply.FailureEvent = &Event{Name: "failure"}
 			}
 			for i, context := range row.Contexts {
-				event := Event{Name: "speak", Context: context}
+				name := "speak"
+				if i < len(row.Names) && row.Names[i] != nil {
+					name = *row.Names[i]
+				}
+				event := Event{Name: name, Context: context}
 				if i < len(row.Metas) && row.Metas[i] != nil {
 					event.Data = Data{"meta": row.Metas[i]}
 				}

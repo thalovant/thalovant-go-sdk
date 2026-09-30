@@ -253,17 +253,17 @@
     "runtime": {
       "implementation": {
         "client.go": "a1c0c470ccf7e5ccd592e5cedaa2d4f5708196b354f195bf248953af68a046b6",
-        "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc",
+        "events.go": "c310b681deb54194c81c96f4ec2d7a204e50bb7323ca9139016dea15a6b82b0b",
         "transport.go": "aaa79e977b85595fa526f11953fa6afc67b7574f635ad62f99e9e9475c778d81",
         "transport_noise.go": "672133796d0caa946b98da208206aed68abeee4df2d90d7e08bc827ce57769fe"
       },
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs.",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. A skill may positively assert a fallback-tier claim via thalovant_claimed meta on its own speak event only (EventSpeak/EventOvosUtteranceSpeak), never on another correlated event this reply collected. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs.",
       "status": "required",
       "tests": {
-        "reply_claims_test.go": "490dde39855188ccf174d76578ffc6be4f873794afb5f04a2a41cdeadd970ea0",
+        "reply_claims_test.go": "ff4bfed558196f33fc50235a3647c2f8da190e8fb760d12ec5ab8ea60eed4162",
         "reply_deadline_test.go": "1ffc64edc55e7cd2a0d71b4d11cddd464f445c51c530eea01f10cf7f11d4cdab",
         "runtime_parity_test.go": "ae735757282afa9070143663ce0e266b6f660a411f4afd9cfcadede04425b324",
-        "testdata/reply-claim-vectors.json": "45f2731589e612d5a849376d94073c57b0fef426a92e1d065c58c48442b1ffdc",
+        "testdata/reply-claim-vectors.json": "303bc10666baafbc85e67d7a9dcd6e0fbb16a99e539aed6d829fb0f4744c96b8",
         "transport_noise_test.go": "51d780e4871b79380741b2747e385c206bab0794328d424638b7cd540866c22e"
       },
       "vectors": {
@@ -296,7 +296,8 @@
     "f79d99e9acd2fe299e3b313102541e47b366751defe5fa0dcfa44053aa7f007d",
     "2460eb90bd56b1b182be3db365ba29bfef712d4ea2748061652ba0f28dcf6f50",
     "d33dc2be8b0074be4e16d89a4b615f0e6bc32d99fb513cb75e20c09cd0fab4b6",
-    "3b0acf7c8b2f03bec95d9e9bba4f82e88c79ad3d98590988852e6c06deb48af0"
+    "3b0acf7c8b2f03bec95d9e9bba4f82e88c79ad3d98590988852e6c06deb48af0",
+    "841f3bbeec23f04c5decae75c9cfd6ea6a397992c7e4d7cd4195dc9dd919cd1a"
   ],
   "schema_version": 1
 }

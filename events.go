@@ -48,7 +48,11 @@ func (r Reply) SkillIDs() []string { return r.contextIdentifiers("skill_id") }
 // meta={"thalovant_claimed": true} on its own speak event; that assertion is
 // checked first. It is opt-in and additive: a reply that never sets it is
 // judged exactly as before, only a literal true counts, and it can never
-// rescue a reply that already fails the ok/handled/no-failure gate.
+// rescue a reply that already fails the ok/handled/no-failure gate. Only the
+// skill's own speak event (EventSpeak/EventOvosUtteranceSpeak) is read --
+// never another correlated event this reply happens to carry, such as
+// ovos.utterance.handled, and never the wider media-events set, which also
+// includes a skill sound clip with no meaning as a claim.
 func (r Reply) Claimed() bool {
 	if !r.Handled || !r.OK || r.FailureEvent != nil {
 		return false
@@ -68,8 +72,16 @@ func (r Reply) Claimed() bool {
 	return false
 }
 
+// hasAssertedClaim reports whether the skill's own speak event carries a
+// positive ThalovantClaimedMetaKey assertion. Scoped to speak-type events
+// only (EventSpeak/EventOvosUtteranceSpeak): the contract is that a skill
+// asserts this on its own speak_to/emit_speech call, not on anything else
+// the hub happened to stamp alongside it.
 func (r Reply) hasAssertedClaim() bool {
 	for _, event := range r.Events {
+		if event.Name != EventSpeak && event.Name != EventOvosUtteranceSpeak {
+			continue
+		}
 		meta, ok := event.Data["meta"].(map[string]any)
 		if !ok {
 			continue
