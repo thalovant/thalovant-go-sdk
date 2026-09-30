@@ -92,7 +92,7 @@
     "conversation": {
       "implementation": {
         "client.go": "a1c0c470ccf7e5ccd592e5cedaa2d4f5708196b354f195bf248953af68a046b6",
-        "events.go": "80e521c6a4a2a4a70570cb113d9c14dc450aacddf3fbf3e43184ea99d21e39cc"
+        "events.go": "c310b681deb54194c81c96f4ec2d7a204e50bb7323ca9139016dea15a6b82b0b"
       },
       "reason": "CarryConversation and the client's per-session memory, run against the shared conversation vectors.",
       "status": "required",
