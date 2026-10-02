@@ -26,17 +26,30 @@ Store an identity in the protected SDK config (`~/.config/thalovant/config.yaml`
 SDK rejects config files other users can read or write), then:
 
 ```go
-client, err := thalovant.NewClientFromConfig("", "prod")
-if err != nil {
-	panic(err)
-}
-defer client.Close(ctx)
+package main
 
-reply, err := client.Ask(ctx, "What can this hub do?", thalovant.RequestOptions{})
-if err != nil {
-	panic(err)
+import (
+	"context"
+	"fmt"
+
+	"github.com/thalovant/thalovant-go-sdk"
+)
+
+func main() {
+	ctx := context.Background()
+
+	client, err := thalovant.NewClientFromConfig("", "prod")
+	if err != nil {
+		panic(err)
+	}
+	defer client.Close(ctx)
+
+	reply, err := client.Ask(ctx, "What can this hub do?", thalovant.RequestOptions{})
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(reply.Text)
 }
-fmt.Println(reply.Text)
 ```
 
 The config format, signing in, and provisioning a first identity are in the documentation.
@@ -68,9 +81,11 @@ These topics have no counterpart on the documentation page, so a short version s
   with `*thalovant.PolicyDeniedError` (`Code`, `Quota`, `Allowed`, `DeniedType`) and
   `*thalovant.UnansweredError` (`Said`); `errors.Is(err, thalovant.ErrTimeout)` covers a late hub.
 - **Transport security.** `wss`, `https`, and `mqtt` perform the HiveMind v3 Noise handshake. The
-  client key (`noise_key`) and pinned hub keys (`noise_pins.json`) persist beside the SDK config
-  file; do not regenerate a paired client's key. A hub that pinned another key refuses this one
-  with `*thalovant.ClientKeyRejectedError`.
+  client key (`noise_key`) and pinned hub keys (`noise_pins.json`) live in `NoiseStateDir` when you
+  set it; otherwise in the directory of the identity file the SDK read, or, for an identity that
+  did not come from a file, beside the SDK config file. Back up that directory, not only the
+  config directory, and do not regenerate a paired client's key. A hub that pinned another key
+  refuses this one with `*thalovant.ClientKeyRejectedError`.
 
 ## Development
 
