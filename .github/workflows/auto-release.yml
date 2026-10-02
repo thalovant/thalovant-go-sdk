@@ -90,7 +90,6 @@ jobs:
               "data",
               "LICENSE-languages",
               "LICENSE-langcodes",
-              "README.md",
               "LICENSE",
           )
 

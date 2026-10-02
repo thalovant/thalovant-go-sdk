@@ -63,6 +63,5 @@ jobs:
             data
             LICENSE-languages
             LICENSE-langcodes
-            README.md
             LICENSE
         run: python .github/scripts/release_guard.py
