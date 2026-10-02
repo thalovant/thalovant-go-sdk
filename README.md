@@ -82,7 +82,7 @@ go test -race -count=1 ./...
 
 ## Security
 
-Report vulnerabilities as described in [SECURITY.md](https://github.com/thalovant/.github/blob/main/SECURITY.md).
+Report vulnerabilities as described in [SECURITY.md](SECURITY.md).
 
 ## Licence
 
