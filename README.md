@@ -1,5 +1,7 @@
 # Thalovant Go SDK
 
+[![Go reference](https://pkg.go.dev/badge/github.com/thalovant/thalovant-go-sdk.svg)](https://pkg.go.dev/github.com/thalovant/thalovant-go-sdk) [![CI](https://github.com/thalovant/thalovant-go-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/thalovant/thalovant-go-sdk/actions/workflows/ci.yml) [![Licence](https://img.shields.io/github/license/thalovant/thalovant-go-sdk)](LICENSE) [![Docs](https://img.shields.io/badge/docs-docs.thalovant.com-5c6bc0)](https://docs.thalovant.com/developers/sdks/go/)
+
 Go SDK for connecting services, CLIs, devices, and agents to Thalovant hubs.
 
 The control API is used to discover hubs and provision a client identity. After
