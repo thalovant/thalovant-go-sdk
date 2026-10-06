@@ -156,17 +156,17 @@
     },
     "identity": {
       "implementation": {
-        "identity.go": "310b6f7127f7f9c0e6218b23c2ad2ffe3b18097d97d67ee713a87f18a8dc4c13",
+        "identity.go": "c3cc23b5c4b76502760ef343ca202c184812cf7204a4109273979f729bc77fb9",
         "noise_folder.go": "12f9151ebbb5b8d87e618c60355a6f0880668213482c6af843606bbe02d3aa2f",
         "noise_store.go": "7e241a9e43cfb13587dcecde0b04258ddc765e88b48c886be2a9979219f5159a",
         "protocols.go": "521de8c63ca7b71d715d0dd0b4a79c7e3152a5afcc3c0918ed871569dca4ea6e"
       },
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. 0.9.1: IdentityFromFile and IdentityFromConfig keep the file's path (Identity.SourcePath, never serialized), and a transport with no NoiseStateDir keeps its key and hub pins in that file's directory (noise_folder.go), so every program reading one identity presents one key; the usual ~/.config/thalovant file keeps the old default, and nothing moves. The first time another directory is used, the key and pins in the old default are copied there -- never moved -- only when that key has met the hub being dialled.",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. 0.9.1: IdentityFromFile and IdentityFromConfig keep the file's path (Identity.SourcePath, never serialized), and a transport with no NoiseStateDir keeps its key and hub pins in that file's directory (noise_folder.go), so every program reading one identity presents one key; the usual ~/.config/thalovant file keeps the old default, and nothing moves. The first time another directory is used, the key and pins in the old default are copied there -- never moved -- only when that key has met the hub being dialled. 0.9.5 reference: EndpointFor(ProtocolWSS) falls back to a wss:// or ws:// DefaultMaster (any case) when the identity names no WSS endpoint, as a setup-link identity did; an explicit endpoint wins, an http(s) master gives none, the master is never MQTT, and a hub with protocols.wss disabled keeps HTTPS (sdk_test.go).",
       "status": "required",
       "tests": {
         "noise_folder_test.go": "73d4251d3d5ecad342cfb414991e584ad9a267f61eb48397a047f667e498b23e",
         "python_parity_test.go": "b60d012b384a2ac3d7cd99947331bba581e3ee2e037ea03b9c0f94a585278d2b",
-        "sdk_test.go": "2b7b45305beb55f0a13ba97d997b8955581d6c0a42397672debee9a6c570a5ae"
+        "sdk_test.go": "fd421e0cc28f02b23dd9b60a3c45124f09a2836e5f5bee6bd6947eed85f5fccd"
       }
     },
     "inventory": {
@@ -297,7 +297,8 @@
     "2460eb90bd56b1b182be3db365ba29bfef712d4ea2748061652ba0f28dcf6f50",
     "d33dc2be8b0074be4e16d89a4b615f0e6bc32d99fb513cb75e20c09cd0fab4b6",
     "3b0acf7c8b2f03bec95d9e9bba4f82e88c79ad3d98590988852e6c06deb48af0",
-    "841f3bbeec23f04c5decae75c9cfd6ea6a397992c7e4d7cd4195dc9dd919cd1a"
+    "841f3bbeec23f04c5decae75c9cfd6ea6a397992c7e4d7cd4195dc9dd919cd1a",
+    "3f37b7453397f577a1db5cf2db7f709ffa4b09194869e07970d0881239b7a218"
   ],
   "schema_version": 1
 }

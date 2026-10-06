@@ -314,11 +314,32 @@ func (i Identity) EndpointBase() string {
 	return i.DataPlaneEndpoints.HTTPBase(i.DefaultMaster, i.DefaultPort, i.DefaultPath)
 }
 
+// EndpointFor returns the public data-plane endpoint for a protocol, or "".
+//
+// An identity with no explicit WSS endpoint whose DefaultMaster is itself a
+// wss:// or ws:// URL (any case) uses it for WSS. The API's identify payload,
+// which a setup-link claim writes to the identity file as it is, used to carry
+// only default_master; reading no WSS endpoint from it put every such client
+// on HTTPS polling. An explicit endpoint still wins, an https:// master still
+// gives none, and the master is never an MQTT endpoint. Whether WSS is used at
+// all is still SupportsProtocol's call, so a hub that disables it keeps HTTPS.
+// The Python reference, Node, Kotlin, .NET and Swift read it the same way.
 func (i Identity) EndpointFor(protocol HubProtocol) string {
 	if protocol == ProtocolHTTPS {
 		return i.EndpointBase()
 	}
-	return i.DataPlaneEndpoints.EndpointFor(protocol)
+	if endpoint := i.DataPlaneEndpoints.EndpointFor(protocol); endpoint != "" {
+		return endpoint
+	}
+	if protocol == ProtocolWSS && isWebSocketURL(i.DefaultMaster) {
+		return i.DefaultMaster
+	}
+	return ""
+}
+
+func isWebSocketURL(value string) bool {
+	lowered := strings.ToLower(value)
+	return strings.HasPrefix(lowered, "wss://") || strings.HasPrefix(lowered, "ws://")
 }
 
 func (i Identity) EnabledProtocols() []HubProtocol {

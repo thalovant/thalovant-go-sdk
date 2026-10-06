@@ -2195,3 +2195,95 @@ func TestWSSSendCleartextSurvivesAConcurrentDisconnect(t *testing.T) {
 	group.Wait()
 	// Reaching here without a panic or a race report is the assertion.
 }
+
+// setupLinkIdentity is what the API's identify payload carried, and what a
+// setup-link claim writes to the identity file unchanged: the master URL and
+// no data-plane endpoints.
+func setupLinkIdentity(t *testing.T, overrides map[string]any) Identity {
+	t.Helper()
+	values := map[string]any{
+		"access_key":     "client-access-key",
+		"password":       "client-password",
+		"site_id":        "stronghold",
+		"default_master": "wss://daily-desk.thalovant.io",
+		"default_port":   443,
+	}
+	for key, value := range overrides {
+		values[key] = value
+	}
+	identity, err := IdentityFromMap(values)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return identity
+}
+
+func TestAWSSMasterIsTheWSSEndpointWhenNoneIsGiven(t *testing.T) {
+	identity := setupLinkIdentity(t, nil)
+	if got := identity.EndpointFor(ProtocolWSS); got != "wss://daily-desk.thalovant.io" {
+		t.Fatalf("unexpected wss endpoint %q", got)
+	}
+	if got := identity.EndpointFor(ProtocolHTTPS); got != "https://daily-desk.thalovant.io:443" {
+		t.Fatalf("unexpected https endpoint %q", got)
+	}
+}
+
+func TestAWSMasterIsReadWhateverItsCase(t *testing.T) {
+	identity := setupLinkIdentity(t, map[string]any{"default_master": "WS://hub.local"})
+	if got := identity.EndpointFor(ProtocolWSS); got != "WS://hub.local" {
+		t.Fatalf("unexpected wss endpoint %q", got)
+	}
+}
+
+func TestAnExplicitWSSEndpointStillWinsOverTheMaster(t *testing.T) {
+	identity := setupLinkIdentity(t, map[string]any{
+		"data_plane_endpoints": map[string]any{"wss": "wss://socket.example.com/hivemind/public"},
+	})
+	if got := identity.EndpointFor(ProtocolWSS); got != "wss://socket.example.com/hivemind/public" {
+		t.Fatalf("unexpected wss endpoint %q", got)
+	}
+}
+
+func TestAnHTTPMasterGivesNoWSSEndpoint(t *testing.T) {
+	for _, master := range []string{"https://daily-desk.thalovant.io", "http://hub.local"} {
+		identity := setupLinkIdentity(t, map[string]any{"default_master": master})
+		if got := identity.EndpointFor(ProtocolWSS); got != "" {
+			t.Fatalf("%s: unexpected wss endpoint %q", master, got)
+		}
+	}
+}
+
+func TestTheMasterIsNotAnMQTTEndpoint(t *testing.T) {
+	identity := setupLinkIdentity(t, nil)
+	if got := identity.EndpointFor(ProtocolMQTT); got != "" {
+		t.Fatalf("unexpected mqtt endpoint %q", got)
+	}
+}
+
+func TestNewClientUsesWSSForAnIdentityFromASetupLink(t *testing.T) {
+	// Reading no WSS endpoint from a setup-link identity put a desktop
+	// satellite on HTTPS polling while its hub served WebSocket.
+	client, err := NewClientWithOptions(setupLinkIdentity(t, nil), ClientOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := client.Transport.(*WSSTransport); !ok {
+		t.Fatalf("expected WSS transport, got %T", client.Transport)
+	}
+}
+
+func TestNewClientKeepsHTTPSWhenTheHubDisablesWSS(t *testing.T) {
+	identity := setupLinkIdentity(t, map[string]any{
+		"protocols": map[string]any{
+			"wss":  map[string]any{"enabled": false},
+			"http": map[string]any{"enabled": true},
+		},
+	})
+	client, err := NewClientWithOptions(identity, ClientOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := client.Transport.(*HTTPTransport); !ok {
+		t.Fatalf("expected HTTP transport, got %T", client.Transport)
+	}
+}
