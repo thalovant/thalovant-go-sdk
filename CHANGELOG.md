@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.4 — 2026-10-06
+
+The Python reference's 0.9.5 round (reference digest `3f37b7453397…`).
+
+- `Identity.EndpointFor(ProtocolWSS)` falls back to `DefaultMaster` when the identity names no WSS endpoint and the master is a `wss://` or `ws://` URL, in any case. It used to return `""`, so `NewClient` chose HTTPS polling for every identity a setup link wrote. The API's identify payload carried `default_master` and no `data_plane_endpoints` (thalovant-api#408 now adds both `data_plane_endpoints` and `protocols`). An explicit WSS endpoint still wins, and an `https://` or `http://` master still gives none. The master is never read as an MQTT endpoint. Whether WSS is used at all is still `SupportsProtocol`'s call, so a hub whose `protocols.wss.enabled` is false keeps HTTPS. This matches the Python reference, Node, Kotlin, .NET and Swift. Existing identity files need no re-pairing.
+
 ## 0.12.1 — 2026-09-30
 
 The Python reference's 0.9.2 round.
