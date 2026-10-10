@@ -12,18 +12,32 @@ permissions:
 
 jobs:
   test:
+    # Named without the race flag, so the check names stay as they were.
+    name: test (${{ matrix.os }}, ${{ matrix.go }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
             go: '1.26.x'
+            race: true
           - os: ubuntu-latest
             go: stable
+            race: true
+          # The race detector stays on the amd64 legs. On arm64 argon2's
+          # blamka core is plain Go rather than assembly, so -race instruments
+          # it, and the ~190 PSK derivations the suite runs at the production
+          # cost (64 MiB, t=3) cost ~1.3s each instead of ~0.15s. That held
+          # this leg at 7.5-10 minutes against Go's 10-minute package timeout.
+          # Compiling only argon2 with -race=false is not an option: partial
+          # instrumentation produced false DATA RACE reports. macOS still runs
+          # every test, without -race.
           - os: macos-latest
             go: stable
+            race: false
           - os: windows-latest
             go: stable
+            race: true
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -36,7 +50,7 @@ jobs:
           cache: false
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
-      - run: go test -race -count=1 ./...
+      - run: go test ${{ matrix.race && '-race' || '' }} -count=1 -timeout=5m ./...
 
   security:
     runs-on: ubuntu-latest
