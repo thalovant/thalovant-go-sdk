@@ -89,6 +89,12 @@ type IntentOptions struct {
 	// person can say from a hub which demonstrably answers in that language
 	// is a fault, not a preference. HubIntentInventory.ListedIn records which
 	// tag answered. See UsualForm.
+	//
+	// When the usual form has no sentences either, the hub did not load the
+	// language, and Nearest asks ovos.intent.list once more with no language
+	// at all, once per Intents call: the hub then lists every language it
+	// loaded, and NearestHubLanguage picks the one to list in. A hub that
+	// cannot answer that leaves the result as it was.
 	Nearest *bool
 }
 
@@ -447,8 +453,14 @@ type HubIntentInventory struct {
 	// only, or its template rows were all disabled) and the language's usual
 	// form answered instead (see IntentOptions.Nearest): after an empty
 	// listing whenever the usual form listed anything, otherwise only when
-	// the usual form's listing has an enabled template row. Callers
-	// rendering sentences must read them from the tag that answered.
+	// the usual form's listing has an enabled template row. When neither
+	// has a sentence, it is the language of the hub's own NearestHubLanguage
+	// picked, in the hub's spelling ("en-US"): a hub lists nothing under a
+	// language it did not load and still answers a person speaking it, in
+	// its own language. Two languages that land on the same listing share
+	// one tag, the first spelling used. Callers rendering sentences must
+	// read them from the tag that answered, and should say which language
+	// they are in when it is not the person's.
 	ListedIn []string `json:"listed_in"`
 }
 
@@ -517,6 +529,10 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 	// order. Everything downstream reads listed by these rather than by what
 	// was asked for, because that is where the rows are.
 	listedIn := make([]string, len(asked))
+	// The hub's whole manifest, asked at most once and only when a language
+	// still has no sentence after its usual form.
+	var hub *hubLanguages
+	hubAsked := false
 	for index, lang := range asked {
 		rows, err := c.ListIntents(ctx, lang, IntentOptions{
 			Timeout:            options.Timeout,
@@ -580,12 +596,49 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 				}
 			}
 		}
+		if options.nearest() && !canCarrySentences(rows) {
+			// Still nothing a person can say: the hub did not load this
+			// language. A hub loads its lang and secondary_langs (en-US and
+			// fr-FR on most public hubs) and lists nothing under any other
+			// tag, so a phone set to Spanish, Japanese or German was shown
+			// an empty list -- by a hub that answered every one of those
+			// people, in its own language. Measured on all 13 public hubs on
+			// 2026-10-11.
+			//
+			// The listing without a language names every language the hub
+			// loaded; list in the closest of them and say so in ListedIn.
+			// Asked once per call, only here, and taken only when it has
+			// sentences, so it never replaces names with fewer names. A hub
+			// that cannot answer it leaves the result exactly as it was.
+			if !hubAsked {
+				hubAsked = true
+				found, err := c.listHubLanguages(ctx, options.Timeout, options.describe())
+				if err != nil {
+					return HubIntentInventory{}, err
+				}
+				hub = found
+			}
+			if hub != nil {
+				if chosen, ok := NearestHubLanguage(lang, hub.listings, hub.sessionLang); ok {
+					rows = hub.rows(chosen)
+					tag = chosen
+				}
+			}
+		}
+		// One key per language: en-us asked and en-US chosen for another
+		// tag are the same listing, and two keys would split its phrases.
+		for seen := range listed {
+			if SameLanguage(seen, tag) {
+				tag = seen
+				break
+			}
+		}
 		listed[tag] = rows
 		listedIn[index] = tag
 	}
 
 	var wanted []intentKey
-	for _, lang := range listedIn {
+	for _, lang := range uniqueTags(listedIn) {
 		for _, row := range listed[lang] {
 			if row.Enabled && row.Definition == nil && row.Method == "template" {
 				wanted = append(wanted, intentKey{row.SkillID, row.IntentName, lang})
@@ -603,7 +656,7 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 
 	byName := map[string]*HubIntent{}
 	var order []string
-	for _, lang := range listedIn {
+	for _, lang := range uniqueTags(listedIn) {
 		for _, row := range listed[lang] {
 			id := row.SkillID + ":" + row.IntentName
 			intent, ok := byName[id]
@@ -747,6 +800,150 @@ func containsLanguage(tags []string, lang string) bool {
 	return false
 }
 
+// uniqueTags keeps the first occurrence of each tag, in order: two asked
+// languages that landed on one listing read it once.
+func uniqueTags(tags []string) []string {
+	seen := make(map[string]struct{}, len(tags))
+	unique := make([]string, 0, len(tags))
+	for _, tag := range tags {
+		if _, ok := seen[tag]; ok {
+			continue
+		}
+		seen[tag] = struct{}{}
+		unique = append(unique, tag)
+	}
+	return unique
+}
+
+// HubLanguageRows is one language of the hub's whole manifest: the rows it
+// registered under Lang, in the hub's own spelling.
+type HubLanguageRows struct {
+	Lang string
+	Rows []IntentRegistration
+}
+
+// NearestHubLanguage picks which of the hub's languages to list in for a
+// person who asked in asked, from listings in the order the hub gave them.
+//
+// Only a language with an enabled template row (a sentence to show) is a
+// candidate. The same language comes first, by the matcher the rest of OVOS
+// uses (ClosestLanguage: "en-CA" takes "en-GB" when the hub loaded no
+// "en-US"); then the hub's own language, hubLang, when it names one the hub
+// listed ("" is no hint); then the language with the most enabled template
+// rows, the first listed on a tie. It returns false when no listed language
+// carries a sentence.
+//
+// The hub does not say which language is its own. A person asking in a
+// language the hub never loaded is answered all the same -- in the hub's
+// language, by its fallback or persona -- so the sentences worth showing them
+// are the ones in that language, and this order is the closest it can get
+// without inventing a fact.
+func NearestHubLanguage(asked string, listings []HubLanguageRows, hubLang string) (string, bool) {
+	var candidates []string
+	counts := map[string]int{}
+	for _, listing := range listings {
+		count := 0
+		for _, row := range listing.Rows {
+			if row.Enabled && row.Method == "template" {
+				count++
+			}
+		}
+		if count == 0 {
+			continue
+		}
+		if _, seen := counts[listing.Lang]; !seen {
+			candidates = append(candidates, listing.Lang)
+		}
+		counts[listing.Lang] += count
+	}
+	if len(candidates) == 0 {
+		return "", false
+	}
+	if match, ok := ClosestLanguage(asked, candidates); ok {
+		return match, true
+	}
+	if strings.TrimSpace(hubLang) != "" {
+		if own, ok := ClosestLanguage(hubLang, candidates); ok {
+			return own, true
+		}
+	}
+	best := candidates[0]
+	for _, tag := range candidates[1:] {
+		if counts[tag] > counts[best] {
+			best = tag
+		}
+	}
+	return best, true
+}
+
+// hubLanguages is the hub's whole manifest, by the language each row was
+// registered in: the hub's spelling and order, "fr-fr" and "fr-FR" one group
+// under the first spelling seen. sessionLang is the language the hub stamped
+// on its reply's session: a request that names no language is answered in a
+// session the hub opened in its default language, the nearest thing to "the
+// hub's own language" the bus offers. It is a hint, not a promise, so it only
+// ever breaks a choice between languages the hub listed.
+type hubLanguages struct {
+	listings    []HubLanguageRows
+	sessionLang string
+}
+
+func (h *hubLanguages) rows(lang string) []IntentRegistration {
+	for _, listing := range h.listings {
+		if listing.Lang == lang {
+			return listing.Rows
+		}
+	}
+	return nil
+}
+
+// listHubLanguages asks ovos.intent.list with no language: every language the
+// hub loaded. include_definitions goes with it when describing, as for a
+// listing in one language. A nil result with no error means the hub refused,
+// failed or did not answer: this is only ever asked to improve an answer, and
+// an answer it cannot improve stands. A cancelled context, or any error that
+// is not a timeout or ErrRuntime, is returned.
+func (c *Client) listHubLanguages(ctx context.Context, timeout time.Duration, includeDefinitions bool) (*hubLanguages, error) {
+	data := Data{}
+	if includeDefinitions {
+		data["include_definitions"] = true
+	}
+	event, err := c.requestReply(ctx, EventIntentList, EventIntentListResponse, data, "", timeout)
+	if err != nil {
+		if ctx.Err() == nil && (errors.Is(err, ErrTimeout) || errors.Is(err, ErrRuntime)) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if event.Data["ok"] == false {
+		return nil, nil
+	}
+	found := &hubLanguages{}
+	for _, row := range registrationsFromEvent(event) {
+		if strings.TrimSpace(row.Lang) == "" {
+			continue
+		}
+		index := -1
+		for i, listing := range found.listings {
+			if SameLanguage(listing.Lang, row.Lang) {
+				index = i
+				break
+			}
+		}
+		if index < 0 {
+			found.listings = append(found.listings, HubLanguageRows{Lang: row.Lang})
+			index = len(found.listings) - 1
+		}
+		found.listings[index].Rows = append(found.listings[index].Rows, row)
+	}
+	if session, ok := event.Context["session"].(map[string]any); ok {
+		if lang, ok := session["lang"].(string); ok && strings.TrimSpace(lang) != "" {
+			found.sessionLang = lang
+		}
+	}
+	return found, nil
+}
+
 // ----------------------------------------------------------------------------
 // the wire
 // ----------------------------------------------------------------------------
@@ -759,9 +956,15 @@ type intentKey struct {
 }
 
 // intentQueryContext is the context every intent query carries: the request
-// id that correlates the reply, and the language, which the hub echoes.
+// id that correlates the reply, and the language, which the hub echoes. An
+// empty lang leaves the language out altogether, so the hub answers in a
+// session of its own language (see listHubLanguages).
 func (c *Client) intentQueryContext(lang, requestID string) Context {
-	return ContextWithCorrelation(Context{"lang": lang}, "", c.Identity.SiteID, lang, requestID)
+	raw := Context{}
+	if lang != "" {
+		raw["lang"] = lang
+	}
+	return ContextWithCorrelation(raw, "", c.Identity.SiteID, lang, requestID)
 }
 
 // requestReply sends one bus query and returns its reply, matched by request
