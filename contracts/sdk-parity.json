@@ -206,7 +206,7 @@
     },
     "listing": {
       "implementation": {
-        "intents.go": "a58c06c1acbf418508070985a677be82e9a86acc707450bff2e5332b4b743903",
+        "intents.go": "f96c426086c1d91a8350982d0bc5f25deeb107a1e95e6d3f0f9fc02bf52c80f0",
         "listing.go": "b33a452cf4eb5941dc3c2691a2c856b61dcd9017c05592040f6ba9a94a9d6ecf"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",

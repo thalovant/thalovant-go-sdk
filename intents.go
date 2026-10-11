@@ -81,11 +81,14 @@ type IntentOptions struct {
 	Describe           *bool
 	Fallback           *bool
 	IncludeDefinitions bool
-	// Nearest retries a listing with no sentences (empty, or keyword rows
-	// only) once in the language's usual form. Nil means on: a listing that
-	// returns nothing a person can say from a hub which demonstrably answers
-	// in that language is a fault, not a preference.
-	// See UsualForm.
+	// Nearest retries a listing with no sentences (no enabled template row:
+	// empty, keyword rows only, or template rows all disabled) once in the
+	// language's usual form, and takes the usual form's listing when it has
+	// an enabled template row, or when the first listing was empty and the
+	// usual form's is not. Nil means on: a listing that returns nothing a
+	// person can say from a hub which demonstrably answers in that language
+	// is a fault, not a preference. HubIntentInventory.ListedIn records which
+	// tag answered. See UsualForm.
 	Nearest *bool
 }
 
@@ -439,10 +442,13 @@ type HubIntentInventory struct {
 	Source    string            `json:"source"`
 	Denied    []string          `json:"denied"`
 	// ListedIn is the tag the hub actually listed each requested language
-	// under, in Languages order. Equal to Languages unless a listing came
-	// back empty and the language's usual form answered instead, which is the
-	// only way the two differ. Callers rendering sentences must read them
-	// from the tag that answered.
+	// under, in Languages order. It equals Languages unless the first
+	// listing had no enabled template row (it was empty, held keyword rows
+	// only, or its template rows were all disabled) and the language's usual
+	// form answered instead (see IntentOptions.Nearest): after an empty
+	// listing whenever the usual form listed anything, otherwise only when
+	// the usual form's listing has an enabled template row. Callers
+	// rendering sentences must read them from the tag that answered.
 	ListedIn []string `json:"listed_in"`
 }
 
