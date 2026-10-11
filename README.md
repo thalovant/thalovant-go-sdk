@@ -11,7 +11,7 @@ Full documentation: <https://docs.thalovant.com/developers/sdks/go/>
 
 ## Requirements
 
-- Go 1.26 or newer, so the SDK receives supported upstream networking security fixes.
+- Go 1.26.9 or newer (Go 1.27.2 or newer on the 1.27 line), so the SDK builds with a standard library that has the upstream HTTP/2 security fixes (GO-2026-6611).
 - A Thalovant account with API access for authenticated control-plane actions, a hub id or slug, and a client identity for that hub (create one through the API or use one downloaded from the dashboard).
 
 ## Install

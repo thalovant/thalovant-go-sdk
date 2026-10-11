@@ -19,7 +19,7 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            go: '1.26.x'
+            go: '1.26.9'
             race: true
           - os: ubuntu-latest
             go: stable
