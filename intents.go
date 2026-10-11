@@ -104,6 +104,9 @@ func intentOptions(opts []IntentOptions) IntentOptions {
 		if opt.IncludeDefinitions {
 			merged.IncludeDefinitions = true
 		}
+		if opt.Nearest != nil {
+			merged.Nearest = opt.Nearest
+		}
 	}
 	if merged.Timeout <= 0 {
 		merged.Timeout = DefaultIntentTimeout

@@ -1119,20 +1119,38 @@ func TestIntentOptionsMerge(t *testing.T) {
 		wantDescribe bool
 		wantFallback bool
 		wantInclude  bool
+		wantNearest  bool
 	}{
-		{name: "none", wantTimeout: DefaultIntentTimeout, wantDescribe: true, wantFallback: true},
-		{name: "zero value", opts: []IntentOptions{{}}, wantTimeout: DefaultIntentTimeout, wantDescribe: true, wantFallback: true},
-		{name: "negative timeout is the default", opts: []IntentOptions{{Timeout: -time.Second}}, wantTimeout: DefaultIntentTimeout, wantDescribe: true, wantFallback: true},
-		{name: "flags off", opts: []IntentOptions{{Timeout: time.Second, Describe: boolPointer(false), Fallback: boolPointer(false), IncludeDefinitions: true}}, wantTimeout: time.Second, wantInclude: true},
-		{name: "later options win", opts: []IntentOptions{{Timeout: time.Second, Describe: boolPointer(false)}, {Timeout: 2 * time.Second, Describe: boolPointer(true)}}, wantTimeout: 2 * time.Second, wantDescribe: true, wantFallback: true},
+		{name: "none", wantTimeout: DefaultIntentTimeout, wantDescribe: true, wantFallback: true, wantNearest: true},
+		{name: "zero value", opts: []IntentOptions{{}}, wantTimeout: DefaultIntentTimeout, wantDescribe: true, wantFallback: true, wantNearest: true},
+		{name: "negative timeout is the default", opts: []IntentOptions{{Timeout: -time.Second}}, wantTimeout: DefaultIntentTimeout, wantDescribe: true, wantFallback: true, wantNearest: true},
+		{name: "flags off", opts: []IntentOptions{{Timeout: time.Second, Describe: boolPointer(false), Fallback: boolPointer(false), IncludeDefinitions: true, Nearest: boolPointer(false)}}, wantTimeout: time.Second, wantInclude: true},
+		{name: "later options win", opts: []IntentOptions{{Timeout: time.Second, Describe: boolPointer(false), Nearest: boolPointer(false)}, {Timeout: 2 * time.Second, Describe: boolPointer(true), Nearest: boolPointer(true)}}, wantTimeout: 2 * time.Second, wantDescribe: true, wantFallback: true, wantNearest: true},
+		{name: "nearest off survives a later option that leaves it unset", opts: []IntentOptions{{Nearest: boolPointer(false)}, {Timeout: time.Second}}, wantTimeout: time.Second, wantDescribe: true, wantFallback: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			merged := intentOptions(tc.opts)
-			if merged.Timeout != tc.wantTimeout || merged.describe() != tc.wantDescribe || merged.fallback() != tc.wantFallback || merged.IncludeDefinitions != tc.wantInclude {
+			if merged.Timeout != tc.wantTimeout || merged.describe() != tc.wantDescribe || merged.fallback() != tc.wantFallback || merged.IncludeDefinitions != tc.wantInclude || merged.nearest() != tc.wantNearest {
 				t.Fatalf("intentOptions(%+v) = %+v", tc.opts, merged)
 			}
 		})
+	}
+}
+
+// Nearest: false reaches Intents. intentOptions merged every option but this
+// one, so the retry in the usual form could not be turned off.
+func TestNearestOffListsExactlyTheTagAsked(t *testing.T) {
+	hub := newIntentHub()
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-CA"}, IntentOptions{Nearest: boolPointer(false)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := listedLanguages(hub); !reflect.DeepEqual(got, []string{"en-CA"}) {
+		t.Fatalf("asked for exactly en-CA, but listed %v", got)
+	}
+	if !reflect.DeepEqual(inventory.ListedIn, []string{"en-CA"}) || len(inventory.Intents()) != 0 {
+		t.Fatalf("the hub has nothing under en-CA: listed in %v, intents %v", inventory.ListedIn, intentIDs(inventory))
 	}
 }
 

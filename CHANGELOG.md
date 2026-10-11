@@ -3,6 +3,7 @@
 ## Unreleased
 
 - `Client.Intents` asks the language's usual form when the first listing has no sentences, not only when it is empty. `Nearest` retried `en-CA` as `en-us` only on an empty listing, and a listing of keyword intents alone is not empty but has nothing a person can say: the Pop Culture hub lists five Source Scout keyword intents under `en-CA` (that skill registers keyword vocabulary in 63 regional tags) and 141 intents with sentences under `en-US`, so a phone in Toronto was shown five names. Now the usual form is asked whenever the first listing has no enabled template row, and its listing is taken when it has one, or when the first was empty. A listing with a template row is still asked once, and keyword names are never traded for other names. A retry that times out or fails with `ErrRuntime` (`ok: false`, or a `*PolicyDeniedError`) keeps the names the first listing gave; after an empty first listing it returns that error, where this port used to swallow it and return an empty inventory, so it now matches the Python reference. Any other retry error, and a cancelled context, is returned as it is. This follows the Python reference (thalovant-python-sdk#103).
+- `IntentOptions.Nearest` reaches `Client.Intents`. `intentOptions` merged every option but `Nearest`, so `Nearest: false` was silently ignored and the retry in the usual form could not be turned off.
 
 ## 0.12.4 — 2026-10-06
 
