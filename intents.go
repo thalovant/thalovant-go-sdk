@@ -81,9 +81,10 @@ type IntentOptions struct {
 	Describe           *bool
 	Fallback           *bool
 	IncludeDefinitions bool
-	// Nearest retries an empty listing once in the language's usual form.
-	// Nil means on: a listing that returns nothing from a hub which
-	// demonstrably answers in that language is a fault, not a preference.
+	// Nearest retries a listing with no sentences (empty, or keyword rows
+	// only) once in the language's usual form. Nil means on: a listing that
+	// returns nothing a person can say from a hub which demonstrably answers
+	// in that language is a fault, not a preference.
 	// See UsualForm.
 	Nearest *bool
 }
@@ -102,6 +103,9 @@ func intentOptions(opts []IntentOptions) IntentOptions {
 		}
 		if opt.IncludeDefinitions {
 			merged.IncludeDefinitions = true
+		}
+		if opt.Nearest != nil {
+			merged.Nearest = opt.Nearest
 		}
 	}
 	if merged.Timeout <= 0 {
@@ -123,6 +127,17 @@ func (o IntentOptions) nearest() bool {
 		return true
 	}
 	return *o.Nearest
+}
+
+// canCarrySentences reports whether a listing has an enabled template row:
+// the only kind with sentences.
+func canCarrySentences(rows []IntentRegistration) bool {
+	for _, row := range rows {
+		if row.Enabled && row.Method == "template" {
+			return true
+		}
+	}
+	return false
 }
 
 // SameLanguage reports whether two language tags name the same language:
@@ -515,7 +530,7 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 			return inventoryFromNames(names, asked, EventIntentList), nil
 		}
 		tag := lang
-		if len(rows) == 0 && options.nearest() {
+		if options.nearest() && !canCarrySentences(rows) {
 			// Listing and asking do not agree about languages. The hub
 			// matches an utterance to the closest language it knows, so a
 			// phone set to en-CA is understood by skills registered under
@@ -523,15 +538,37 @@ func (c *Client) Intents(ctx context.Context, languages []string, opts ...Intent
 			// lists nothing for en-CA and a person is shown an empty hub by
 			// the hub that is answering them.
 			//
-			// Once only, and only on an empty listing: a hub that answered is
-			// never asked twice, and a language whose usual form is itself
-			// has nothing to retry with.
+			// Not only on an empty listing: on a listing with no template
+			// row, which can never carry a sentence. The Pop Culture hub
+			// (2026-10-11) listed five keyword intents of one skill under
+			// en-CA -- that skill registers keyword vocabulary in 63
+			// regional tags -- and 141 intents with sentences under en-US;
+			// five names is not an answer a person can use.
+			//
+			// Once only: a listing with a template row is never asked
+			// twice, a language whose usual form is itself has nothing to
+			// retry with, and the usual form's listing is taken only when
+			// it can carry sentences (or the first was empty), so keyword
+			// names are never traded for other names.
 			if usual, ok := UsualForm(lang); ok {
 				retried, err := c.ListIntents(ctx, usual, IntentOptions{
 					Timeout:            options.Timeout,
 					IncludeDefinitions: options.describe(),
 				})
-				if err == nil && len(retried) > 0 {
+				if err != nil {
+					// A retry never makes the answer worse than the first
+					// listing. Names the hub already gave stand when the
+					// usual form times out, is refused or answers ok: false;
+					// only an empty first listing lets the failure through,
+					// exactly as before. A cancelled context is the
+					// caller's, never the hub's, and always returns.
+					recoverable := ctx.Err() == nil && (errors.Is(err, ErrTimeout) || errors.Is(err, ErrRuntime))
+					if !recoverable || len(rows) == 0 {
+						return HubIntentInventory{}, err
+					}
+					retried = nil
+				}
+				if canCarrySentences(retried) || (len(retried) > 0 && len(rows) == 0) {
 					rows = retried
 					tag = usual
 				}
