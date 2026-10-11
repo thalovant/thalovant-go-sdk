@@ -1,6 +1,6 @@
 module github.com/thalovant/thalovant-go-sdk
 
-go 1.26.0
+go 1.26.9
 
 require (
 	github.com/dlclark/regexp2/v2 v2.8.2
