@@ -77,7 +77,14 @@ type intentHub struct {
 	listErrorIn map[string]bool
 	// describeUnknown names the intents the hub describes as {"ok": false},
 	// the shape it uses for a registration it does not know.
-	describeUnknown   map[string]bool
+	describeUnknown map[string]bool
+	// hubLang is the hub's default language, stamped on the session of the
+	// reply to a listing that named no language -- what a live hub does.
+	hubLang string
+	// skills is what ovos.skills.list answers; nil means the hub never
+	// answers it. ovos.skills.fallback.list is never answered: ovos-core
+	// added it in #951 and took it out again in #988.
+	skills            []any
 	definitionsInList bool
 	echoRequestID     bool
 	repeats           int
@@ -147,7 +154,12 @@ func (h *intentHub) EmitBus(_ context.Context, eventType string, data Data, even
 		return nil
 	}
 	lang := stringValue(data["lang"])
+	_, namesLanguage := data["lang"]
 	switch eventType {
+	case EventSkillsList:
+		if h.skills != nil {
+			h.deliver(EventSkillsListResponse, Data{"ok": true, "skills": h.skills}, eventContext)
+		}
 	case EventIntentList:
 		if h.listError != "" || h.listErrorIn[lang] {
 			reason := h.listError
@@ -159,13 +171,19 @@ func (h *intentHub) EmitBus(_ context.Context, eventType string, data Data, even
 		}
 		rows := []any{}
 		for _, sample := range h.registrations {
-			if sample.lang != lang {
-				continue
+			// A listing that names no language lists every language the
+			// hub loaded, each in the hub's spelling.
+			stored := hubSpelling(sample.lang)
+			if namesLanguage {
+				if sample.lang != lang {
+					continue
+				}
+				stored = storedLanguage(lang)
 			}
 			row := map[string]any{
 				"skill_id":    sample.skillID,
 				"intent_name": sample.name,
-				"lang":        storedLanguage(lang),
+				"lang":        stored,
 				"method":      sampleMethod(sample),
 				"enabled":     true,
 				"session_id":  "default",
@@ -175,7 +193,14 @@ func (h *intentHub) EmitBus(_ context.Context, eventType string, data Data, even
 			}
 			rows = append(rows, row)
 		}
-		h.deliver(EventIntentListResponse, Data{"ok": true, "intents": rows}, eventContext)
+		replyContext := eventContext
+		if !namesLanguage && h.hubLang != "" {
+			replyContext = MergeContext(eventContext, nil)
+			session := sessionFromContext(replyContext)
+			session["lang"] = h.hubLang
+			replyContext["session"] = session
+		}
+		h.deliver(EventIntentListResponse, Data{"ok": true, "intents": rows}, replyContext)
 	case EventIntentDescribe:
 		h.describeQueued = append(h.describeQueued, len(h.events))
 		if h.describeUnknown[stringValue(data["intent_name"])] {
@@ -184,7 +209,7 @@ func (h *intentHub) EmitBus(_ context.Context, eventType string, data Data, even
 		}
 		definitions := []any{}
 		for _, sample := range h.registrations {
-			if sample.lang != lang || sample.skillID != data["skill_id"] || sample.name != data["intent_name"] {
+			if !SameLanguage(sample.lang, lang) || sample.skillID != data["skill_id"] || sample.name != data["intent_name"] {
 				continue
 			}
 			definitions = append(definitions, map[string]any{"method": sampleMethod(sample), "definition": definitionOf(sample)})
@@ -272,6 +297,16 @@ func storedLanguage(lang string) string {
 		return "fr-FR"
 	}
 	return lang
+}
+
+// hubSpelling is how the runtime spells a tag in a listing of every
+// language: "en-us" as "en-US".
+func hubSpelling(lang string) string {
+	base, region, found := strings.Cut(lang, "-")
+	if !found {
+		return lang
+	}
+	return base + "-" + strings.ToUpper(region)
 }
 
 func sampleMethod(sample intentSample) string {
@@ -1472,5 +1507,400 @@ func TestAListingWithSentencesIsNotRetriedForItsKeywordRows(t *testing.T) {
 	}
 	if !reflect.DeepEqual(inventory.ListedIn, []string{"en-CA"}) {
 		t.Fatalf("expected en-CA, listed in %v", inventory.ListedIn)
+	}
+}
+
+// A language the hub never loaded --------------------------------------------
+//
+// Measured on all 13 public hubs on 2026-10-11: a hub loads its lang and
+// secondary_langs (en-US and fr-FR on most) and lists nothing under any other
+// tag. A phone set to Spanish, Japanese or German asked in its own language,
+// then its usual form, got nothing twice and showed an empty list -- while the
+// hub answered those people in its own language.
+
+// frenchFirst is the observed hub listing French first, as Daily Desk and
+// Rewrite Forge do.
+func frenchFirst() []intentSample {
+	var french, rest []intentSample
+	for _, sample := range observedRegistrations {
+		if sample.lang == "fr-fr" {
+			french = append(french, sample)
+		} else {
+			rest = append(rest, sample)
+		}
+	}
+	return withRegistrations(french, rest)
+}
+
+// languageLessListings are the listings the client sent with no language.
+func languageLessListings(hub *intentHub) []emittedQuery {
+	var found []emittedQuery
+	for _, query := range hub.queries(EventIntentList) {
+		if _, ok := query.data["lang"]; !ok {
+			found = append(found, query)
+		}
+	}
+	return found
+}
+
+func TestALanguageTheHubNeverLoadedIsListedInTheHubsOwn(t *testing.T) {
+	for _, phone := range []string{"es-ES", "ja-JP", "de-DE"} {
+		t.Run(phone, func(t *testing.T) {
+			hub := newIntentHub()
+			hub.registrations = frenchFirst()
+			hub.hubLang = "en-US"
+			inventory, err := intentClient(hub).Intents(context.Background(), []string{phone})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(inventory.Languages, []string{phone}) {
+				t.Fatalf("languages: %v", inventory.Languages)
+			}
+			if !reflect.DeepEqual(inventory.ListedIn, []string{"en-US"}) {
+				t.Fatalf("the language the hub answers that person in, got %v", inventory.ListedIn)
+			}
+			if !inventory.HasPhrases() {
+				t.Fatal("no sentences")
+			}
+			weather := intentByID(t, inventory, weatherSkill+":current.weather")
+			if got := weather.PhrasesFor(inventory.ListedIn[0]); len(got) == 0 || got[0] != "what is the weather" {
+				t.Fatalf("expected the English sentences, got %v", got)
+			}
+			if !reflect.DeepEqual(intentIDs(inventory), []string{shadowSkill + ":custos.incidents", weatherSkill + ":current.weather"}) {
+				t.Fatalf("intents: %v", intentIDs(inventory))
+			}
+			whole := languageLessListings(hub)
+			if len(whole) != 1 {
+				t.Fatalf("the hub's own listing is asked once, got %v", listedLanguages(hub))
+			}
+			// No language anywhere in the request, so the hub answers in a
+			// session of its own language.
+			if _, ok := whole[0].context["lang"]; ok {
+				t.Fatalf("the context names a language: %v", whole[0].context)
+			}
+			if _, ok := sessionFromContext(whole[0].context)["lang"]; ok {
+				t.Fatalf("the session names a language: %v", whole[0].context)
+			}
+			if whole[0].data["include_definitions"] != true {
+				t.Fatalf("describing asks for definitions: %v", whole[0].data)
+			}
+		})
+	}
+}
+
+// en-CA's usual form is en-US; a hub that loaded en-GB has neither, and
+// English comes before the hub's own French.
+func TestTheSameLanguageInAnotherRegionComesFirst(t *testing.T) {
+	hub := newIntentHub()
+	var registrations []intentSample
+	for _, sample := range frenchFirst() {
+		if sample.lang == "en-us" {
+			sample.lang = "en-gb"
+		}
+		registrations = append(registrations, sample)
+	}
+	hub.registrations = registrations
+	hub.hubLang = "fr-FR"
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-CA"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(inventory.ListedIn, []string{"en-GB"}) {
+		t.Fatalf("English before the hub's own French, got %v", inventory.ListedIn)
+	}
+}
+
+func TestWithoutASessionHintTheLanguageWithMostSentencesWins(t *testing.T) {
+	hub := newIntentHub()
+	hub.registrations = frenchFirst()
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"ja-JP"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(inventory.ListedIn, []string{"en-US"}) {
+		t.Fatalf("two intents in English, one in French, got %v", inventory.ListedIn)
+	}
+}
+
+func TestNearestHubLanguage(t *testing.T) {
+	rows := func(lang, method string) []IntentRegistration {
+		return []IntentRegistration{{SkillID: "s", IntentName: "i", Lang: lang, Method: method, Enabled: true}}
+	}
+	listed := []HubLanguageRows{{Lang: "fr-FR", Rows: rows("fr-FR", "template")}, {Lang: "en-US", Rows: rows("en-US", "template")}}
+	cases := []struct {
+		name, asked, hint, want string
+		ok                      bool
+	}{
+		{"a tie goes to the first listed", "ja-JP", "", "fr-FR", true},
+		{"the hub's own language", "ja-JP", "en-US", "en-US", true},
+		{"a hint the hub never listed is no hint", "ja-JP", "ko-KR", "fr-FR", true},
+		{"the same language before the hint", "fr-CA", "en-US", "fr-FR", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := NearestHubLanguage(tc.asked, listed, tc.hint)
+			if got != tc.want || ok != tc.ok {
+				t.Fatalf("NearestHubLanguage(%q, %q) = %q, %v", tc.asked, tc.hint, got, ok)
+			}
+		})
+	}
+	keywordOnly := []HubLanguageRows{{Lang: "en-US", Rows: rows("en-US", "keyword")}}
+	if got, ok := NearestHubLanguage("ja-JP", keywordOnly, "en-US"); ok || got != "" {
+		t.Fatalf("keyword rows carry no sentence, got %q", got)
+	}
+	disabled := []HubLanguageRows{{Lang: "en-US", Rows: []IntentRegistration{{Lang: "en-US", Method: "template"}}}}
+	if _, ok := NearestHubLanguage("ja-JP", disabled, ""); ok {
+		t.Fatal("a disabled template row carries no sentence")
+	}
+	if _, ok := NearestHubLanguage("ja-JP", nil, "en-US"); ok {
+		t.Fatal("nothing listed, nothing chosen")
+	}
+}
+
+func TestALanguageTheHubLoadedNeverAsksTheWholeManifest(t *testing.T) {
+	hub := newIntentHub()
+	hub.hubLang = "en-US"
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"fr-fr", "en-us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(inventory.ListedIn, []string{"fr-fr", "en-us"}) {
+		t.Fatalf("listed in %v", inventory.ListedIn)
+	}
+	if whole := languageLessListings(hub); len(whole) != 0 {
+		t.Fatalf("asked the whole manifest: %v", listedLanguages(hub))
+	}
+}
+
+func TestTwoLanguagesThatLandOnTheSameHubLanguageShareOneListing(t *testing.T) {
+	hub := newIntentHub()
+	hub.hubLang = "en-US"
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-us", "ja-JP"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(inventory.ListedIn, []string{"en-us", "en-us"}) {
+		t.Fatalf("one key per language, not en-us and en-US: %v", inventory.ListedIn)
+	}
+	weather := intentByID(t, inventory, weatherSkill+":current.weather")
+	if !reflect.DeepEqual(weather.Languages, []string{"en-us"}) || len(weather.Phrases) != 1 {
+		t.Fatalf("phrases split across keys: %+v", weather)
+	}
+}
+
+// deniedWholeListingHub refuses the listing that names no language, and only
+// that one.
+type deniedWholeListingHub struct{ *intentHub }
+
+func (h deniedWholeListingHub) EmitBus(ctx context.Context, eventType string, data Data, eventContext Context) error {
+	if _, named := data["lang"]; eventType == EventIntentList && !named {
+		h.mu.Lock()
+		h.emitted = append(h.emitted, emittedQuery{eventType: eventType, data: cloneMap(data), context: MergeContext(eventContext, nil)})
+		h.mu.Unlock()
+		h.deliver(EventPolicyDenied, Data{"denied_type": eventType, "code": "acl_disallowed_type"}, eventContext)
+		return nil
+	}
+	return h.intentHub.EmitBus(ctx, eventType, data, eventContext)
+}
+
+func TestAHubThatCannotListItsLanguagesLeavesTheAnswerAsItWas(t *testing.T) {
+	for _, failure := range []string{"silent", "refused", "denied"} {
+		t.Run(failure, func(t *testing.T) {
+			hub := newIntentHub()
+			hub.registrations = withRegistrations(observedRegistrations, scoutKeywords("ja-JP"))
+			var transport RuntimeTransport = hub
+			switch failure {
+			case "silent":
+				hub.deaf = func(eventType string, data Data) bool {
+					_, named := data["lang"]
+					return eventType == EventIntentList && !named
+				}
+			case "refused":
+				hub.listErrorIn = map[string]bool{"": true}
+			case "denied":
+				transport = deniedWholeListingHub{hub}
+			}
+			client := &Client{Identity: Identity{SiteID: "site"}, Transport: transport}
+			inventory, err := client.Intents(context.Background(), []string{"ja-JP"}, IntentOptions{Timeout: 200 * time.Millisecond})
+			if err != nil {
+				t.Fatalf("the answer must stand, got %v", err)
+			}
+			if len(languageLessListings(hub)) != 1 {
+				t.Fatalf("the whole manifest was asked %v", listedLanguages(hub))
+			}
+			if inventory.Source != IntentSourceManifest || !reflect.DeepEqual(inventory.ListedIn, []string{"ja-JP"}) {
+				t.Fatalf("expected ja-JP from the manifest, got %q %v", inventory.Source, inventory.ListedIn)
+			}
+			if got, want := sortedIntentNames(inventory), []string{"SourceScoutRealPromptIntent", "SourceScoutTopicIntent"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("expected %v, got %v", want, got)
+			}
+		})
+	}
+}
+
+func TestACancelledWholeListingIsNeverSwallowed(t *testing.T) {
+	hub := newIntentHub()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hub.deaf = func(eventType string, data Data) bool {
+		if _, named := data["lang"]; eventType == EventIntentList && !named {
+			cancel()
+			return true
+		}
+		return false
+	}
+	_, err := intentClient(hub).Intents(ctx, []string{"ja-JP"}, IntentOptions{Timeout: 2 * time.Second})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled context must return, got %v", err)
+	}
+}
+
+func TestTheHubsOwnListingAnswersWhenTheUsualFormFails(t *testing.T) {
+	for _, failure := range []string{"silent", "refused"} {
+		t.Run(failure, func(t *testing.T) {
+			hub := newIntentHub()
+			hub.registrations = withRegistrations(observedRegistrations, scoutKeywords("en-CA"))
+			if failure == "silent" {
+				hub.deaf = func(eventType string, data Data) bool {
+					return eventType == EventIntentList && data["lang"] == "en-us"
+				}
+			} else {
+				hub.listErrorIn = map[string]bool{"en-us": true}
+			}
+			inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-CA"}, IntentOptions{Timeout: 200 * time.Millisecond})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(inventory.ListedIn, []string{"en-US"}) || !inventory.HasPhrases() {
+				t.Fatalf("expected en-US with sentences, got %v", inventory.ListedIn)
+			}
+		})
+	}
+}
+
+func TestAnEmptyHubStaysEmptyRatherThanFailing(t *testing.T) {
+	hub := newIntentHub()
+	hub.registrations = nil
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"ja-JP"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Skills) != 0 || !reflect.DeepEqual(inventory.ListedIn, []string{"ja-JP"}) {
+		t.Fatalf("expected an empty ja-JP inventory, got %+v", inventory)
+	}
+}
+
+func TestTheHubsOwnListingIsNotAskedWhenNearestIsOff(t *testing.T) {
+	hub := newIntentHub()
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"ja-JP"}, IntentOptions{Nearest: boolPointer(false)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inventory.Skills) != 0 {
+		t.Fatalf("expected nothing, got %v", intentIDs(inventory))
+	}
+	listed := hub.queries(EventIntentList)
+	if len(listed) != 1 || !reflect.DeepEqual(listed[0].data, Data{"lang": "ja-JP", "include_definitions": true}) {
+		t.Fatalf("expected one ja-JP listing, got %+v", listed)
+	}
+}
+
+func TestDefinitionsFromTheHubsOwnListingNeedNoDescribe(t *testing.T) {
+	hub := newIntentHub()
+	hub.definitionsInList = true
+	hub.hubLang = "en-US"
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"es-ES"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inventory.HasPhrases() {
+		t.Fatal("no sentences")
+	}
+	if described := hub.queries(EventIntentDescribe); len(described) != 0 {
+		t.Fatalf("described %d registrations the listing already defined", len(described))
+	}
+}
+
+func TestTheWholeListingAsksNoDefinitionsWhenNotDescribing(t *testing.T) {
+	hub := newIntentHub()
+	hub.hubLang = "en-US"
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"es-ES"}, IntentOptions{Describe: boolPointer(false)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	whole := languageLessListings(hub)
+	if len(whole) != 1 || len(whole[0].data) != 0 {
+		t.Fatalf("expected one listing with an empty payload, got %+v", whole)
+	}
+	if !reflect.DeepEqual(inventory.ListedIn, []string{"en-US"}) || inventory.HasPhrases() {
+		t.Fatalf("names only, in en-US: %v", inventory.ListedIn)
+	}
+}
+
+func TestTheSerialisedInventorySaysWhichLanguageItListedIn(t *testing.T) {
+	hub := newIntentHub()
+	hub.hubLang = "en-US"
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"es-ES"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(encoded, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(payload["languages"], []any{"es-ES"}) || !reflect.DeepEqual(payload["listed_in"], []any{"en-US"}) {
+		t.Fatalf("languages %v, listed_in %v", payload["languages"], payload["listed_in"])
+	}
+}
+
+// Fallback skills from ovos.skills.list ---------------------------------------
+
+func TestOnlyTheHubsOwnFallbackSkillsAreListed(t *testing.T) {
+	hub := newIntentHub()
+	hub.skills = []any{
+		map[string]any{"skill_id": "thalovant-skill-memory.thalovant", "session_id": "default", "capabilities": []any{"fallback", "converse"}, "intents": 0},
+		map[string]any{"skill_id": "thalovant-skill-weather.thalovant", "session_id": "default", "capabilities": []any{}, "intents": 16},
+		map[string]any{"skill_id": "someone-elses.fallback", "session_id": "another-session", "capabilities": []any{"fallback"}, "intents": 0},
+		map[string]any{"skill_id": "custos-fallback.thalovant", "capabilities": []any{"fallback"}},
+		map[string]any{"skill_id": "custos-fallback.thalovant", "session_id": nil, "capabilities": []any{"fallback"}},
+		map[string]any{"skill_id": "", "session_id": "default", "capabilities": []any{"fallback"}},
+		map[string]any{"skill_id": 7, "session_id": "default", "capabilities": []any{"fallback"}},
+		map[string]any{"skill_id": "no-capabilities.thalovant", "session_id": "default", "capabilities": nil},
+		map[string]any{"skill_id": "string-capabilities.thalovant", "session_id": "default", "capabilities": "fallback"},
+		"not a row",
+	}
+	result, err := intentClient(hub).IntentsWithCapabilities(context.Background(), []string{"en-us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.FallbacksKnown {
+		t.Fatal("the hub answered")
+	}
+	want := []HubFallback{{SkillID: "custos-fallback.thalovant"}, {SkillID: "thalovant-skill-memory.thalovant"}}
+	if !reflect.DeepEqual(result.Fallbacks, want) {
+		t.Fatalf("expected %+v, got %+v", want, result.Fallbacks)
+	}
+	if sent := hub.queries(EventFallbackList); len(sent) != 0 {
+		t.Fatal("ovos.skills.fallback.list was sent; no runtime answers it")
+	}
+	if sent := hub.queries(EventSkillsList); len(sent) != 1 || len(sent[0].data) != 0 {
+		t.Fatalf("expected one ovos.skills.list {}, got %+v", sent)
+	}
+}
+
+func TestADeniedSkillsListIsUnknownNotNone(t *testing.T) {
+	hub := newIntentHub()
+	hub.skills = []any{map[string]any{"skill_id": "a", "capabilities": []any{"fallback"}}}
+	hub.refuse[EventSkillsList] = true
+	result, err := intentClient(hub).IntentsWithCapabilities(context.Background(), []string{"en-us"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.FallbacksKnown || result.Fallbacks != nil {
+		t.Fatalf("denied is not the same as empty: %+v", result)
 	}
 }

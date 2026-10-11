@@ -3,7 +3,6 @@ package thalovant
 import (
 	"context"
 	"errors"
-	"math"
 	"testing"
 	"time"
 )
@@ -104,8 +103,11 @@ type fallbackHub struct {
 }
 
 func (h *fallbackHub) EmitBus(ctx context.Context, name string, data Data, eventContext Context) error {
-	if name == EventFallbackList && h.data != nil {
-		h.deliver(EventFallbackListResponse, h.data, eventContext)
+	if name == EventFallbackList {
+		return errors.New("ovos.skills.fallback.list was sent; no runtime answers it")
+	}
+	if name == EventSkillsList && h.data != nil {
+		h.deliver(EventSkillsListResponse, h.data, eventContext)
 		return nil
 	}
 	return h.intentHub.EmitBus(ctx, name, data, eventContext)
@@ -118,10 +120,16 @@ func TestFallbackCapabilityKnownUnknownAndLanguageSafety(t *testing.T) {
 		known bool
 		count int
 	}{
-		{"known empty", Data{"fallbacks": []any{}}, true, 0},
-		{"missing", Data{}, false, 0},
-		{"negative", Data{"ok": false, "fallbacks": []any{}}, false, 0},
-		{"handlers", Data{"fallbacks": []any{map[string]any{"skill_id": "z", "priority": 50.5}, map[string]any{"skill_id": "a", "priority": 1}, map[string]any{"skill_id": "bad", "priority": math.Inf(1)}}}, true, 2},
+		{"known empty", Data{"ok": true, "skills": []any{}}, true, 0},
+		{"missing", Data{"ok": true}, false, 0},
+		{"not a list", Data{"ok": true, "skills": map[string]any{}}, false, 0},
+		{"negative", Data{"ok": false, "skills": []any{}}, false, 0},
+		{"no fallback skill", Data{"ok": true, "skills": []any{map[string]any{"skill_id": "weather", "session_id": "default", "capabilities": []any{}, "intents": 16}}}, true, 0},
+		{"handlers", Data{"ok": true, "skills": []any{
+			map[string]any{"skill_id": "z", "session_id": "default", "capabilities": []any{"fallback", "converse"}, "intents": 0},
+			map[string]any{"skill_id": "a", "capabilities": []any{"fallback"}},
+			map[string]any{"skill_id": "a", "session_id": "", "capabilities": []any{"fallback"}},
+		}}, true, 2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hub := &fallbackHub{intentHub: newIntentHub(), data: tc.data}
@@ -137,7 +145,7 @@ func TestFallbackCapabilityKnownUnknownAndLanguageSafety(t *testing.T) {
 				t.Fatal("incorrect language inference")
 			}
 			if tc.count > 0 && result.Fallbacks[0].SkillID != "a" {
-				t.Fatal("priority order not stable")
+				t.Fatal("not in skill id order", result.Fallbacks)
 			}
 		})
 	}

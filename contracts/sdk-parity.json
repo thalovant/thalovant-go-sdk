@@ -206,7 +206,7 @@
     },
     "listing": {
       "implementation": {
-        "intents.go": "f96c426086c1d91a8350982d0bc5f25deeb107a1e95e6d3f0f9fc02bf52c80f0",
+        "intents.go": "33ff8e74b85877ef6c9a4de82fc728ef0bf86cdcd35435c9b8043f95717a8282",
         "listing.go": "b33a452cf4eb5941dc3c2691a2c856b61dcd9017c05592040f6ba9a94a9d6ecf"
       },
       "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures.",
@@ -254,15 +254,18 @@
       "implementation": {
         "client.go": "a1c0c470ccf7e5ccd592e5cedaa2d4f5708196b354f195bf248953af68a046b6",
         "events.go": "c310b681deb54194c81c96f4ec2d7a204e50bb7323ca9139016dea15a6b82b0b",
+        "fallbacks.go": "3b75b839b59d3457188072730aa429f6c8f4c7332e5b3cfc1633af10113f89b2",
+        "intents.go": "33ff8e74b85877ef6c9a4de82fc728ef0bf86cdcd35435c9b8043f95717a8282",
         "transport.go": "aaa79e977b85595fa526f11953fa6afc67b7574f635ad62f99e9e9475c778d81",
         "transport_noise.go": "672133796d0caa946b98da208206aed68abeee4df2d90d7e08bc827ce57769fe"
       },
-      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. A skill may positively assert a fallback-tier claim via thalovant_claimed meta on its own speak event only (EventSpeak/EventOvosUtteranceSpeak), never on another correlated event this reply collected. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs.",
+      "reason": "Applicable public behavior is implemented and exercised by the named regression suites and shared fixtures. HiveMind #251/#252 only changes the Python upstream client dispatcher; this consumer uses native single-dispatch transports (MCP delegates to the Node SDK), or caller-owned frame parsing in embedded C. No Python HiveMind bus dependency or slave-protocol reinjection exists here. Python now requires fixed upstream 1.1.9a1 and removes its identity-based suppression; equal independent native frames remain distinct. Reply claim metadata follows the Python string-ID contract, with first-seen ordering, case-sensitive fallback stages and legacy unstamped success. Invalid non-string stamps are ignored. A skill may positively assert a fallback-tier claim via thalovant_claimed meta on its own speak event only (EventSpeak/EventOvosUtteranceSpeak), never on another correlated event this reply collected. Embedded C exposes bounded extraction and claim classification while its caller retains ordered IDs. Inventory queries: Intents lists in the hub's own language when the asked one has no sentences (one language-less ovos.intent.list, NearestHubLanguage), and fallback skills come from ovos.skills.list with no priority invented.",
       "status": "required",
       "tests": {
+        "intents_test.go": "3052e6dcc23c3adb851209de187a2e83f27f07b6bdd884622a30d2e91304b8e0",
         "reply_claims_test.go": "ff4bfed558196f33fc50235a3647c2f8da190e8fb760d12ec5ab8ea60eed4162",
         "reply_deadline_test.go": "1ffc64edc55e7cd2a0d71b4d11cddd464f445c51c530eea01f10cf7f11d4cdab",
-        "runtime_parity_test.go": "ae735757282afa9070143663ce0e266b6f660a411f4afd9cfcadede04425b324",
+        "runtime_parity_test.go": "00bf7678f97941bf7bba9c2e9782f6bf12649b0f6d1774efbcdea3dca28d1b98",
         "testdata/reply-claim-vectors.json": "303bc10666baafbc85e67d7a9dcd6e0fbb16a99e539aed6d829fb0f4744c96b8",
         "transport_noise_test.go": "51d780e4871b79380741b2747e385c206bab0794328d424638b7cd540866c22e"
       },
@@ -299,7 +302,8 @@
     "3b0acf7c8b2f03bec95d9e9bba4f82e88c79ad3d98590988852e6c06deb48af0",
     "841f3bbeec23f04c5decae75c9cfd6ea6a397992c7e4d7cd4195dc9dd919cd1a",
     "3f37b7453397f577a1db5cf2db7f709ffa4b09194869e07970d0881239b7a218",
-    "600b10e7e159f6ca9c1d59d7f2a4103c2e1c66a0894b587e0224e4d9c0e66bd1"
+    "600b10e7e159f6ca9c1d59d7f2a4103c2e1c66a0894b587e0224e4d9c0e66bd1",
+    "5b973a65ab583082069afaa67e2baf7257cbc4950a89460c9912851821258d16"
   ],
   "schema_version": 1
 }

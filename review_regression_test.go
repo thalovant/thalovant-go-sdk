@@ -2,11 +2,13 @@ package thalovant
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -170,12 +172,15 @@ type capturedFallbackHub struct {
 
 func (h *capturedFallbackHub) EmitBus(ctx context.Context, name string, data Data, eventContext Context) error {
 	if name == EventFallbackList {
+		return errors.New("ovos.skills.fallback.list was sent; no runtime answers it")
+	}
+	if name == EventSkillsList {
 		deadline, ok := ctx.Deadline()
 		if !ok {
 			return errors.New("missing fallback deadline")
 		}
 		h.remaining <- time.Until(deadline)
-		h.deliver(EventFallbackListResponse, Data{"fallbacks": []any{}}, eventContext)
+		h.deliver(EventSkillsListResponse, Data{"ok": true, "skills": []any{}}, eventContext)
 		return nil
 	}
 	return h.intentHub.EmitBus(ctx, name, data, eventContext)
@@ -191,23 +196,42 @@ func TestDefaultCapabilityProbeAlreadyResolvesAndCapsTimeout(t *testing.T) {
 		t.Fatal("uncapped default probe", remaining)
 	}
 }
-func TestFallbackPriorityDefaultsPreserveSharedContract(t *testing.T) {
-	hub := &fallbackHub{intentHub: newIntentHub(), data: Data{"fallbacks": []any{
-		map[string]any{"skill_id": "missing"}, map[string]any{"skill_id": "null", "priority": nil},
-		map[string]any{"skill_id": "text", "priority": "invalid"}, map[string]any{"skill_id": "bool", "priority": true},
+
+// No runtime serves a fallback order, so none is invented: whatever a row
+// carries under "priority", the fallback says its priority is unknown, and
+// its JSON says null as every other SDK's does.
+func TestFallbackPriorityIsNeverInvented(t *testing.T) {
+	hub := &fallbackHub{intentHub: newIntentHub(), data: Data{"ok": true, "skills": []any{
+		map[string]any{"skill_id": "b", "capabilities": []any{"fallback"}, "priority": 5},
+		map[string]any{"skill_id": "a", "capabilities": []any{"fallback"}, "priority": true},
 	}}}
 	rows, err := (&Client{Transport: hub}).ListFallbacks(context.Background(), time.Second)
-	if err != nil || len(rows) != 4 {
-		t.Fatalf("shared defaults lost: %+v %v", rows, err)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("fallbacks lost: %+v %v", rows, err)
 	}
 	for _, row := range rows {
-		want := int64(0)
-		if row.SkillID == "bool" {
-			want = 1
+		if row.PriorityKnown || row.Priority != 0 {
+			t.Fatalf("a priority was invented: %+v", row)
 		}
-		if row.Priority != want {
-			t.Fatal(row)
-		}
+	}
+	encoded, err := json.Marshal(rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(encoded) != `[{"skill_id":"a","priority":null},{"skill_id":"b","priority":null}]` {
+		t.Fatalf("unknown priority not null: %s", encoded)
+	}
+	var back []HubFallback
+	if err := json.Unmarshal([]byte(`[{"skill_id":"a","priority":null},{"skill_id":"b"},{"skill_id":"c","priority":7}]`), &back); err != nil {
+		t.Fatal(err)
+	}
+	want := []HubFallback{{SkillID: "a"}, {SkillID: "b"}, {SkillID: "c", Priority: 7, PriorityKnown: true}}
+	if !reflect.DeepEqual(back, want) {
+		t.Fatalf("round trip: %+v", back)
+	}
+	encoded, _ = json.Marshal(want[2])
+	if string(encoded) != `{"skill_id":"c","priority":7}` {
+		t.Fatalf("a known priority is written as given: %s", encoded)
 	}
 }
 
