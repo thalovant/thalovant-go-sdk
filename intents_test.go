@@ -72,6 +72,9 @@ type intentHub struct {
 	// listError makes the hub answer the listing {"ok": false, "error": ...},
 	// the shape a runtime uses when the query itself failed.
 	listError string
+	// listErrorIn makes the hub answer the listing ok: false in these
+	// languages only.
+	listErrorIn map[string]bool
 	// describeUnknown names the intents the hub describes as {"ok": false},
 	// the shape it uses for a registration it does not know.
 	describeUnknown   map[string]bool
@@ -146,8 +149,12 @@ func (h *intentHub) EmitBus(_ context.Context, eventType string, data Data, even
 	lang := stringValue(data["lang"])
 	switch eventType {
 	case EventIntentList:
-		if h.listError != "" {
-			h.deliver(EventIntentListResponse, Data{"ok": false, "error": h.listError}, eventContext)
+		if h.listError != "" || h.listErrorIn[lang] {
+			reason := h.listError
+			if reason == "" {
+				reason = "listing failed"
+			}
+			h.deliver(EventIntentListResponse, Data{"ok": false, "error": reason}, eventContext)
 			return nil
 		}
 		rows := []any{}
@@ -1271,5 +1278,181 @@ func TestIntentEventNamesMatchTheContract(t *testing.T) {
 		if got != want {
 			t.Fatalf("constant %q must be %q", got, want)
 		}
+	}
+}
+
+// The usual form, asked when the first listing has no sentences.
+
+const scoutSkill = "thalovant-skill-source-scout.thalovant"
+
+// scoutKeywords are keyword (adapt) registrations in one language: listed,
+// never described with sentences, exactly as ovos-core lists an
+// IntentBuilder intent.
+func scoutKeywords(lang string, names ...string) []intentSample {
+	if len(names) == 0 {
+		names = []string{"SourceScoutTopicIntent", "SourceScoutRealPromptIntent"}
+	}
+	samples := make([]intentSample, 0, len(names))
+	for _, name := range names {
+		samples = append(samples, intentSample{lang: lang, skillID: scoutSkill, name: name, method: "keyword", samples: []string{"scout"}})
+	}
+	return samples
+}
+
+func withRegistrations(groups ...[]intentSample) []intentSample {
+	var all []intentSample
+	for _, group := range groups {
+		all = append(all, group...)
+	}
+	return all
+}
+
+func listedLanguages(hub *intentHub) []string {
+	var langs []string
+	for _, query := range hub.queries(EventIntentList) {
+		langs = append(langs, stringValue(query.data["lang"]))
+	}
+	return langs
+}
+
+func sortedIntentNames(inventory HubIntentInventory) []string {
+	var names []string
+	for _, intent := range inventory.Intents() {
+		names = append(names, intent.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Not empty is not the same as answered. The Pop Culture hub on 2026-10-11:
+// one skill registers its keyword vocabulary in 63 regional tags, every other
+// skill only in en-US. Its en-CA listing was five keyword rows, which carry
+// no sentences, so a phone in Toronto was shown five names and nothing it
+// could say -- the retry in the usual form only ran on an empty listing.
+func TestATagWithOnlyKeywordRowsIsListedUnderItsUsualForm(t *testing.T) {
+	hub := newIntentHub()
+	hub.registrations = withRegistrations(observedRegistrations, scoutKeywords("en-CA"), scoutKeywords("en-us"))
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-CA"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(inventory.ListedIn, []string{"en-us"}) {
+		t.Fatalf("the usual form has sentences, en-CA has none: listed in %v", inventory.ListedIn)
+	}
+	if !inventory.HasPhrases() {
+		t.Fatal("the usual form's sentences must reach the inventory")
+	}
+	skills := map[string]bool{}
+	for _, intent := range inventory.Intents() {
+		skills[intent.SkillID] = true
+	}
+	for _, skill := range []string{shadowSkill, scoutSkill, weatherSkill} {
+		if !skills[skill] {
+			t.Fatalf("expected %s among the skills, got %v", skill, intentIDs(inventory))
+		}
+	}
+	if got := listedLanguages(hub); !reflect.DeepEqual(got, []string{"en-CA", "en-us"}) {
+		t.Fatalf("expected en-CA then en-us to be listed, got %v", got)
+	}
+}
+
+func TestKeywordRowsAreKeptWhenTheUsualFormHasNoSentencesEither(t *testing.T) {
+	hub := newIntentHub()
+	hub.registrations = withRegistrations(scoutKeywords("en-CA"), scoutKeywords("en-us", "SourceScoutTopicIntent"))
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-CA"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !reflect.DeepEqual(inventory.ListedIn, []string{"en-CA"}) {
+		t.Fatalf("nothing better to take: listed in %v", inventory.ListedIn)
+	}
+	if got, want := sortedIntentNames(inventory), []string{"SourceScoutRealPromptIntent", "SourceScoutTopicIntent"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("expected the first listing's names %v, got %v", want, got)
+	}
+}
+
+// A retry never makes the answer worse than the first listing.
+func TestAFailedRetryKeepsTheNamesTheFirstListingGave(t *testing.T) {
+	for _, failure := range []string{"silent", "refused"} {
+		t.Run(failure, func(t *testing.T) {
+			hub := newIntentHub()
+			hub.registrations = scoutKeywords("en-CA")
+			if failure == "silent" {
+				hub.deaf = func(eventType string, data Data) bool {
+					return eventType == EventIntentList && data["lang"] == "en-us"
+				}
+			} else {
+				hub.listErrorIn = map[string]bool{"en-us": true}
+			}
+			inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-CA"}, IntentOptions{Timeout: 200 * time.Millisecond})
+			if err != nil {
+				t.Fatalf("the first listing's names must stand, got %v", err)
+			}
+
+			if inventory.Source != IntentSourceManifest {
+				t.Fatalf("expected the manifest source, got %q", inventory.Source)
+			}
+			if !reflect.DeepEqual(inventory.ListedIn, []string{"en-CA"}) {
+				t.Fatalf("expected en-CA to stand, listed in %v", inventory.ListedIn)
+			}
+			if got, want := sortedIntentNames(inventory), []string{"SourceScoutRealPromptIntent", "SourceScoutTopicIntent"}; !reflect.DeepEqual(got, want) {
+				t.Fatalf("expected %v, got %v", want, got)
+			}
+		})
+	}
+}
+
+func TestAFailedRetryAfterAnEmptyListingStillFailsAsBefore(t *testing.T) {
+	hub := newIntentHub()
+	hub.registrations = nil
+	hub.listErrorIn = map[string]bool{"en-us": true}
+	_, err := intentClient(hub).Intents(context.Background(), []string{"en-CA"}, IntentOptions{Timeout: 200 * time.Millisecond})
+
+	if !errors.Is(err, ErrRuntime) {
+		t.Fatalf("expected the retry's runtime error, got %v", err)
+	}
+}
+
+func TestACancelledRetryIsNeverSwallowed(t *testing.T) {
+	hub := newIntentHub()
+	hub.registrations = scoutKeywords("en-CA")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	hub.deaf = func(eventType string, data Data) bool {
+		if eventType == EventIntentList && data["lang"] == "en-us" {
+			cancel()
+			return true
+		}
+		return false
+	}
+	_, err := intentClient(hub).Intents(ctx, []string{"en-CA"}, IntentOptions{Timeout: 2 * time.Second})
+
+	if err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("a cancelled context must return, got %v", err)
+	}
+}
+
+func TestAListingWithSentencesIsNotRetriedForItsKeywordRows(t *testing.T) {
+	hub := newIntentHub()
+	var enCA []intentSample
+	for _, sample := range observedRegistrations {
+		if sample.lang == "en-us" {
+			sample.lang = "en-CA"
+			enCA = append(enCA, sample)
+		}
+	}
+	hub.registrations = withRegistrations(observedRegistrations, enCA, scoutKeywords("en-CA"))
+	inventory, err := intentClient(hub).Intents(context.Background(), []string{"en-CA"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got := listedLanguages(hub); !reflect.DeepEqual(got, []string{"en-CA"}) {
+		t.Fatalf("a listing with a template row is asked once, got %v", got)
+	}
+	if !reflect.DeepEqual(inventory.ListedIn, []string{"en-CA"}) {
+		t.Fatalf("expected en-CA, listed in %v", inventory.ListedIn)
 	}
 }
