@@ -2,8 +2,8 @@
   "capabilities": {
     "api-errors": {
       "implementation": {
-        "control.go": "47847d08d665c6f178c8344cd678194984ebd0a2f54e146e07bccff2e9096f67",
-        "errors.go": "d9116690488d7ecc8969df45808f48807c412f3870b8512ca2285ee23db989ce"
+        "control.go": "52834b579bab146dccd6ebad84e849c638d6901dba97c2662be6ce74aa45c201",
+        "errors.go": "a99bbd4aef0802da98679fec8a6bf0d3f7b0cd00d6aedad8976bbaba79dd14f5"
       },
       "reason": "apiErrorFromResponse() in control.go builds every non-2xx control-plane error from one decode of the body, and problemFields() in errors.go reads APIError.Code and ProblemDetail out of it beside the whole body as Problem; StatusCode, Detail and Error() are unchanged. Run against the shared api-error vectors, each served by a loopback httptest server and read back through GetHub, the configuration-merge read and the device-flow token poll, with what GetHub produced recorded.",
       "status": "required",
@@ -33,6 +33,18 @@
         "binary-vectors.json": "testdata/binary-vectors.json"
       }
     },
+    "chat-apps": {
+      "implementation": {
+        "chat_apps.go": "1a844e6ad71e5e10559800892c263a26950a5c75eab6d13c52ac29ab4df6d0e3",
+        "control.go": "52834b579bab146dccd6ebad84e849c638d6901dba97c2662be6ce74aa45c201",
+        "errors.go": "a99bbd4aef0802da98679fec8a6bf0d3f7b0cd00d6aedad8976bbaba79dd14f5"
+      },
+      "reason": "chat_apps.go adds the owner routes under /v1/bridges to ControlPlane: ListChatAppConnectors, GetBridgeNetworks, ListBridges, CreateBridge (exactly one of Token and Secrets, refused locally otherwise; sends connector), GetBridge, UpdateBridge (only the fields set; If-Match only when ETag is set), ReplaceBridgeToken, ReplaceBridgeSecrets, ListBridgeChats, SendBridgeTestMessage, GetBridgeAvatar (bytes and content type) and DeleteBridge, answering typed models whose string enums keep unknown values. SecretValue prints [REDACTED] for every fmt verb, json.Marshal, MarshalText and slog; Reveal is called only to build the request body. APIError.Fields (errors.go) is read in apiErrorFromResponse (control.go) from the problem's fields or an object detail, strings only. chat_apps_test.go serves every route from a loopback httptest server and checks method, path, query, body and If-Match, parsing with missing optionals and unknown enum values, code/fields/plan/auth/retry-after on refusals, and that no secret reaches an error, a printed value, JSON or a log line.",
+      "status": "required",
+      "tests": {
+        "chat_apps_test.go": "d9cb2ccc3d1fdec468aa8943bcb49027fefff11a75d9fd86a2391ce27062f9d3"
+      }
+    },
     "cli": {
       "reason": "Python command line entry point; consumers expose idiomatic language APIs or MCP tools.",
       "status": "not-applicable"
@@ -40,8 +52,8 @@
     "connection-admission": {
       "implementation": {
         "connections.go": "44e521e58188d7bc5b05348bd6db1f92eacdc7d328bce992826ecd2c2e55ced3",
-        "control.go": "47847d08d665c6f178c8344cd678194984ebd0a2f54e146e07bccff2e9096f67",
-        "errors.go": "d9116690488d7ecc8969df45808f48807c412f3870b8512ca2285ee23db989ce"
+        "control.go": "52834b579bab146dccd6ebad84e849c638d6901dba97c2662be6ce74aa45c201",
+        "errors.go": "a99bbd4aef0802da98679fec8a6bf0d3f7b0cd00d6aedad8976bbaba79dd14f5"
       },
       "reason": "WaitForAdmission in connections.go follows the Operation a create returned (BootstrapIdentityResult.Operation): ready is admitted; failed and timed_out are *AdmissionFailedError with the operation's code; no operation and 404 are admitted at once; a 5xx is ridden out; a 429 waits APIError.RetryAfter (the body's retry_after_seconds, then Retry-After, then RateLimit-Reset, read in control.go) or the poll interval when longer, and is a timeout at once when that is more than the time left; a 401/403 is the API's own *APIError (errors.Is ErrAuth), never a failed admission; any other refusal is *AdmissionFailedError whose Err keeps status, code and detail and whose ErrorCode stays empty; an unreachable API (ErrAPIUnreachable, from control.go) is returned as it is; each read is bounded by the deadline; the timeout is *AdmissionTimeoutError, errors.Is ErrConnection and ErrTimeout, ending 'it may still admit it later.'; a links.self on another origin (scheme, host, port, default ports spelled out) is refused unfetched. Run against the shared connection-admission vectors over a loopback httptest server that sends each case's headers, with {api_host}/{api_port} filled in and a closed port for an unreachable API.",
       "status": "required",
@@ -58,8 +70,8 @@
     "connection-kinds": {
       "implementation": {
         "connections.go": "44e521e58188d7bc5b05348bd6db1f92eacdc7d328bce992826ecd2c2e55ced3",
-        "control.go": "47847d08d665c6f178c8344cd678194984ebd0a2f54e146e07bccff2e9096f67",
-        "errors.go": "d9116690488d7ecc8969df45808f48807c412f3870b8512ca2285ee23db989ce"
+        "control.go": "52834b579bab146dccd6ebad84e849c638d6901dba97c2662be6ce74aa45c201",
+        "errors.go": "a99bbd4aef0802da98679fec8a6bf0d3f7b0cd00d6aedad8976bbaba79dd14f5"
       },
       "reason": "BootstrapIdentityOptions.ConnectionType sends spec.connection_type; CreateClientIdentity checks the kind comes back and, when it does not, deletes the client with its etag and returns *UnsupportedConnectionTypeError, as it does for a 422 whose detail or code, or a validation error's loc or msg (under errors, or under detail when that is a list), names the field -- never an echoed input. The other refusals stay the *APIError every call already returned and are told apart with errors.Is: APIError.Is answers ErrAuth, ErrPlan and ErrAlreadyLinked from the status, code and detail, and LinkedClientID names the client that holds the link, so no existing caller sees a different error type. GetClient and DeleteClient (connections.go): read the etag when none is given, retry once on 412, and count 404 as deleted. Run against the shared connection-kinds vectors over a loopback httptest server, with the requests the server saw recorded beside each outcome.",
       "status": "required",
@@ -75,7 +87,7 @@
     },
     "control": {
       "implementation": {
-        "control.go": "47847d08d665c6f178c8344cd678194984ebd0a2f54e146e07bccff2e9096f67",
+        "control.go": "52834b579bab146dccd6ebad84e849c638d6901dba97c2662be6ce74aa45c201",
         "hub_skills.go": "fedcdfea962817ada46bc8281e4c70458187e2cf80b1081203e33fdd4048fa20",
         "hubs.go": "52433966442f363e691a12d973dfb3df9fdffd75fc8c3772f8fb91b937293a34",
         "native_auth.go": "9d6b0af21bfa1614aa36c28c48dc932c69b41a0e670f4a286d983f84f18bf228"
@@ -106,9 +118,9 @@
     },
     "device-login": {
       "implementation": {
-        "control.go": "47847d08d665c6f178c8344cd678194984ebd0a2f54e146e07bccff2e9096f67",
+        "control.go": "52834b579bab146dccd6ebad84e849c638d6901dba97c2662be6ce74aa45c201",
         "device_login.go": "824d0a073e74245bcb7722c201d657714f99eaf7886f7aa0e39a9d5bf031474b",
-        "errors.go": "d9116690488d7ecc8969df45808f48807c412f3870b8512ca2285ee23db989ce",
+        "errors.go": "a99bbd4aef0802da98679fec8a6bf0d3f7b0cd00d6aedad8976bbaba79dd14f5",
         "native_auth.go": "9d6b0af21bfa1614aa36c28c48dc932c69b41a0e670f4a286d983f84f18bf228"
       },
       "reason": "BeginDeviceLogin, PollDeviceLogin and RevokeAPIToken in device_login.go, one step each, for a caller that runs its own loop; LoginWithBrowser in control.go now runs its loop over the same one-poll path. A pending poll is a *DeviceLoginPendingError carrying Interval, and slow_down lengthens the DeviceAuthorization's Interval for good; expiry and denial are *DeviceLoginExpiredError and *DeviceLoginDeniedError (errors.go), still matching ErrDeviceCodeExpired and ErrDeviceAccessDenied, and every one of them reaches the *APIError the API answered with. Every sign-in (password, native in native_auth.go, browser, device poll) goes through acceptToken, which sets AccessToken and TokenID from its own answer. Revoking the token in use is idempotent: a 401 on its own revoke counts as revoked, and revoking again sends nothing until the next sign-in. DeviceAuthorization and APIToken print with the device code and the token redacted. Run against the shared device-login vectors over a loopback httptest server, checking every request, with what the SDK produced recorded. 0.9.1: DeviceLoginOptions.ClientID and BeginDeviceLoginWithOptions send a registered app's client_id (HomeAssistantClientID is thalovant-home-assistant) and leave it out when empty; BeginDeviceLogin keeps its signature. DescribeDeviceLogin reads GET /v1/auth/device/codes/{user_code} as the approver into a DeviceLoginRequest, whose ClientVerified is true only with a ClientID. A 2xx token answer that is not a JSON object is a plain ErrAPI with no status. APIError.GoString keeps %#v from printing Problem, which can echo the request.",
@@ -127,7 +139,7 @@
       "implementation": {
         "client.go": "a1c0c470ccf7e5ccd592e5cedaa2d4f5708196b354f195bf248953af68a046b6",
         "context_mutex.go": "7e6043dbb6efc73d4e83d7edf8d709a26fec95453ba000900f7e053d60310065",
-        "errors.go": "d9116690488d7ecc8969df45808f48807c412f3870b8512ca2285ee23db989ce",
+        "errors.go": "a99bbd4aef0802da98679fec8a6bf0d3f7b0cd00d6aedad8976bbaba79dd14f5",
         "home.go": "3b8b4d9d4eacaa9f6ec8224c1a2c2b55cf207e01a45d343da7876111f781408e",
         "noise_folder.go": "12f9151ebbb5b8d87e618c60355a6f0880668213482c6af843606bbe02d3aa2f",
         "noise_store.go": "7e241a9e43cfb13587dcecde0b04258ddc765e88b48c886be2a9979219f5159a",
@@ -185,7 +197,7 @@
     },
     "link-carriers": {
       "implementation": {
-        "errors.go": "d9116690488d7ecc8969df45808f48807c412f3870b8512ca2285ee23db989ce",
+        "errors.go": "a99bbd4aef0802da98679fec8a6bf0d3f7b0cd00d6aedad8976bbaba79dd14f5",
         "noise_folder.go": "12f9151ebbb5b8d87e618c60355a6f0880668213482c6af843606bbe02d3aa2f",
         "session.go": "f9dc84f90210810902ee80bc59bd19a0ad0ef171b35fbb91c83336bfad84de35",
         "transport.go": "aaa79e977b85595fa526f11953fa6afc67b7574f635ad62f99e9e9475c778d81",
@@ -238,7 +250,7 @@
     "refusal": {
       "implementation": {
         "client.go": "a1c0c470ccf7e5ccd592e5cedaa2d4f5708196b354f195bf248953af68a046b6",
-        "errors.go": "d9116690488d7ecc8969df45808f48807c412f3870b8512ca2285ee23db989ce"
+        "errors.go": "a99bbd4aef0802da98679fec8a6bf0d3f7b0cd00d6aedad8976bbaba79dd14f5"
       },
       "reason": "refusalBelongsToAsk() and failureError() in errors.go, used by AskWithOptions() in client.go, which counts asks, queries and fire-and-forget utterances inside the shared grace window -- recorded immediately before the publish and kept when the publish errors, since the transport can fail after the hub holds the frame. PolicyDeniedError carries Quota and UnansweredError is new, both still errors.Is ErrRuntime. Run against the shared refusal vectors, decoded as map[string]any so numbers arrive as float64, plus five end-to-end asks.",
       "status": "required",
@@ -303,7 +315,8 @@
     "841f3bbeec23f04c5decae75c9cfd6ea6a397992c7e4d7cd4195dc9dd919cd1a",
     "3f37b7453397f577a1db5cf2db7f709ffa4b09194869e07970d0881239b7a218",
     "600b10e7e159f6ca9c1d59d7f2a4103c2e1c66a0894b587e0224e4d9c0e66bd1",
-    "5b973a65ab583082069afaa67e2baf7257cbc4950a89460c9912851821258d16"
+    "5b973a65ab583082069afaa67e2baf7257cbc4950a89460c9912851821258d16",
+    "1e56099da5dba82b48fb83b27e53192f3cd70e7d0f5a9c4f94bb08948e45a1d6"
   ],
   "schema_version": 1
 }

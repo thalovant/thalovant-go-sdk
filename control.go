@@ -1210,7 +1210,15 @@ func (c *ControlPlane) request(ctx context.Context, method string, path string, 
 	return result, nil
 }
 
+// send makes one control-plane request and answers its status, body and
+// headers; a request that got no answer is an error. The body is read whole.
 func (c *ControlPlane) send(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool) (int, []byte, http.Header, error) {
+	return c.sendWithin(ctx, method, path, payload, headers, auth, 0)
+}
+
+// sendWithin is send with the response body capped at limit bytes (0 for no
+// cap). A body over the cap is an *APIError, never silently shortened.
+func (c *ControlPlane) sendWithin(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool, limit int64) (int, []byte, http.Header, error) {
 	var body io.Reader
 	if payload != nil {
 		raw, err := json.Marshal(payload)
@@ -1270,7 +1278,23 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 		return 0, nil, nil, apiUnreachableError{}
 	}
 	defer resp.Body.Close()
-	raw, _ := io.ReadAll(resp.Body)
+	reader := io.Reader(resp.Body)
+	if limit > 0 {
+		reader = io.LimitReader(resp.Body, limit+1)
+	}
+	raw, err := io.ReadAll(reader)
+	if err != nil {
+		// A body cut short is not an answer: partial bytes must never pass as
+		// a complete one. The read error can name addresses, so like a
+		// transport error it is not kept.
+		if cause := ctx.Err(); cause == context.Canceled || cause == context.DeadlineExceeded {
+			return 0, nil, nil, fmt.Errorf("%w: %w", ErrAPI, cause)
+		}
+		return 0, nil, nil, &APIError{StatusCode: resp.StatusCode, Detail: "incomplete response body"}
+	}
+	if limit > 0 && int64(len(raw)) > limit {
+		return 0, nil, nil, &APIError{StatusCode: resp.StatusCode, Detail: "response body too large"}
+	}
 	return resp.StatusCode, raw, resp.Header, nil
 }
 
@@ -1309,8 +1333,9 @@ var serverErrorDetailFields = []string{"detail", "message", "error", "error_desc
 // apiErrorFromResponse is the error for a response the API answered with a
 // failure status, and the one place every such error is built. The body is
 // decoded once. When it is a JSON object it rides on the error whole, as
-// Problem, with its Code and its unshortened ProblemDetail read out of it; the
-// Detail that Error() prints stays the bounded line it always was.
+// Problem, with its Code, its unshortened ProblemDetail and the Fields it
+// names read out of it; the Detail that Error() prints stays the bounded line
+// it always was.
 func apiErrorFromResponse(status int, raw []byte, header http.Header) *APIError {
 	problem := decodeProblem(raw)
 	code, detail := problemFields(problem)
@@ -1320,6 +1345,7 @@ func apiErrorFromResponse(status int, raw []byte, header http.Header) *APIError 
 		Code:          code,
 		ProblemDetail: detail,
 		Problem:       problem,
+		Fields:        problemFieldNames(problem),
 		RetryAfter:    retryAfter(problem, header),
 	}
 }
