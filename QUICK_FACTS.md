@@ -32,5 +32,5 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Add chat apps (the /v1/bridges
 
 - String enums (unknown values kept): `BridgeState`, `BridgeSessionScope`, `BridgePhase`, `BridgeStatusReason`, `BridgeStatusSource`, `BridgeHoldReason`, `ChatAppStatus`, `ChatAppHelper`.
 - `SecretValue`: `NewSecretValue`, `Reveal`, `IsZero`; prints `[REDACTED]` (fmt, JSON, text, slog).
-- Tests: `chat_apps_test.go` (15 tests).
+- Tests: `chat_apps_test.go` (16 tests).
 - `GetBridgeAvatar` reads at most 4 MiB; a body cut short is an `*APIError` ("incomplete response body") on every control-plane call.

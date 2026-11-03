@@ -42,7 +42,7 @@
       "reason": "chat_apps.go adds the owner routes under /v1/bridges to ControlPlane: ListChatAppConnectors, GetBridgeNetworks, ListBridges, CreateBridge (exactly one of Token and Secrets, refused locally otherwise; sends connector), GetBridge, UpdateBridge (only the fields set; If-Match only when ETag is set), ReplaceBridgeToken, ReplaceBridgeSecrets, ListBridgeChats, SendBridgeTestMessage, GetBridgeAvatar (bytes and content type) and DeleteBridge, answering typed models whose string enums keep unknown values. SecretValue prints [REDACTED] for every fmt verb, json.Marshal, MarshalText and slog; Reveal is called only to build the request body. APIError.Fields (errors.go) is read in apiErrorFromResponse (control.go) from the problem's fields or an object detail, strings only. chat_apps_test.go serves every route from a loopback httptest server and checks method, path, query, body and If-Match, parsing with missing optionals and unknown enum values, code/fields/plan/auth/retry-after on refusals, and that no secret reaches an error, a printed value, JSON or a log line.",
       "status": "required",
       "tests": {
-        "chat_apps_test.go": "938f6823160c2751780c9c338c82b104ddc4781cbf758b69b4028e6af506cdf9"
+        "chat_apps_test.go": "d9cb2ccc3d1fdec468aa8943bcb49027fefff11a75d9fd86a2391ce27062f9d3"
       }
     },
     "cli": {

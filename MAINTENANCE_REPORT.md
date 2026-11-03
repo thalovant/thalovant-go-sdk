@@ -20,7 +20,7 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Record the chat apps change (0
 ### Verification
 
 - `test -z "$(gofmt -l .)"`, `go vet ./...`: clean.
-- `go test -race -count=1 ./...`: 383 top-level tests pass, 1 skipped (live hub only); 15 of them are
+- `go test -race -count=1 ./...`: 384 top-level tests pass, 1 skipped (live hub only); 16 of them are
   new in `chat_apps_test.go`.
 - README examples compiled in a scratch module against this tree.
 - `check-sdk-parity.py --consumer thalovant-go-sdk`: verified; `chat-apps` reported as not yet

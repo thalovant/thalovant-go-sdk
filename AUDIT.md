@@ -2,7 +2,7 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Audit notes from adding chat a
 
 # Audit
 
-Evidence: `go test -race -count=1 ./...` on 2026-11-03 (Go 1.26.10, linux/amd64): 383 top-level tests
+Evidence: `go test -race -count=1 ./...` on 2026-11-03 (Go 1.26.10, linux/amd64): 384 top-level tests
 pass, 0 fail, 1 skipped (`TestNoiseInteropAgainstLiveHub`, which needs a live hub). `gofmt -l .` is
 empty and `go vet ./...` is clean. The parity check (`check-sdk-parity.py --consumer
 thalovant-go-sdk`) verifies the acceptance record and reports `chat-apps` as a capability the

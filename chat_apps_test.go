@@ -993,3 +993,18 @@ func TestChatAppAvatarReadIsBounded(t *testing.T) {
 		}
 	}
 }
+
+// The avatar read refuses an oversized error body as well as an oversized
+// picture: the cap applies before the status is read.
+func TestChatAppAvatarErrorBodyIsBounded(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write(bytes.Repeat([]byte{'x'}, maxBridgeAvatarBytes+1))
+	}))
+	defer server.Close()
+	avatar, err := NewControlPlane(server.URL, "api-token").GetBridgeAvatar(context.Background(), "b")
+	if apiErr := refusedAPIError(t, err); apiErr.StatusCode != http.StatusInternalServerError || apiErr.Detail != "response body too large" || avatar.Content != nil {
+		t.Fatalf("an oversized error body: %#v, %d bytes", apiErr, len(avatar.Content))
+	}
+}
