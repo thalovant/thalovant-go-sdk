@@ -120,6 +120,7 @@ type fakeBridgeAPI struct {
 	requests []recordedRequest
 }
 
+// handler records each request and answers it by route.
 func (f *fakeBridgeAPI) handler(t *testing.T) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
@@ -172,6 +173,7 @@ func (f *fakeBridgeAPI) handler(t *testing.T) http.HandlerFunc {
 	}
 }
 
+// take returns the requests seen since the last take, and forgets them.
 func (f *fakeBridgeAPI) take() []recordedRequest {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -180,12 +182,14 @@ func (f *fakeBridgeAPI) take() []recordedRequest {
 	return seen
 }
 
+// writeJSON answers a JSON body with the status given.
 func writeJSON(w http.ResponseWriter, status int, body string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write([]byte(body))
 }
 
+// newFakeBridgeAPI is a control plane talking to a fresh fake API.
 func newFakeBridgeAPI(t *testing.T) (*ControlPlane, *fakeBridgeAPI) {
 	t.Helper()
 	fake := &fakeBridgeAPI{}
@@ -207,6 +211,7 @@ func only(t *testing.T, fake *fakeBridgeAPI) recordedRequest {
 	return seen[0]
 }
 
+// assertRoute fails unless the request went to that method, path and query.
 func assertRoute(t *testing.T, seen recordedRequest, method, path, query string) {
 	t.Helper()
 	if seen.Method != method || seen.Path != path || seen.Query != query {
@@ -214,6 +219,7 @@ func assertRoute(t *testing.T, seen recordedRequest, method, path, query string)
 	}
 }
 
+// assertBody fails unless the request body is exactly want.
 func assertBody(t *testing.T, seen recordedRequest, want map[string]any) {
 	t.Helper()
 	if !reflect.DeepEqual(seen.Body, want) {
@@ -223,6 +229,7 @@ func assertBody(t *testing.T, seen recordedRequest, want map[string]any) {
 	}
 }
 
+// Every read route asks the path and query the API serves, and decodes the answer.
 func TestChatAppReadRoutesAskWhatTheAPIServes(t *testing.T) {
 	cp, fake := newFakeBridgeAPI(t)
 	ctx := context.Background()
@@ -293,6 +300,8 @@ func TestChatAppReadRoutesAskWhatTheAPIServes(t *testing.T) {
 	}
 }
 
+// Every write route sends its method, path and body, and an update only the
+// fields it sets, with If-Match only for an etag.
 func TestChatAppWriteRoutesSendOnlyWhatWasSet(t *testing.T) {
 	cp, fake := newFakeBridgeAPI(t)
 	ctx := context.Background()
@@ -393,6 +402,7 @@ func TestChatAppWriteRoutesSendOnlyWhatWasSet(t *testing.T) {
 	}
 }
 
+// A bridge with every optional member set decodes all of them.
 func TestBridgeReadsEveryMemberTheAPISends(t *testing.T) {
 	var bridge Bridge
 	if err := json.Unmarshal([]byte(bridgeJSON), &bridge); err != nil {
@@ -434,6 +444,7 @@ func TestBridgeReadsEveryMemberTheAPISends(t *testing.T) {
 	}
 }
 
+// Enum values added later survive, and missing optionals read as nil or empty.
 func TestBridgeKeepsUnknownValuesAndToleratesMissingOptionals(t *testing.T) {
 	var bridge Bridge
 	if err := json.Unmarshal([]byte(minimalBridgeJSON), &bridge); err != nil {
@@ -464,6 +475,7 @@ func TestBridgeKeepsUnknownValuesAndToleratesMissingOptionals(t *testing.T) {
 	}
 }
 
+// Connectors read the API's defaults and keep statuses and helpers added later.
 func TestChatAppConnectorsReadDefaultsAndUnknownValues(t *testing.T) {
 	var envelope struct {
 		Data []ChatAppConnector `json:"data"`
@@ -514,6 +526,7 @@ func TestChatAppConnectorsReadDefaultsAndUnknownValues(t *testing.T) {
 	}
 }
 
+// Networks, test results and chat lists read their defaults.
 func TestBridgeNetworksAndSmallResultsReadTheirDefaults(t *testing.T) {
 	var networks BridgeNetworks
 	if err := json.Unmarshal([]byte(networksJSON), &networks); err != nil {
@@ -539,6 +552,7 @@ func TestBridgeNetworksAndSmallResultsReadTheirDefaults(t *testing.T) {
 	}
 }
 
+// Input the API would refuse is refused locally, with nothing sent.
 func TestChatAppCallsRefuseBadInputWithoutSendingIt(t *testing.T) {
 	cp, fake := newFakeBridgeAPI(t)
 	ctx := context.Background()
@@ -592,6 +606,7 @@ func refusingAPI(t *testing.T, status int, body string, header map[string]string
 	return NewControlPlane(server.URL, "api-token")
 }
 
+// Refusals carry their code and fields and keep the plan, auth and retry rules.
 func TestChatAppRefusalsCarryCodeFieldsAndTheUsualKinds(t *testing.T) {
 	ctx := context.Background()
 	cases := []struct {
@@ -730,6 +745,7 @@ func TestChatAppRefusalsCarryCodeFieldsAndTheUsualKinds(t *testing.T) {
 	}
 }
 
+// A 2xx body that is not JSON is an *APIError, not a zero bridge.
 func TestChatAppAnswerThatIsNotJSONIsAnAPIError(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)
@@ -742,6 +758,7 @@ func TestChatAppAnswerThatIsNotJSONIsAnAPIError(t *testing.T) {
 	}
 }
 
+// Fields are read like Code: top level first, then an object detail; strings only.
 func TestProblemFieldNamesFollowTheCodeRules(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -768,6 +785,7 @@ func TestProblemFieldNamesFollowTheCodeRules(t *testing.T) {
 	}
 }
 
+// A SecretValue prints the marker through fmt, JSON, text and slog, nested or not.
 func TestSecretValuePrintsTheMarkerEverywhere(t *testing.T) {
 	secret := NewSecretValue(fakeBotToken)
 	if secret.Reveal() != fakeBotToken || secret.IsZero() {
@@ -836,6 +854,7 @@ func TestSecretValuePrintsTheMarkerEverywhere(t *testing.T) {
 	}
 }
 
+// Secrets reach the request body and never the error a refusal returns.
 func TestChatAppSecretsReachOnlyTheRequestBody(t *testing.T) {
 	ctx := context.Background()
 	// The API refuses, and the refusal is printed every way a caller might.
@@ -897,11 +916,13 @@ func TestChatAppSecretsReachOnlyTheRequestBody(t *testing.T) {
 // body in its error.
 type leakyTransport struct{}
 
+// RoundTrip fails with the request body in its message.
 func (leakyTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	raw, _ := io.ReadAll(r.Body)
 	return nil, fmt.Errorf("dial failed while sending %s to %s", raw, r.URL)
 }
 
+// A transport failure that quotes the body still names no secret.
 func TestChatAppTransportFailureNamesNoSecret(t *testing.T) {
 	cp := NewControlPlane("https://api.example.com", "api-token")
 	cp.HTTPClient = &http.Client{Transport: leakyTransport{}}
@@ -934,6 +955,7 @@ func rawAnswer(t *testing.T, response string) *ControlPlane {
 	return NewControlPlane(server.URL, "api-token")
 }
 
+// A body shorter than its Content-Length is an error, not partial bytes.
 func TestChatAppBodyCutShortIsNotAnAnswer(t *testing.T) {
 	ctx := context.Background()
 	cut := "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 100\r\n\r\n\x89PNG-partial"
@@ -950,6 +972,7 @@ func TestChatAppBodyCutShortIsNotAnAnswer(t *testing.T) {
 	}
 }
 
+// The avatar read stops at its cap and refuses a larger body.
 func TestChatAppAvatarReadIsBounded(t *testing.T) {
 	ctx := context.Background()
 	for _, size := range []int{maxBridgeAvatarBytes, maxBridgeAvatarBytes + 1} {

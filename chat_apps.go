@@ -541,6 +541,8 @@ type BridgeUpdate struct {
 	ETag string
 }
 
+// bridgePath is the escaped path of one bridge; a blank id is refused before
+// anything is sent.
 func bridgePath(bridgeID string) (string, error) {
 	if strings.TrimSpace(bridgeID) == "" {
 		return "", fmt.Errorf("%w: a bridge id is required", ErrAPI)
@@ -568,6 +570,7 @@ func (c *ControlPlane) controlInto(ctx context.Context, method, path string, pay
 	return nil
 }
 
+// bridgeInto sends one request whose answer is a bridge and decodes it.
 func (c *ControlPlane) bridgeInto(ctx context.Context, method, path string, payload map[string]any, headers map[string]string) (Bridge, error) {
 	var bridge Bridge
 	if err := c.controlInto(ctx, method, path, payload, headers, &bridge); err != nil {

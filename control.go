@@ -1210,6 +1210,8 @@ func (c *ControlPlane) request(ctx context.Context, method string, path string, 
 	return result, nil
 }
 
+// send makes one control-plane request and answers its status, body and
+// headers; a request that got no answer is an error. The body is read whole.
 func (c *ControlPlane) send(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool) (int, []byte, http.Header, error) {
 	return c.sendWithin(ctx, method, path, payload, headers, auth, 0)
 }
