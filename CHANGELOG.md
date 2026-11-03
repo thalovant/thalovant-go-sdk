@@ -71,6 +71,10 @@ The Python reference's 0.9.1 round. Everything is new API; no existing call chan
 - Every non-2xx control-plane response -- any call, the read half of a guarded configuration merge, and the device sign-in's token poll -- builds its error in one place that decodes the body once.
 - Declares the parity contract's new `api-errors` capability, run against the Python reference's `api-error-vectors.json`: thirteen responses served by a loopback HTTP server and read back through `GetHub`, with the results recorded in `contracts/conformance-results.json`.
 
+## 0.10.4 — 2026-09-21
+
+- `UsualForm` returns the lower-case usual form whenever the tag is not already that exact string: `UsualForm("en-US")` and `UsualForm("en_US")` are `"en-us", true`, and only `"en-us"` itself is `"", false`. It used to compare with `SameLanguage`, which folds case, so the canonical BCP 47 spelling counted as "already usual" and `Intents` never retried it, although the hub's manifest is keyed by the exact lower-case tag and listed nothing under `en-US`. Ported from the Python reference; `usual_form_test.go` pins both spellings. (This entry was missing when 0.10.4 shipped.)
+
 ## 0.10.1 — 2026-09-18
 
 - A refusal ends an ask at once instead of letting it run to the deadline. The hub sends `hive.policy.denied` the instant it refuses, with no request id, and the request-id gate dropped it: the ask waited out its whole budget, and a caller told somebody their hub "did not answer in time" about a question it had refused and explained. A denial with no request id is now taken when it names the type this ask sent and this ask is the only utterance the client has out; with a second ask or a query in flight either could be the one refused, so neither takes it.
