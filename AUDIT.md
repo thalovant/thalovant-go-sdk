@@ -2,7 +2,7 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Audit notes from adding chat a
 
 # Audit
 
-Evidence: `go test -race -count=1 ./...` on 2026-11-03 (Go 1.26.10, linux/amd64): 381 top-level tests
+Evidence: `go test -race -count=1 ./...` on 2026-11-03 (Go 1.26.10, linux/amd64): 383 top-level tests
 pass, 0 fail, 1 skipped (`TestNoiseInteropAgainstLiveHub`, which needs a live hub). `gofmt -l .` is
 empty and `go vet ./...` is clean. The parity check (`check-sdk-parity.py --consumer
 thalovant-go-sdk`) verifies the acceptance record and reports `chat-apps` as a capability the
@@ -23,9 +23,12 @@ reference does not know yet, which is expected until the Python reference declar
 
 ## Known issues and debt
 
-- **Unbounded response reads.** `ControlPlane.send` reads the whole body with `io.ReadAll`
-  (`control.go`, `raw, _ := io.ReadAll(resp.Body)` in `send`). `GetBridgeAvatar` inherits this. The
-  API caps a picture at 1 MiB, but nothing in the SDK does. See SUGGESTIONS.md.
+- **Unbounded JSON reads.** `ControlPlane.send` calls `sendWithin` with no cap (`control.go`), so JSON
+  responses are read whole. `GetBridgeAvatar` passes a 4 MiB cap (`maxBridgeAvatarBytes` in
+  `chat_apps.go`, `TestChatAppAvatarReadIsBounded`). See SUGGESTIONS.md.
+- **Fixed in this change:** `send` used to drop the `io.ReadAll` error, so a body cut short was
+  returned as complete. It is now an `*APIError` "incomplete response body"
+  (`TestChatAppBodyCutShortIsNotAnAnswer`).
 - **`Fields` only on parsed errors.** `APIError.refusal()` reads `Code` from `Problem` for a
   hand-built error; `Fields` is set only by `apiErrorFromResponse` (`control.go`). Hand-built errors
   carry no `Fields`.

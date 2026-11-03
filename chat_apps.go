@@ -22,10 +22,11 @@ import (
 )
 
 // SecretValue holds a credential the SDK sends and never shows: a bot token, an
-// access token, a client secret. Printing it with any fmt verb, encoding it
-// with encoding/json or as text, and logging it with log/slog all give the
-// fixed marker "[REDACTED]". Reveal is the one way to read the value, and the
-// SDK calls it only to build a request body.
+// access token, a client secret. Printing it with fmt, encoding it with
+// encoding/json or as text, and logging it with log/slog all give the fixed
+// marker "[REDACTED]"; the exceptions are %T, which prints the type name, and
+// %p, which fmt answers itself without the value. Reveal is the one way to
+// read the value, and the SDK calls it only to build a request body.
 //
 //	token := thalovant.NewSecretValue(os.Getenv("TELEGRAM_BOT_TOKEN"))
 //	fmt.Println(token) // [REDACTED]
@@ -62,8 +63,9 @@ func (s SecretValue) String() string { return secretPlaceholder }
 // GoString returns the redaction marker, so %#v never prints the value.
 func (s SecretValue) GoString() string { return secretPlaceholder }
 
-// Format writes the redaction marker for every verb (quoted for %q), so no
-// fmt verb or flag prints the value.
+// Format writes the redaction marker for every verb fmt hands it (quoted for
+// %q), so no verb or flag prints the value. fmt answers %T (the type name) and
+// %p itself, without calling Format; neither prints the value.
 func (s SecretValue) Format(state fmt.State, verb rune) {
 	if verb == 'q' {
 		_, _ = io.WriteString(state, strconv.Quote(secretPlaceholder))
@@ -709,9 +711,11 @@ func (c *ControlPlane) UpdateBridge(ctx context.Context, bridgeID string, update
 	return c.bridgeInto(ctx, http.MethodPatch, path, payload, headers)
 }
 
-// ReplaceBridgeToken replaces the bot token of a single-token connector
-// (Telegram, Discord). The token must belong to the same bot (409
-// bridge_token_other_bot otherwise: make a new bridge).
+// ReplaceBridgeToken replaces the token of a connector whose single secret is
+// "token" (Telegram, Discord, Mattermost); use ReplaceBridgeSecrets for the
+// others. Where the API checks the bot (Telegram, Discord), the token must
+// belong to the same bot (409 bridge_token_other_bot otherwise: make a new
+// bridge).
 func (c *ControlPlane) ReplaceBridgeToken(ctx context.Context, bridgeID string, token SecretValue) (Bridge, error) {
 	path, err := bridgePath(bridgeID)
 	if err != nil {
@@ -765,14 +769,20 @@ func (c *ControlPlane) SendBridgeTestMessage(ctx context.Context, bridgeID, chat
 	return result, nil
 }
 
+// maxBridgeAvatarBytes caps the picture GetBridgeAvatar reads. The API serves
+// at most 1 MiB; the rest is headroom, so a larger body is refused rather
+// than read into memory without bound.
+const maxBridgeAvatarBytes = 4 << 20
+
 // GetBridgeAvatar reads the bot's picture. A bot without one answers the
-// usual *APIError with HTTP 404.
+// usual *APIError with HTTP 404, and a body over 4 MiB, or one cut short, an
+// *APIError too.
 func (c *ControlPlane) GetBridgeAvatar(ctx context.Context, bridgeID string) (BridgeAvatar, error) {
 	path, err := bridgePath(bridgeID)
 	if err != nil {
 		return BridgeAvatar{}, err
 	}
-	status, raw, header, err := c.send(ctx, http.MethodGet, path+"/avatar", nil, map[string]string{"Accept": "image/*"}, true)
+	status, raw, header, err := c.sendWithin(ctx, http.MethodGet, path+"/avatar", nil, map[string]string{"Accept": "image/*"}, true, maxBridgeAvatarBytes)
 	if err != nil {
 		return BridgeAvatar{}, err
 	}

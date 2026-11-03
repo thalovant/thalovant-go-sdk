@@ -10,6 +10,8 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Record the chat apps change (0
   "Chat apps", CHANGELOG entry, version 0.14.0 in `VERSION` and `version.go`, and a `chat-apps`
   entry in `contracts/sdk-parity.json` with refreshed hashes for every capability whose evidence
   files changed (`control.go`, `errors.go`).
+- **Review round:** `send` now returns an `*APIError` for a body cut short instead of the partial
+  bytes, and `GetBridgeAvatar` reads at most 4 MiB (`sendWithin` in `control.go`).
 - **Why:** hub owners can connect chat networks to their hubs, and every SDK exposes the same
   surface (the Python SDK is the parity reference).
 - **Release:** the PR bumps the minor version itself, so the auto-release publishes v0.14.0 on merge
@@ -18,7 +20,7 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Record the chat apps change (0
 ### Verification
 
 - `test -z "$(gofmt -l .)"`, `go vet ./...`: clean.
-- `go test -race -count=1 ./...`: 381 top-level tests pass, 1 skipped (live hub only); 13 of them are
+- `go test -race -count=1 ./...`: 383 top-level tests pass, 1 skipped (live hub only); 15 of them are
   new in `chat_apps_test.go`.
 - README examples compiled in a scratch module against this tree.
 - `check-sdk-parity.py --consumer thalovant-go-sdk`: verified; `chat-apps` reported as not yet

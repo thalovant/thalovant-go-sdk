@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -208,15 +207,6 @@ func only(t *testing.T, fake *fakeBridgeAPI) recordedRequest {
 	return seen[0]
 }
 
-func sortedKeys(body map[string]any) []string {
-	keys := make([]string, 0, len(body))
-	for key := range body {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	return keys
-}
-
 func assertRoute(t *testing.T, seen recordedRequest, method, path, query string) {
 	t.Helper()
 	if seen.Method != method || seen.Path != path || seen.Query != query {
@@ -243,14 +233,17 @@ func TestChatAppReadRoutesAskWhatTheAPIServes(t *testing.T) {
 	}
 	assertRoute(t, only(t, fake), "GET", "/v1/bridges/connectors", "")
 
-	if _, err := cp.GetBridgeNetworks(ctx, "h/1"); err != nil {
-		t.Fatal(err)
+	wantAllowance := BridgeAllowance{OwnerID: "o-1", Plan: "Home", PaidPlan: true, Limit: 2, Used: 1, Remaining: 1, CanCreate: true}
+	for hubID, query := range map[string]string{"h/1": "hub_id=h%2F1", "": ""} {
+		networks, err := cp.GetBridgeNetworks(ctx, hubID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertRoute(t, only(t, fake), "GET", "/v1/bridges/networks", query)
+		if networks.Allowance != wantAllowance || len(networks.Networks) != 2 || networks.Networks[0].Network != "telegram" {
+			t.Fatalf("GetBridgeNetworks(%q) = %+v", hubID, networks)
+		}
 	}
-	assertRoute(t, only(t, fake), "GET", "/v1/bridges/networks", "hub_id=h%2F1")
-	if _, err := cp.GetBridgeNetworks(ctx, ""); err != nil {
-		t.Fatal(err)
-	}
-	assertRoute(t, only(t, fake), "GET", "/v1/bridges/networks", "")
 
 	bridges, err := cp.ListBridges(ctx, BridgeListOptions{HubID: "h-1", OwnerID: "o-1", Limit: 500})
 	if err != nil || len(bridges) != 2 || bridges[0].Network != "telegram" || bridges[1].Network != "matrix" {
@@ -794,10 +787,14 @@ func TestSecretValuePrintsTheMarkerEverywhere(t *testing.T) {
 
 	var printed []string
 	for _, value := range values {
-		for _, format := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%T", "%10.3s", "%-8v"} {
+		for _, format := range []string{"%v", "%+v", "%#v", "%s", "%q", "%x", "%X", "%d", "%T", "%p", "%10.3s", "%-8v"} {
 			printed = append(printed, fmt.Sprintf(format, value))
 		}
 		printed = append(printed, fmt.Sprint(value), fmt.Sprintln(value))
+	}
+	// fmt answers %T and %p itself, without Format; neither shows the value.
+	if fmt.Sprintf("%T", secret) != "thalovant.SecretValue" || !strings.HasPrefix(fmt.Sprintf("%p", secret), "%!p(") {
+		t.Fatalf("%%T and %%p: %T %p", secret, secret)
 	}
 	if secret.String() != "[REDACTED]" || secret.GoString() != "[REDACTED]" || fmt.Sprintf("%v", secret) != "[REDACTED]" || fmt.Sprintf("%q", secret) != `"[REDACTED]"` {
 		t.Fatalf("the marker: %s %s %v %q", secret.String(), secret.GoString(), secret, secret)
@@ -915,6 +912,61 @@ func TestChatAppTransportFailureNamesNoSecret(t *testing.T) {
 	for form, output := range displayForms(err) {
 		if strings.Contains(output, fakeBotToken) {
 			t.Fatalf("%s names the token: %s", form, output)
+		}
+	}
+}
+
+// rawAnswer answers every request with the bytes given, as written, and then
+// closes the connection: a body shorter than its Content-Length is cut short.
+func rawAnswer(t *testing.T, response string) *ControlPlane {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, buffered, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		defer conn.Close()
+		_, _ = buffered.WriteString(response)
+		_ = buffered.Flush()
+	}))
+	t.Cleanup(server.Close)
+	return NewControlPlane(server.URL, "api-token")
+}
+
+func TestChatAppBodyCutShortIsNotAnAnswer(t *testing.T) {
+	ctx := context.Background()
+	cut := "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 100\r\n\r\n\x89PNG-partial"
+	if _, err := rawAnswer(t, cut).GetBridgeAvatar(ctx, "b"); err == nil {
+		t.Fatal("a picture cut short was returned as complete")
+	} else if apiErr := refusedAPIError(t, err); apiErr.StatusCode != 200 || apiErr.Detail != "incomplete response body" {
+		t.Fatalf("%#v", apiErr)
+	}
+	cutJSON := "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 500\r\n\r\n" + bridgeJSON[:200]
+	if _, err := rawAnswer(t, cutJSON).GetBridge(ctx, "b"); err == nil {
+		t.Fatal("a bridge cut short was returned")
+	} else if apiErr := refusedAPIError(t, err); apiErr.Detail != "incomplete response body" {
+		t.Fatalf("%#v", apiErr)
+	}
+}
+
+func TestChatAppAvatarReadIsBounded(t *testing.T) {
+	ctx := context.Background()
+	for _, size := range []int{maxBridgeAvatarBytes, maxBridgeAvatarBytes + 1} {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write(bytes.Repeat([]byte{0xff}, size))
+		}))
+		avatar, err := NewControlPlane(server.URL, "api-token").GetBridgeAvatar(ctx, "b")
+		server.Close()
+		if size <= maxBridgeAvatarBytes {
+			if err != nil || len(avatar.Content) != size || avatar.ContentType != "image/jpeg" {
+				t.Fatalf("a picture at the cap: %d bytes, %v", len(avatar.Content), err)
+			}
+			continue
+		}
+		if apiErr := refusedAPIError(t, err); apiErr.Detail != "response body too large" || avatar.Content != nil {
+			t.Fatalf("a picture over the cap: %#v, %d bytes", apiErr, len(avatar.Content))
 		}
 	}
 }

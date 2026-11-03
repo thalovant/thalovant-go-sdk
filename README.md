@@ -134,7 +134,7 @@ if err != nil {
 }
 var allowed []thalovant.BridgeAllowedChat
 for _, chat := range chats.Data {
-	if chat.Selectable {
+	if chat.Selectable && len(allowed) < 50 { // a bridge answers in at most 50 chats
 		allowed = append(allowed, chat.AllowedChat())
 	}
 }
