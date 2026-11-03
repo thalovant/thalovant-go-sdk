@@ -262,10 +262,14 @@ func TestChatAppReadRoutesAskWhatTheAPIServes(t *testing.T) {
 	}
 	assertRoute(t, only(t, fake), "GET", "/v1/bridges", "")
 
-	if _, err := cp.GetBridge(ctx, "b/1"); err != nil {
+	bridge, err := cp.GetBridge(ctx, "b/1")
+	if err != nil {
 		t.Fatal(err)
 	}
 	assertRoute(t, only(t, fake), "GET", "/v1/bridges/b%2F1", "")
+	if bridge.Network != "telegram" || bridge.ETag != "e-7" || bridge.Bot.Username != "myhub_bot" {
+		t.Fatalf("GetBridge = %+v", bridge)
+	}
 
 	chats, err := cp.ListBridgeChats(ctx, "b/1")
 	if err != nil {

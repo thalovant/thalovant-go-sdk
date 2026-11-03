@@ -1,6 +1,12 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Chat apps (0.14.0), merged with the CodeRabbit follow-up entry from main.
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: CodeRabbit follow-up of #83 (assert the decoded GetBridge result).
 
 # Maintenance Report
+
+## 2026-11-03 — CodeRabbit follow-up of #83
+
+- `TestChatAppReadRoutesAskWhatTheAPIServes` (`chat_apps_test.go`) now asserts what `GetBridge` decodes (`Network`, `ETag`, `Bot.Username`), not only that it returned no error, as CodeRabbit's last review-body item on #83 asked. Test-only: no release. The `chat-apps` test evidence hash in `contracts/sdk-parity.json` is refreshed.
+- Verification: `go vet ./...` and `go test -count=1 ./...` pass; the parity checker verifies the acceptance.
+- Transparency: Claude Opus 5.5 (claude-opus-5-5) wrote the assertion and this entry; hosted CI gates the merge.
 
 ## 2026-11-03: chat apps (0.14.0)
 
