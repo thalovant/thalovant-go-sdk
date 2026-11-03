@@ -1,4 +1,17 @@
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Add the 0.14.0 entry for chat apps.
+
 # Changelog
+
+## 0.14.0 — 2026-11-03
+
+Chat apps: a hub owner connects a chat network (Telegram and Discord; Matrix, Mattermost and Twitch in beta) to their hub, and the hub answers there. This release covers the owner routes under `/v1/bridges`. New API only; nothing is removed and no signature changes.
+
+- `ControlPlane` gains `ListChatAppConnectors`, `GetBridgeNetworks`, `ListBridges`, `CreateBridge`, `GetBridge`, `UpdateBridge`, `ReplaceBridgeToken`, `ReplaceBridgeSecrets`, `ListBridgeChats`, `SendBridgeTestMessage`, `GetBridgeAvatar` and `DeleteBridge` (new file `chat_apps.go`). They answer typed values (`ChatAppConnector`, `BridgeNetworks` with its `BridgeAllowance`, `Bridge` with its `BridgeStatus` and `BridgeHold`, `BridgeChatList`, `BridgeTestResult`, `BridgeAvatar`) whose JSON names are the API's. Reads need `hubs:read`, writes `hubs:write`.
+- The enums (`BridgeState`, `BridgeSessionScope`, `BridgePhase`, `BridgeStatusReason`, `BridgeStatusSource`, `BridgeHoldReason`, `ChatAppStatus`, `ChatAppHelper`) are string types with constants, and a value the API adds later is kept as sent instead of failing the decode. Optional members the API leaves out read as nil or "", and the API's defaults apply (`ChatAppSecretField.Required` and `BridgeChat.Selectable` true, `ChatAppOptions.SessionScopes` person and chat, `BridgeTestResult.Language` "en").
+- `CreateBridge` takes a `BridgeCreate`: exactly one of `Token` and `Secrets`, or nothing is sent; `Settings` when non-nil. It sends `connector`, not the older `network`. `UpdateBridge` takes a `BridgeUpdate` and sends only what it sets (a non-nil `Allowed`, `Settings` or pointer, a non-empty `SessionScope`); `ETag`, when set, goes out as `If-Match`, and a stale one answers 412. Pause and resume are `Paused: new(true)` and `Paused: new(false)`.
+- `SecretValue` wraps a credential. Every fmt verb, `json.Marshal`, `MarshalText` and `log/slog` print `[REDACTED]`, the marker the SDK already uses; `Reveal` reads the value, and the SDK calls it only to build the request body. Tests check that a token reaches the request body and nothing else: not an error, not a printed `BridgeCreate`, not a log line.
+- `APIError.Fields` names the settings or secrets a refusal is about (`bridge_settings_invalid`, `bridge_secrets_invalid`, the `bridge_url_*` codes), read from the body's `fields` or from inside an object `detail`, string entries only; nil otherwise. It never holds values. The plan and auth refusals match `ErrPlan` and `ErrAuth` as before, and `RetryAfter` reads a 429's `Retry-After`.
+- The parity contract declares the new `chat-apps` capability (`chat_apps.go`, `control.go`, `errors.go`; tests `chat_apps_test.go`) and refreshes the evidence hashes of every capability whose files changed.
 
 ## 0.13.0 — 2026-10-11
 

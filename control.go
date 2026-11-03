@@ -1309,8 +1309,9 @@ var serverErrorDetailFields = []string{"detail", "message", "error", "error_desc
 // apiErrorFromResponse is the error for a response the API answered with a
 // failure status, and the one place every such error is built. The body is
 // decoded once. When it is a JSON object it rides on the error whole, as
-// Problem, with its Code and its unshortened ProblemDetail read out of it; the
-// Detail that Error() prints stays the bounded line it always was.
+// Problem, with its Code, its unshortened ProblemDetail and the Fields it
+// names read out of it; the Detail that Error() prints stays the bounded line
+// it always was.
 func apiErrorFromResponse(status int, raw []byte, header http.Header) *APIError {
 	problem := decodeProblem(raw)
 	code, detail := problemFields(problem)
@@ -1320,6 +1321,7 @@ func apiErrorFromResponse(status int, raw []byte, header http.Header) *APIError 
 		Code:          code,
 		ProblemDetail: detail,
 		Problem:       problem,
+		Fields:        problemFieldNames(problem),
 		RetryAfter:    retryAfter(problem, header),
 	}
 }

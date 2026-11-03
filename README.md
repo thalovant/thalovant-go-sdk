@@ -1,3 +1,5 @@
+Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Add the chat apps section (connectors, networks and the /v1/bridges owner routes).
+
 # Thalovant Go SDK
 
 [![Go reference](https://pkg.go.dev/badge/github.com/thalovant/thalovant-go-sdk.svg)](https://pkg.go.dev/github.com/thalovant/thalovant-go-sdk) [![CI](https://github.com/thalovant/thalovant-go-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/thalovant/thalovant-go-sdk/actions/workflows/ci.yml) [![Licence](https://img.shields.io/github/license/thalovant/thalovant-go-sdk)](LICENSE) [![Docs](https://img.shields.io/badge/docs-docs.thalovant.com-5c6bc0)](https://docs.thalovant.com/developers/sdks/go/)
@@ -75,7 +77,8 @@ These topics have no counterpart on the documentation page, so a short version s
 
 - **API errors.** A refused control-plane request returns a `*thalovant.APIError`
   (`errors.Is(err, thalovant.ErrAPI)`). Read `StatusCode`, `Code`, `ProblemDetail`
-  (the API's whole sentence) and `Problem` (the whole JSON error body as a `map[string]any`)
+  (the API's whole sentence), `Fields` (the settings or secrets a refusal names) and `Problem`
+  (the whole JSON error body as a `map[string]any`)
   from the error itself; `Error()` is a shortened display line.
 - **Hub refusals.** A refusal ends an ask at once instead of at its deadline. Use `errors.As`
   with `*thalovant.PolicyDeniedError` (`Code`, `Quota`, `Allowed`, `DeniedType`) and
@@ -86,6 +89,137 @@ These topics have no counterpart on the documentation page, so a short version s
   did not come from a file, beside the SDK config file. Back up that directory, not only the
   config directory, and do not regenerate a paired client's key. A hub that pinned another key
   refuses this one with `*thalovant.ClientKeyRejectedError`.
+
+## Chat apps
+
+A hub owner can connect a chat network to a hub, and the hub answers there. Telegram and Discord
+are offered; Matrix, Mattermost and Twitch are in beta. The calls are on `ControlPlane`. Reads need
+a token with `hubs:read`, writes `hubs:write`.
+
+Start with the allowance. A Free plan allows no bridge (`PaidPlan` is false, and creating one
+answers 402), and a full allowance answers 403 `plan_limit`. `ListChatAppConnectors` says which
+secrets and settings each network takes.
+
+```go
+cp := thalovant.NewDefaultControlPlane(os.Getenv("THALOVANT_API_TOKEN"))
+
+networks, err := cp.GetBridgeNetworks(ctx, hubID)
+if err != nil {
+	return err
+}
+if !networks.Allowance.CanCreate {
+	return fmt.Errorf("plan %s allows %d chat bridges, %d in use",
+		networks.Allowance.Plan, networks.Allowance.Limit, networks.Allowance.Used)
+}
+```
+
+Credentials go in a `thalovant.SecretValue`. Printing one, encoding it as JSON or logging it with
+`log/slog` gives `[REDACTED]`; the SDK reads the value only to build the request body.
+
+**Telegram** (and Discord): one bot token. The bridge starts in setup, and runs once it has chats.
+
+```go
+bridge, err := cp.CreateBridge(ctx, thalovant.BridgeCreate{
+	HubID:     hubID,
+	Connector: "telegram",
+	Token:     thalovant.NewSecretValue(os.Getenv("TELEGRAM_BOT_TOKEN")),
+})
+if err != nil {
+	return err
+}
+// Add the bot to a group with bridge.InviteLinks.AddToGroup, then choose where it answers.
+chats, err := cp.ListBridgeChats(ctx, bridge.ID)
+if err != nil {
+	return err
+}
+var allowed []thalovant.BridgeAllowedChat
+for _, chat := range chats.Data {
+	if chat.Selectable {
+		allowed = append(allowed, chat.AllowedChat())
+	}
+}
+bridge, err = cp.UpdateBridge(ctx, bridge.ID, thalovant.BridgeUpdate{Allowed: allowed, ETag: bridge.ETag})
+if err != nil {
+	return err
+}
+_, err = cp.SendBridgeTestMessage(ctx, bridge.ID, allowed[0].ID)
+```
+
+**Matrix**: settings for the homeserver and the bot's user, and the access token as a secret. A
+connector without chat discovery answers `ManualEntry: true`: type the room ids
+(`!abc:example.org`), which must match the connector's `Targets.Pattern`.
+
+```go
+bridge, err := cp.CreateBridge(ctx, thalovant.BridgeCreate{
+	HubID:     hubID,
+	Connector: "matrix",
+	Secrets: map[string]thalovant.SecretValue{
+		"access_token": thalovant.NewSecretValue(os.Getenv("MATRIX_ACCESS_TOKEN")),
+	},
+	Settings: map[string]any{"homeserver": "https://matrix.example.org", "user_id": "@hub:example.org"},
+})
+if err != nil {
+	return err
+}
+bridge, err = cp.UpdateBridge(ctx, bridge.ID, thalovant.BridgeUpdate{
+	Allowed: []thalovant.BridgeAllowedChat{{ID: "!abc:example.org", Title: "Family"}},
+})
+```
+
+**Twitch**: the bot's login and the application's client id as settings, the refresh token and
+the client secret as secrets. Targets are channel logins; `#Name` is stored as `name`.
+
+```go
+bridge, err := cp.CreateBridge(ctx, thalovant.BridgeCreate{
+	HubID:     hubID,
+	Connector: "twitch",
+	Secrets: map[string]thalovant.SecretValue{
+		"refresh_token": thalovant.NewSecretValue(os.Getenv("TWITCH_REFRESH_TOKEN")),
+		"client_secret": thalovant.NewSecretValue(os.Getenv("TWITCH_CLIENT_SECRET")),
+	},
+	Settings: map[string]any{"bot_login": "myhubbot", "client_id": os.Getenv("TWITCH_CLIENT_ID")},
+})
+```
+
+Pause and resume with `UpdateBridge`; there is no separate call. Replace credentials with
+`ReplaceBridgeToken` or `ReplaceBridgeSecrets` (secrets not named stay as stored), and remove a
+bridge with `DeleteBridge`.
+
+```go
+_, err = cp.UpdateBridge(ctx, bridge.ID, thalovant.BridgeUpdate{Paused: new(true)})
+_, err = cp.UpdateBridge(ctx, bridge.ID, thalovant.BridgeUpdate{Paused: new(false)})
+```
+
+`bridge.Status.Reason` is the stable word to branch on (a value added later is kept as sent;
+treat an unknown one like `Starting`):
+
+| Reason | Meaning |
+| :--- | :--- |
+| `Setup` | No chats chosen yet. |
+| `Starting` | Starting, or not reported yet. |
+| `Connected` | Running and answering. |
+| `Paused` | Paused by the owner, or held by the platform (see `Hold`). |
+| `Unavailable` | Started but not running, or a platform-side error. |
+| `TokenMissing` | The stored credential has not reached the bridge yet. |
+| `TokenRejected` | The network refused the credentials: replace them. |
+
+`bridge.Hold` is nil when the owner paused the bridge. The platform sets it when it paused the
+bridge itself: `plan_limit` (the plan allows fewer running bridges; it lifts on its own when the
+plan has room again, or resume it then) or `account_suspended` (it resumes when the account is
+reactivated).
+
+A refusal is a `*thalovant.APIError`. Branch on `Code`; `Fields` names the settings or secrets it
+is about, never their values. `errors.Is(err, thalovant.ErrPlan)` covers 402 and 403
+`plan_limit`, and `RetryAfter` is set on a 429.
+
+| Status | Codes |
+| :--- | :--- |
+| 409 | `bridge_bot_in_use`, `bridge_helper_unavailable`, `bridge_token_missing`, `bridge_token_other_bot`, `bridge_running` (pause before listing Telegram chats), `bridge_telegram_updates_busy` |
+| 422 | `bridge_token_malformed`, `bridge_token_invalid`, `bridge_token_not_a_bot`, `bridge_network_refused`, `bridge_allowed_required`, `bridge_chat_id_invalid`, `bridge_chat_not_allowed`, `bridge_settings_invalid`, `bridge_secrets_invalid`, `bridge_url_invalid`, `bridge_url_port_not_allowed`, `bridge_url_not_public`, `bridge_url_unresolvable`, `bridge_too_many_targets`, `bridge_mention_required` |
+| 402, 403 | Free plan (no code); `plan_limit` with `resource: "chat_bridge"` |
+| 412 | `ETag mismatch`: read the bridge again and retry with its `ETag` |
+| 429 | `bridge_rate_limited`, `bridge_network_rate_limited` |
+| 502, 503, 504 | `bridge_network_unavailable`, `bridge_secret_store_failed`, `bridge_network_not_offered`, `bridge_secret_store_unavailable`, `bridge_network_timeout` |
 
 ## Development
 

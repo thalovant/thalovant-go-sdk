@@ -361,6 +361,13 @@ type APIError struct {
 	// values the body echoed back from the request, which is why Error()
 	// never prints it.
 	Problem map[string]any
+	// Fields names what a refusal is about: the settings or secrets a chat
+	// app refused (bridge_settings_invalid, bridge_secrets_invalid, the
+	// bridge_url_* codes), by name, never by value. It is read from the
+	// body's "fields" member, or from inside a "detail" member that is itself
+	// an object, like Code; only string entries are kept. nil when the body
+	// names none.
+	Fields []string
 	// RetryAfter is how long the API asked the caller to wait before trying
 	// again, when it said; 0 otherwise. It is read from the body's
 	// retry_after_seconds (at the top, or inside a detail object), else from
@@ -698,6 +705,30 @@ func problemFields(problem map[string]any) (code string, detail string) {
 		detail = problemText(nested["detail"])
 	}
 	return code, detail
+}
+
+// problemFieldNames reads the names a refusal is about out of an API error
+// body: its "fields" list, or, when the body has none, the "fields" list
+// inside a "detail" that is itself an object. Only string entries count; a
+// list with none is no list.
+func problemFieldNames(problem map[string]any) []string {
+	if problem == nil {
+		return nil
+	}
+	nested, _ := problem["detail"].(map[string]any)
+	for _, source := range []map[string]any{problem, nested} {
+		list, _ := source["fields"].([]any)
+		var names []string
+		for _, entry := range list {
+			if name, ok := entry.(string); ok {
+				names = append(names, name)
+			}
+		}
+		if len(names) > 0 {
+			return names
+		}
+	}
+	return nil
 }
 
 // problemText is a string with something in it, exactly as sent; anything
