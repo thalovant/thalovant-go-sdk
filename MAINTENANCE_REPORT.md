@@ -1,4 +1,10 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: CodeRabbit follow-up of #83 (assert the decoded GetBridge result).
+Last Edit: Claude Opus 5.5 - 2026-11-06 - Motive: Upgrade golang.org/x/net to 0.62.0 for CVE-2026-78661.
+
+## 2026-11-06 — golang.org/x/net 0.62.0
+
+Upgraded for CVE-2026-78661. Verification: `go build ./...` and `go test ./...` pass with Go 1.26.10.
+
+Transparency Report. AI Model: Claude Opus 5.5. Actions Taken: ran `go get` and `go mod tidy`, then built and tested. Oversight: requested by the owner ("make sure all is perfect"); no human review before merge.
 
 # Maintenance Report
 

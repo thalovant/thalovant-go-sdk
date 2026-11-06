@@ -1,4 +1,8 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Chat apps audit notes (0.14.0), merged with the CodeRabbit follow-up audit from main.
+Last Edit: Claude Opus 5.5 - 2026-11-06 - Motive: Upgrade golang.org/x/net to 0.62.0 for CVE-2026-78661.
+
+## 2026-11-06 — CVE-2026-78661 in golang.org/x/net
+
+HIGH, found by the dependency scan in infra-manifests' `contracts` gate at v0.61.0, fixed in v0.62.0. `go.mod` now requires v0.62.0. The scan reads this repository's `go.mod`, and it blocks every infra-manifests pull request until the version moves.
 
 # Audit
 
