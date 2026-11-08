@@ -1,4 +1,13 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Check every CodeRabbit review-body item on #23, #24, #29, #31, #48, #65, #69 and #70 against main and fix the ones still open.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Release #88's fixes as 0.14.2.
+
+## 2026-11-08 — release 0.14.2
+
+#88 (b4d5e55) was merged with `[skip ci]`, so no workflow ran on that push and no release was cut; v0.14.1 stayed the latest tag. `auto-release.yml` has no manual trigger and `release.yml` needs `VERSION` already bumped, so the release goes the way v0.14.1 did: this commit dates the CHANGELOG's Unreleased section as 0.14.2 (and adds the missing 0.14.1 entry), and on its push to `main` the Auto Release plan finds `home.go`, `intents.go` and `language_matching.go` changed since v0.14.1, bumps `VERSION` and `version.go` to 0.14.2 itself and publishes v0.14.2.
+
+- **Changed:** `CHANGELOG.md` (0.14.2 and 0.14.1 headings), `QUICK_FACTS.md` (version), this file. No code.
+- **Verification:** #88's CI passed on its head ed36579, whose tree is b4d5e55's (`e18417b9`); this PR's CI runs the full matrix on the same Go tree, and the release job runs `gofmt`, `go vet` and `go test` again on the bump commit.
+
+Transparency Report. AI Model: Claude Opus 5.5 (claude-opus-5-5). Actions Taken: read the release workflows, wrote the CHANGELOG headings and these notes, merged once CI was green. Oversight: release authorised by the owner ("fix all the coderabbit issues", 2026-11-08); hosted CI gates the merge.
 
 ## 2026-11-08 — CodeRabbit review-body items on merged PRs
 

@@ -1,11 +1,11 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Add chat apps (the /v1/bridges owner routes) and record the 0.14.0 surface.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Record the 0.14.2 release.
 
 # Quick Facts
 
 | Item | Value |
 | :--- | :--- |
 | Module | `github.com/thalovant/thalovant-go-sdk` (package `thalovant`) |
-| Version | 0.14.0 (`VERSION` and `const Version` in `version.go`, kept equal by `TestVersionMatchesVersionFile`) |
+| Version | 0.14.2 (`VERSION` and `const Version` in `version.go`, kept equal by `TestVersionMatchesVersionFile`; the Auto Release workflow bumps both for a patch release) |
 | Go | 1.26.9 or newer (`go.mod`) |
 | Data-plane entry points | `NewClient`, `NewClientFromConfig`, `Client.Ask`, `Client.Intents`, `HubSession` |
 | Control-plane entry points | `NewControlPlane`, `NewDefaultControlPlane`, methods on `*ControlPlane` (`control.go`, `hub_skills.go`, `chat_apps.go`) |
