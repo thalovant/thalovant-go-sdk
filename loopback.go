@@ -66,9 +66,25 @@ const (
 	loopbackMaxConnections = 64
 )
 
-// loopbackAnswerTimeout is how long an accepted tab waits for its page while
-// the code is exchanged; tests shorten it.
-var loopbackAnswerTimeout = 60 * time.Second
+// After an answer, how long and how much of what the browser still sends is
+// read and dropped before the connection closes. A socket closed with bytes
+// unread answers them with a reset, and macOS then throws away the answer
+// the browser had not read yet (an oversized head's 400, a 404 left with an
+// unread body). Tests shorten them.
+var (
+	loopbackDrainTimeout       = 2 * time.Second
+	loopbackDrainLimit   int64 = 1 << 20
+)
+
+// oauthErrors are the error values RFC 6749 section 4.1.2.1 defines. Only
+// these are kept from a callback: anything else is a value somebody else
+// chose, and it could be the state or a code, which must never reach an
+// error.
+var oauthErrors = map[string]bool{
+	"invalid_request": true, "unauthorized_client": true, "access_denied": true,
+	"unsupported_response_type": true, "invalid_scope": true, "server_error": true,
+	"temporarily_unavailable": true,
+}
 
 // loopbackPageHeaders go with every answer. The pages load nothing, and
 // nothing they show may be cached or leak the callback's address (code and
@@ -130,7 +146,11 @@ func classifyRequest(method, target, state string) (int, *loopbackCallback) {
 		if len(errs) == 1 && errs[0] == "access_denied" {
 			return 200, &loopbackCallback{outcome: callbackDenied, errorParam: "access_denied"}
 		}
-		return 200, &loopbackCallback{outcome: callbackFailed, errorParam: errs[0]}
+		errorParam := ""
+		if oauthErrors[errs[0]] {
+			errorParam = errs[0]
+		}
+		return 200, &loopbackCallback{outcome: callbackFailed, errorParam: errorParam}
 	}
 	if codes := values["code"]; len(codes) == 1 && codes[0] != "" {
 		return 200, &loopbackCallback{outcome: callbackCode, code: codes[0]}
@@ -289,7 +309,9 @@ func loopbackPage(text string) []byte {
 
 // loopbackResponse is a whole HTTP/1.1 answer: the status, the page
 // headers, and a small page. Every connection is closed after one answer.
-func loopbackResponse(status int, text string) []byte {
+// The answer to a HEAD carries no body (RFC 9110 section 9.3.2); its
+// Content-Length is the length the page would have had.
+func loopbackResponse(status int, text string, head bool) []byte {
 	body := loopbackPage(text)
 	var out bytes.Buffer
 	out.WriteString("HTTP/1.1 " + strconv.Itoa(status) + " " + loopbackReasons[status] + "\r\n")
@@ -297,7 +319,9 @@ func loopbackResponse(status int, text string) []byte {
 		out.WriteString(header[0] + ": " + header[1] + "\r\n")
 	}
 	out.WriteString("Content-Length: " + strconv.Itoa(len(body)) + "\r\nConnection: close\r\n\r\n")
-	out.Write(body)
+	if !head {
+		out.Write(body)
+	}
 	return out.Bytes()
 }
 
@@ -474,8 +498,7 @@ func (l *loopbackListener) handle(conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Now().Add(loopbackRequestReadTimeout))
 	head, err := readRequestHead(conn)
 	if errors.Is(err, errHeadTooLarge) {
-		l.reply(conn, 400, loopbackWrongStateText)
-		lingerAfterReply(conn)
+		l.reply(conn, 400, loopbackWrongStateText, false)
 		return
 	}
 	if err != nil {
@@ -483,7 +506,7 @@ func (l *loopbackListener) handle(conn net.Conn) {
 	}
 	method, target, ok := requestLine(head)
 	if !ok {
-		l.reply(conn, 400, loopbackWrongStateText)
+		l.reply(conn, 400, loopbackWrongStateText, false)
 		return
 	}
 	status, callback := classifyRequest(method, target, l.state)
@@ -492,30 +515,26 @@ func (l *loopbackListener) handle(conn net.Conn) {
 		if status == 404 {
 			text = loopbackNotFoundText
 		}
-		l.reply(conn, status, text)
+		l.reply(conn, status, text, method == "HEAD")
 		return
 	}
 	done, accepted := l.accept(callback)
 	if !accepted {
 		// A second answer with the right state, after the first was
 		// accepted, is not this sign-in's any more either.
-		l.reply(conn, 400, loopbackWrongStateText)
+		l.reply(conn, 400, loopbackWrongStateText, false)
 		return
 	}
 	defer close(done)
-	timer := time.NewTimer(loopbackAnswerTimeout)
-	defer timer.Stop()
-	signedIn := false
-	select {
-	case <-l.answer:
-		signedIn = l.signedIn
-	case <-timer.C:
-	}
+	// Until the sign-in has ended, however long the exchange takes: the page
+	// says how it ended, so it cannot be written before it has. close always
+	// calls finish first, so this never outlives the sign-in.
+	<-l.answer
 	text := loopbackNotCompletedText
-	if signedIn {
+	if l.signedIn {
 		text = loopbackSignedInText
 	}
-	l.reply(conn, 200, text)
+	l.reply(conn, 200, text, false)
 }
 
 // accept takes the first callback with the right state, and stops listening:
@@ -535,22 +554,25 @@ func (l *loopbackListener) accept(callback *loopbackCallback) (chan struct{}, bo
 	return l.acceptedDone, true
 }
 
-func (l *loopbackListener) reply(conn net.Conn, status int, text string) {
+// reply sends one answer, then lets the browser finish before the
+// connection closes: the write side is shut first, so the browser sees the
+// answer end, and what it still sends (the rest of an oversized head, a body
+// nobody asked for) is read and dropped until it closes its side, for at
+// most loopbackDrainTimeout and loopbackDrainLimit bytes. Closing with bytes
+// unread would reset the connection instead, and macOS would lose the
+// answer. close ends a drain at once.
+func (l *loopbackListener) reply(conn net.Conn, status int, text string, head bool) {
 	_ = conn.SetWriteDeadline(time.Now().Add(loopbackWriteTimeout))
-	_, _ = conn.Write(loopbackResponse(status, text))
-}
-
-// lingerAfterReply ends the sending side and reads what the other end still
-// sends, for a request whose head was not read to its end. Closing a socket
-// with unread bytes resets the connection, and a reset can reach the client
-// before the answer it was sent after. The reading is bounded in time and
-// size, and close ends it at once.
-func lingerAfterReply(conn net.Conn) {
-	if tcp, ok := conn.(*net.TCPConn); ok {
-		_ = tcp.CloseWrite()
+	if _, err := conn.Write(loopbackResponse(status, text, head)); err != nil {
+		return
 	}
-	_ = conn.SetReadDeadline(time.Now().Add(loopbackCloseGrace))
-	_, _ = io.CopyN(io.Discard, conn, 1<<20)
+	if tcp, ok := conn.(*net.TCPConn); ok {
+		if err := tcp.CloseWrite(); err != nil {
+			return
+		}
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(loopbackDrainTimeout))
+	_, _ = io.CopyN(io.Discard, conn, loopbackDrainLimit+1)
 }
 
 // wait returns the first accepted callback, nil once timeout has passed, or

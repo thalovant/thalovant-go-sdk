@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Propose follow-ups to browser sign-in (0.15.0).
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Propose follow-ups to browser sign-in (0.15.0), against the final reference digest.
 
 # Suggestions
 
@@ -15,7 +15,7 @@ Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Propose follow-ups to browser 
 
 ## Retire the older reference digest after the Python merge
 
-- **Problem:** `contracts/sdk-parity.json` accepts both `57c7e71f6456…` and `49744ee385bf…` during
+- **Problem:** `contracts/sdk-parity.json` accepts both `57c7e71f6456…` and `6dfb3bb31ac7…` during
   the browser-login rollout.
 - **Proposal:** once thalovant-python-sdk#113 is on `main`, drop the older digest in a small
   follow-up and re-run the parity check.

@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Document browser sign-in (InteractiveLogin, BrowserLogin) for 0.15.0, with when the URL is printed.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Document browser sign-in (InteractiveLogin, BrowserLogin) for 0.15.0, final reference wording.
 
 <p align="center">
   <picture>
@@ -103,7 +103,10 @@ These topics have no counterpart on the documentation page, so a short version s
 On a machine with a browser, sign a person in through that browser. The SDK listens on
 `127.0.0.1` on a port the system picks, opens the dashboard's consent page, and the browser that
 approves hands the code back to this computer (OAuth authorization code with PKCE on a loopback
-redirect, RFC 8252). Unlike a device code, such a sign-in cannot be relayed to somebody else.
+redirect, RFC 8252). Unlike a device code, which can be read off one screen and typed in
+anywhere, a link or code sent to someone on another computer delivers nothing to the sender. (A
+forwarded callback port, such as `ssh -L`, or another user of the same computer can still complete
+one.)
 
 ```go
 ctx := context.Background()
@@ -122,8 +125,8 @@ fmt.Println("signed in; token", control.TokenID, "scopes", token["scopes"])
   `thalovant.LoginMethodDevice` forces one. Once the browser was opened, its outcome stands: it
   never turns into a device login.
 - `BrowserLogin(ctx, thalovant.BrowserLoginOptions{...})` is the browser sign-in on its own:
-  `Scopes` (none asks for `hubs:read clients:write`), `DeviceName` (default `thalovant-go-sdk on
-  <hostname>`), `OpenBrowser`, `Timeout` (default 5 minutes), `Prompt` and `Opener` (replaces the
+  `Scopes` (none asks for `hubs:read clients:write`), `DeviceName` (nil gives `thalovant-go-sdk on
+  <hostname>`; `new("")` sends no name), `OpenBrowser`, `Timeout` (default 5 minutes), `Prompt` and `Opener` (replaces the
   platform browser; it runs on its own goroutine).
 - Without `Prompt`, the URL is printed to stdout whether or not the browser opens, since opening a
   browser can fail silently. With `Prompt`, nothing is printed: `Prompt` receives the URL instead,

@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 	"unicode"
@@ -20,10 +22,12 @@ import (
 // only) on a loopback redirect (RFC 8252 section 7.3), for a program on a
 // machine with a browser.
 //
-// A device code can be relayed: somebody reads it off one screen and types it
-// in anywhere, which is what device-code phishing is. A loopback redirect
-// cannot be: the browser that approves hands the code to its own computer, so
-// a sign-in link sent to somebody else delivers nothing to the sender.
+// A device code can be read off one screen and typed in anywhere, which is
+// what device-code phishing is. With a loopback redirect the browser that
+// approves hands the code to its own computer's 127.0.0.1, so a link or code
+// sent to someone on another computer delivers nothing to the sender. That is
+// all it promises: a forwarded callback port (ssh -L, a port-forwarding tool)
+// or another user of the same computer can still complete a sign-in.
 // BrowserLogin signs a program in that way, and InteractiveLogin uses it
 // whenever the machine can show a browser, with device login (LoginWithBrowser)
 // as the fallback for one that cannot.
@@ -75,10 +79,12 @@ type BrowserLoginOptions struct {
 	// clients:write. Any non-admin scope may be asked for; the API refuses
 	// admin or unknown scopes when the person approves.
 	Scopes []string
-	// DeviceName is what the consent page and the token show; "" uses
-	// DefaultDeviceName ("thalovant-go-sdk on <hostname>"). It is cut to
-	// MaxDeviceNameLength code points.
-	DeviceName string
+	// DeviceName is what the consent page and the token show. Only nil asks
+	// for DefaultDeviceName ("thalovant-go-sdk on <hostname>"); a pointer to
+	// "" leaves device_name out, which keeps the hostname off the consent
+	// page. It is cut to MaxDeviceNameLength code points. Go 1.26's
+	// new("name") makes the pointer.
+	DeviceName *string
 	// OpenBrowser defaults to true when nil. False only shows the URL.
 	OpenBrowser *bool
 	// Timeout bounds the wait for the browser to come back, from the moment
@@ -109,8 +115,9 @@ type InteractiveLoginOptions struct {
 	// the API's default.
 	Scopes []string
 	// DeviceName names this machine on the consent page: BrowserLogin's
-	// DeviceName, or a device login's ClientName. "" uses DefaultDeviceName.
-	DeviceName string
+	// DeviceName, or a device login's ClientName. Only nil asks for
+	// DefaultDeviceName; a pointer to "" sends none to either method.
+	DeviceName *string
 	// OpenBrowser defaults to true when nil, for either method.
 	OpenBrowser *bool
 	// Timeout bounds the wait; zero or negative uses each method's own
@@ -162,8 +169,11 @@ type BrowserAuthorization struct {
 // or sent no single, non-empty code. It matches ErrAPI. The API was not
 // asked, so there is no HTTP status.
 type BrowserLoginFailedError struct {
-	// Code is the error the consent page named, such as "server_error", when
-	// it named a well-formed one (1-80 of A-Z a-z 0-9 _ . : -); "" otherwise.
+	// Code is the error the consent page named when it is one of the codes
+	// RFC 6749 section 4.1.2.1 defines (invalid_request, unauthorized_client,
+	// unsupported_response_type, invalid_scope, server_error,
+	// temporarily_unavailable); "" for anything else, which could be the
+	// state or a code and is never repeated.
 	Code string
 }
 
@@ -289,9 +299,11 @@ func (c *ControlPlane) InteractiveLogin(ctx context.Context, opts InteractiveLog
 	default:
 		return nil, fmt.Errorf("%w: Method must be LoginMethodAuto, LoginMethodBrowser or LoginMethodDevice, not %q", ErrAPI, method)
 	}
-	name := opts.DeviceName
-	if name == "" {
-		name = DefaultDeviceName()
+	// Only a missing name gets the default: an empty one is the caller's way
+	// of sending none, to the consent page or to a device login.
+	name := DefaultDeviceName()
+	if opts.DeviceName != nil {
+		name = *opts.DeviceName
 	}
 	var config *NativeSignInConfig
 	switch {
@@ -325,7 +337,8 @@ func (c *ControlPlane) InteractiveLogin(ctx context.Context, opts InteractiveLog
 			timeout = DefaultDeviceLoginTimeout
 		}
 		return c.loginWithDevice(ctx, DeviceLoginOptions{
-			Scopes:      opts.Scopes,
+			Scopes: opts.Scopes,
+			// "" is left out of the device authorization request.
 			ClientName:  name,
 			OpenBrowser: opts.OpenBrowser,
 			Timeout:     timeout,
@@ -333,7 +346,7 @@ func (c *ControlPlane) InteractiveLogin(ctx context.Context, opts InteractiveLog
 	}
 	return c.browserLogin(ctx, *config, BrowserLoginOptions{
 		Scopes:      opts.Scopes,
-		DeviceName:  name,
+		DeviceName:  &name,
 		OpenBrowser: opts.OpenBrowser,
 		Timeout:     opts.Timeout,
 		Opener:      opts.Opener,
@@ -368,9 +381,9 @@ func (c *ControlPlane) browserLogin(ctx context.Context, config NativeSignInConf
 	if err != nil {
 		return nil, err
 	}
-	deviceName := opts.DeviceName
-	if deviceName == "" {
-		deviceName = DefaultDeviceName()
+	deviceName := DefaultDeviceName()
+	if opts.DeviceName != nil {
+		deviceName = *opts.DeviceName
 	}
 	authorizationURL := BrowserAuthorizationURL(config.AuthorizationEndpoint, BrowserAuthorization{
 		ClientID:      config.SDKClientID,
@@ -398,13 +411,9 @@ func (c *ControlPlane) browserLogin(ctx context.Context, config NativeSignInConf
 	case callbackDenied:
 		return nil, &browserDeniedError{denied: &DeviceLoginDeniedError{}}
 	case callbackFailed:
-		code := ""
-		// Never repeated when it carries the state: a page that echoes the
-		// state back must not put it in an error.
-		if problemCodePattern.MatchString(callback.errorParam) && !strings.Contains(callback.errorParam, state) {
-			code = callback.errorParam
-		}
-		return nil, &BrowserLoginFailedError{Code: code}
+		// errorParam is one of RFC 6749's codes or nothing (classifyRequest):
+		// a value the page chose could be the state or a code.
+		return nil, &BrowserLoginFailedError{Code: callback.errorParam}
 	}
 	// A code is single-use and lives 60 seconds: a failed exchange is never
 	// retried, since presenting a code twice revokes the token the first
@@ -416,10 +425,6 @@ func (c *ControlPlane) browserLogin(ctx context.Context, config NativeSignInConf
 	listener.finish(true)
 	return token, nil
 }
-
-// problemCodePattern is what a code from the consent page has to look like to
-// be repeated in an error.
-var problemCodePattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,80}$`)
 
 // presentBrowserLogin shows the URL, since opening a browser can fail
 // without a word, and opens it. A ctx done by the time the URL is shown -- a
@@ -533,8 +538,9 @@ func unsafeInURL(r rune) bool {
 }
 
 // usableAuthorizationEndpoint: https, or http on a loopback host while
-// developing; a host; no credentials, query, fragment, whitespace or control
-// characters; a port from 1 to 65535 when one is given.
+// developing; a host a browser can open (dashboardHost); no credentials,
+// query, fragment, whitespace or control characters; a port from 1 to 65535
+// when one is given.
 func usableAuthorizationEndpoint(value string) bool {
 	if value == "" || strings.IndexFunc(value, unsafeInURL) >= 0 || strings.ContainsAny(value, "?#") {
 		return false
@@ -544,7 +550,7 @@ func usableAuthorizationEndpoint(value string) bool {
 		return false
 	}
 	host := strings.ToLower(parsed.Hostname())
-	if host == "" || !validPort(parsed.Port()) {
+	if host == "" || !validPort(parsed.Port()) || !dashboardHost(value) {
 		return false
 	}
 	switch strings.ToLower(parsed.Scheme) {
@@ -556,7 +562,59 @@ func usableAuthorizationEndpoint(value string) bool {
 	return false
 }
 
-// validPort is "" or a decimal port from 1 to 65535. Port 0 is not one a
+// hostLabel is one DNS label as a URL host carries it: ASCII letters, digits
+// and inner hyphens, 1-63 characters.
+var hostLabel = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// dashboardHost reports whether the host of value, as written (url.Parse
+// would decode a %XX in it), names something a browser can reach: an IPv6
+// address between brackets; an IPv4 address, which a host whose last label
+// is a number has to be; or a DNS name of hostLabel labels (an international
+// name in its xn-- form) of at most 253 characters. "%", "_", an empty label
+// and anything else that does not parse to a hostname are refused, as the
+// reference's _real_host refuses them.
+func dashboardHost(value string) bool {
+	_, rest, found := strings.Cut(value, "://")
+	if !found {
+		return false
+	}
+	authority, _, _ := strings.Cut(rest, "/")
+	if strings.ContainsAny(authority, "@%") {
+		return false
+	}
+	if strings.HasPrefix(authority, "[") {
+		end := strings.Index(authority, "]")
+		if end < 0 {
+			return false
+		}
+		address, err := netip.ParseAddr(authority[1:end])
+		return err == nil && address.Is6()
+	}
+	host := authority
+	if colon := strings.LastIndex(host, ":"); colon >= 0 {
+		host = host[:colon]
+	}
+	host = strings.ToLower(host)
+	if address, err := netip.ParseAddr(host); err == nil {
+		return address.Is4()
+	}
+	labels := strings.Split(host, ".")
+	if last := labels[len(labels)-1]; last != "" && strings.Trim(last, "0123456789") == "" {
+		return false // numeric like an IPv4 address, and not one
+	}
+	if len(host) > 253 {
+		return false
+	}
+	for _, label := range labels {
+		if !hostLabel.MatchString(label) {
+			return false
+		}
+	}
+	return true
+}
+
+// validPort is "" or a decimal port from 1 to 65535, written in ASCII digits
+// (leading zeros allowed, as the reference reads one). Port 0 is not one a
 // browser can open, so an API naming it has no usable dashboard and
 // LoginMethodAuto signs in with a device login instead of waiting out a
 // consent page that never loads.
@@ -564,33 +622,57 @@ func validPort(port string) bool {
 	if port == "" {
 		return true
 	}
-	if len(port) > 5 {
-		return false
-	}
 	number := 0
 	for _, digit := range port {
 		if digit < '0' || digit > '9' {
 			return false
 		}
-		number = number*10 + int(digit-'0')
+		if number = number*10 + int(digit-'0'); number > 65535 {
+			return false
+		}
 	}
-	return number >= 1 && number <= 65535
+	return number >= 1
 }
 
-// usableTokenEndpoint: a path on the API, with one leading slash and no
-// query, fragment, backslash, whitespace or control character, that a
-// request can be built for: a malformed percent escape ("/v1/%zz") would
-// otherwise only fail once the person had approved, too late for
-// LoginMethodAuto to sign in with a device login instead.
+// usableTokenEndpoint: a path on the API, with one leading slash, every "%"
+// followed by two hexadecimal digits, and no colon, query, fragment,
+// backslash, whitespace or control character.
+//
+// No colon, because what follows the slash could read as a URL of its own
+// ("/https://collector.example/token", "/collector.example:443/token") to a
+// URL joiner, and the exchange carries the code and the verifier; this SDK
+// appends the path instead, and refuses any request off the API's origin
+// besides. A broken escape ("/v1/%zz") cannot be sent as written; better
+// found out now, while a device login can still stand in, than after
+// somebody approved.
 func usableTokenEndpoint(value string) bool {
 	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") {
 		return false
 	}
-	if strings.IndexFunc(value, func(r rune) bool { return strings.ContainsRune(`?#\`, r) || unsafeInURL(r) }) >= 0 {
+	if strings.IndexFunc(value, func(r rune) bool { return strings.ContainsRune(`:?#\`, r) || unsafeInURL(r) }) >= 0 {
 		return false
 	}
-	_, err := url.ParseRequestURI(value)
-	return err == nil
+	return wholeEscapes(value)
+}
+
+// wholeEscapes reports whether every "%" in text is followed by two
+// hexadecimal digits.
+func wholeEscapes(text string) bool {
+	for index := 0; index < len(text); index++ {
+		if text[index] != '%' {
+			continue
+		}
+		if index+2 >= len(text) {
+			return false
+		}
+		if _, ok := hexValue(text[index+1]); !ok {
+			return false
+		}
+		if _, ok := hexValue(text[index+2]); !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // NewState returns an OAuth state: 24 random bytes (192 bits) from the
@@ -835,14 +917,34 @@ func redactAll(raw []byte, hidden []string) []byte {
 	return []byte(scrubText(string(raw), hidden))
 }
 
-// scrubText replaces every value in hidden within text.
+// scrubText replaces every value in hidden within text with [redacted], in
+// one pass, the longest value first, so that a value which is part of
+// another cannot break the longer one up before it is matched; and never
+// inside a [redacted] already there (whose letters a short value can hold),
+// so scrubbing twice changes nothing. This is the reference's _scrub.
 func scrubText(text string, hidden []string) string {
+	values := make([]string, 0, len(hidden))
 	for _, value := range hidden {
 		if value != "" {
-			text = strings.ReplaceAll(text, value, redactedSecret)
+			values = append(values, value)
 		}
 	}
-	return text
+	if len(values) == 0 {
+		return text
+	}
+	sort.SliceStable(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
+	quoted := make([]string, len(values))
+	for index, value := range values {
+		quoted[index] = regexp.QuoteMeta(value)
+	}
+	// Go's regexp takes the first alternative that matches at the leftmost
+	// position, as Python's re does, so longest first wins.
+	pattern := regexp.MustCompile(strings.Join(quoted, "|"))
+	parts := strings.Split(text, redactedSecret)
+	for index, part := range parts {
+		parts[index] = pattern.ReplaceAllLiteralString(part, redactedSecret)
+	}
+	return strings.Join(parts, redactedSecret)
 }
 
 // scrubSecrets is item with every value in hidden taken out of every string

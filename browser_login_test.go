@@ -19,6 +19,7 @@ import (
 	"os"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -208,7 +209,7 @@ func TestBrowserLoginPrintsTheURLAndDoesNotWaitForTheOpener(t *testing.T) {
 	done := make(chan signInOutcome, 1)
 	go func() {
 		token, err := plane.BrowserLogin(context.Background(), BrowserLoginOptions{
-			DeviceName: "unit",
+			DeviceName: new("unit"),
 			// A console browser holds the call until it exits.
 			Opener: func(target string) {
 				opened <- target
@@ -475,7 +476,7 @@ func TestInteractiveLoginDeviceOpensTheVerificationPageWithTheOpener(t *testing.
 	opened := make(chan string, 1)
 	printed := captureStdout(t)
 	token, err := plane.InteractiveLogin(context.Background(), InteractiveLoginOptions{
-		Method: LoginMethodDevice, DeviceName: "unit", Opener: func(target string) { opened <- target },
+		Method: LoginMethodDevice, DeviceName: new("unit"), Opener: func(target string) { opened <- target },
 	})
 	printed()
 	if err != nil || token["access_token"] != "tvpat_device" || plane.TokenID != "tok-device" {
@@ -691,9 +692,6 @@ func TestTheListenerBindsLoopbackOnly(t *testing.T) {
 }
 
 func TestAConnectionThatClosesBeforeItsAnswerChangesNothing(t *testing.T) {
-	original := loopbackAnswerTimeout
-	loopbackAnswerTimeout = 50 * time.Millisecond
-	t.Cleanup(func() { loopbackAnswerTimeout = original })
 	listener := newLoopbackListener("the-state")
 	port, err := listener.start()
 	if err != nil {
@@ -710,9 +708,13 @@ func TestAConnectionThatClosesBeforeItsAnswerChangesNothing(t *testing.T) {
 	if accepted, _ := listener.wait(context.Background(), 100*time.Millisecond); accepted != nil {
 		t.Fatalf("a half request was accepted: %v", accepted)
 	}
-	// Nothing was accepted, so this sign-in's own answer still is; nobody
-	// finishes the sign-in, so its tab is told it was not completed.
-	answer := browserTab(t, port, "GET", "/callback?code=c&state=the-state", nil)
+	// Nothing was accepted, so this sign-in's own answer still is; the
+	// sign-in then ends without a token, so its tab is told it was not
+	// completed.
+	answer := browserTab(t, port, "GET", "/callback?code=c&state=the-state", func() {
+		time.Sleep(50 * time.Millisecond)
+		listener.finish(false)
+	})
 	if answer.status != 200 || !strings.Contains(answer.body, loopbackNotCompletedText) {
 		t.Errorf("the tab got %d %q", answer.status, answer.body)
 	}
@@ -755,13 +757,20 @@ func TestCallbackValuesAreDecodedAsPythonsParseQslDecodesThem(t *testing.T) {
 	}
 }
 
-func TestAFailedCallbackNamesOnlyAWellFormedError(t *testing.T) {
+// Only RFC 6749 section 4.1.2.1's codes are kept; anything else is a value
+// somebody else chose (the vectors' callbacks section pins the state cases).
+func TestAFailedCallbackNamesOnlyAnRFC6749Error(t *testing.T) {
 	for errorParam, want := range map[string]string{
+		"invalid_request":              "invalid_request",
+		"unauthorized_client":          "unauthorized_client",
+		"unsupported_response_type":    "unsupported_response_type",
+		"invalid_scope":                "invalid_scope",
 		"server_error":                 "server_error",
 		"temporarily_unavailable":      "temporarily_unavailable",
 		"bad%20code":                   "",
+		"Server_Error":                 "",
 		strings.Repeat("x", 81):        "",
-		"invalid_request:scope.denied": "invalid_request:scope.denied",
+		"invalid_request:scope.denied": "",
 	} {
 		api := newUnitBrowserAPI(t, nil)
 		plane := NewControlPlane(api.server.URL, "")
@@ -1174,4 +1183,319 @@ func TestTheListenerHandlesABoundedNumberOfConnections(t *testing.T) {
 	}
 	listener.close()
 	assertNoLoopbackGoroutines(t)
+}
+
+// -- the producer's final round (thalovant-python-sdk#113 at 39e31d8) ---------------------
+
+// hostRecorder notes every host a request was sent to, and answers none.
+type hostRecorder struct {
+	mu    sync.Mutex
+	hosts []string
+}
+
+func (h *hostRecorder) RoundTrip(request *http.Request) (*http.Response, error) {
+	h.mu.Lock()
+	h.hosts = append(h.hosts, request.URL.Host)
+	h.mu.Unlock()
+	return nil, errors.New("not sent")
+}
+
+// TestNoRequestLeavesTheAPIOrigin mirrors test_no_request_leaves_the_api_origin.
+// This SDK appends a path to APIURL rather than joining it, so the
+// reference's paths stay on the API's own host here; what can leave is a
+// ControlPlane built by hand whose APIURL has no trailing slash.
+func TestNoRequestLeavesTheAPIOrigin(t *testing.T) {
+	for _, path := range []string{"/https://elsewhere.example/v1/x", "/elsewhere.example:443/v1/x", "https://elsewhere.example/v1/x"} {
+		recorder := &hostRecorder{}
+		plane := NewControlPlane("https://api.thalovant.com", "tvpat_must_stay_home")
+		plane.HTTPClient = &http.Client{Transport: recorder}
+		_, _ = plane.request(context.Background(), http.MethodGet, path, nil, nil, true)
+		_, _, _, _ = plane.sendNoReplay(context.Background(), http.MethodPost, path, map[string]any{"code": "c"})
+		recorder.mu.Lock()
+		for _, host := range recorder.hosts {
+			if host != "api.thalovant.com" {
+				t.Errorf("%s reached %s", path, host)
+			}
+		}
+		recorder.mu.Unlock()
+	}
+	recorder := &hostRecorder{}
+	plane := &ControlPlane{APIURL: "https://api.thalovant.com", AccessToken: "tvpat_must_stay_home", HTTPClient: &http.Client{Transport: recorder}}
+	_, err := plane.request(context.Background(), http.MethodGet, ".elsewhere.example/v1/x", nil, nil, true)
+	var apiErr *APIError
+	if !errors.Is(err, ErrAPI) || errors.As(err, &apiErr) || !strings.Contains(err.Error(), "origin") {
+		t.Errorf("err = %v, want a no-status origin refusal", err)
+	}
+	if _, _, _, err := plane.sendNoReplay(context.Background(), http.MethodPost, ".elsewhere.example/v1/x", map[string]any{"code": "c"}); !strings.Contains(fmt.Sprint(err), "origin") {
+		t.Errorf("sendNoReplay err = %v", err)
+	}
+	if strings.Contains(fmt.Sprint(err), "tvpat_must_stay_home") {
+		t.Error("the refusal names the token")
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if len(recorder.hosts) != 0 {
+		t.Errorf("requests were sent to %v", recorder.hosts)
+	}
+}
+
+// TestTheExchangeNeverLeavesTheAPIOrigin mirrors
+// test_the_exchange_never_leaves_the_api_origin: a configuration built past
+// ParseNativeSignInConfig's own check is refused again before anything is sent.
+func TestTheExchangeNeverLeavesTheAPIOrigin(t *testing.T) {
+	recorder := &hostRecorder{}
+	plane := &ControlPlane{APIURL: "https://api.thalovant.com", HTTPClient: &http.Client{Transport: recorder}}
+	config := NativeSignInConfig{AuthorizationEndpoint: "https://dash.thalovant.com/authorize",
+		TokenEndpoint: ".collector.example/v1/auth/native/token", SDKClientID: SDKClientID}
+	_, err := plane.exchangeBrowserCode(context.Background(), config, "c", strings.Repeat("v", 43), "http://127.0.0.1:1/callback", "s")
+	var apiErr *APIError
+	if !strings.Contains(fmt.Sprint(err), "origin") || errors.As(err, &apiErr) {
+		t.Errorf("err = %v, want a no-status origin refusal", err)
+	}
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if len(recorder.hosts) != 0 {
+		t.Errorf("the exchange was sent to %v", recorder.hosts)
+	}
+}
+
+// TestTheAcceptedTabWaitsAsLongAsTheSignInTakes mirrors
+// test_the_accepted_tab_waits_as_long_as_the_sign_in_takes.
+func TestTheAcceptedTabWaitsAsLongAsTheSignInTakes(t *testing.T) {
+	listener := newLoopbackListener("the-state")
+	port, err := listener.start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.close()
+	started := time.Now()
+	tab := make(chan tabAnswer, 1)
+	go func() { tab <- browserTab(t, port, "GET", "/callback?code=c&state=the-state", nil) }()
+	if accepted, err := listener.wait(context.Background(), 5*time.Second); accepted == nil || err != nil {
+		t.Fatalf("accepted %v, %v", accepted, err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case answer := <-tab:
+		t.Fatalf("the tab was answered before the sign-in ended: %q", answer.body)
+	default:
+	}
+	listener.finish(true)
+	answer := receive(t, tab, "the tab's page")
+	if !strings.Contains(answer.body, loopbackSignedInText) || time.Since(started) < 300*time.Millisecond {
+		t.Errorf("the tab got %q after %s", answer.body, time.Since(started))
+	}
+}
+
+// TestClosingTheListenerAnswersATabThatIsStillWaiting mirrors
+// test_closing_the_listener_answers_a_tab_that_is_still_waiting.
+func TestClosingTheListenerAnswersATabThatIsStillWaiting(t *testing.T) {
+	listener := newLoopbackListener("the-state")
+	port, err := listener.start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tab := make(chan tabAnswer, 1)
+	go func() { tab <- browserTab(t, port, "GET", "/callback?code=c&state=the-state", nil) }()
+	if accepted, _ := listener.wait(context.Background(), 5*time.Second); accepted == nil {
+		t.Fatal("nothing was accepted")
+	}
+	listener.close()
+	if answer := receive(t, tab, "the tab's page"); !strings.Contains(answer.body, loopbackNotCompletedText) {
+		t.Errorf("the tab got %q", answer.body)
+	}
+	assertNoLoopbackGoroutines(t)
+}
+
+// TestAHeadRequestGetsTheHeadersAndNoBody mirrors
+// test_a_head_request_gets_the_headers_and_no_body.
+func TestAHeadRequestGetsTheHeadersAndNoBody(t *testing.T) {
+	listener := newLoopbackListener("the-state")
+	port, err := listener.start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.close()
+	answer := rawTab(t, port, []byte("HEAD /callback?code=c&state=the-state HTTP/1.1\r\n\r\n"), nil)
+	if answer.status != 404 || answer.body != "" || answer.headers["Content-Type"] != "text/html; charset=utf-8" {
+		t.Fatalf("HEAD got %d %v %q", answer.status, answer.headers, answer.body)
+	}
+	if want := strconv.Itoa(len(loopbackPage(loopbackNotFoundText))); answer.headers["Content-Length"] != want {
+		t.Errorf("Content-Length %q, want %s (what a GET would have carried)", answer.headers["Content-Length"], want)
+	}
+}
+
+// TestAMessageCutToLengthKeepsNoPartOfASecret mirrors
+// test_a_message_cut_to_length_keeps_no_part_of_a_secret, at this SDK's
+// 256-rune display limit.
+func TestAMessageCutToLengthKeepsNoPartOfASecret(t *testing.T) {
+	var mu sync.Mutex
+	var verifier string
+	api := newUnitBrowserAPI(t, func(body map[string]any) (int, any) {
+		mu.Lock()
+		defer mu.Unlock()
+		verifier = fmt.Sprint(body["code_verifier"])
+		// The verifier starts ten runes before the display line's cut.
+		return 400, map[string]any{"detail": strings.Repeat("a", maxServerErrorDetail-10) + verifier}
+	})
+	plane := NewControlPlane(api.server.URL, "")
+	open := false
+	opened, done := startSignIn(context.Background(), plane, BrowserLoginOptions{OpenBrowser: &open})
+	port, state, _ := urlParts(t, receive(t, opened, "the URL"))
+	browserTab(t, port, "GET", "/callback?code=c&state="+state, nil)
+	err := receive(t, done, "the sign-in").err
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 400 {
+		t.Fatalf("err = %v", err)
+	}
+	mu.Lock()
+	prefix := verifier[:10]
+	mu.Unlock()
+	problem, _ := json.Marshal(apiErr.Problem)
+	for _, shown := range []string{err.Error(), fmt.Sprintf("%#v", err), apiErr.Detail, apiErr.ProblemDetail, string(problem)} {
+		if strings.Contains(shown, prefix) {
+			t.Errorf("%q keeps part of the verifier", shown)
+		}
+	}
+	if want := strings.Repeat("a", maxServerErrorDetail-10) + redactedSecret; apiErr.Detail != want {
+		t.Errorf("Detail = %q, want %q", apiErr.Detail, want)
+	}
+}
+
+// TestScrubbingIsOnePassLongestFirstAndLeavesItsMarkerAlone mirrors
+// test_scrubbing_is_one_pass_longest_first_and_leaves_its_marker_alone.
+func TestScrubbingIsOnePassLongestFirstAndLeavesItsMarkerAlone(t *testing.T) {
+	hidden := []string{"abc", "abcdef", "c"}
+	if got := scrubText("xx-abc-abcdef-[redacted]", hidden); got != "xx-[redacted]-[redacted]-[redacted]" {
+		t.Errorf("scrubText = %q", got)
+	}
+	once := scrubSecrets(map[string]any{"seen:abcdef": []any{"c", map[string]any{"deep": "abc"}}}, hidden)
+	want := map[string]any{"seen:[redacted]": []any{"[redacted]", map[string]any{"deep": "[redacted]"}}}
+	if fmt.Sprint(once) != fmt.Sprint(want) {
+		t.Errorf("scrubSecrets = %v, want %v", once, want)
+	}
+	if again := scrubSecrets(once, hidden); fmt.Sprint(again) != fmt.Sprint(once) {
+		t.Errorf("scrubbing twice changed %v into %v", once, again)
+	}
+	if got := scrubText("nothing hidden", nil); got != "nothing hidden" {
+		t.Errorf("scrubText with nothing hidden = %q", got)
+	}
+}
+
+// requestBodyError is a transport failure that keeps the request it failed.
+type requestBodyError struct{ body string }
+
+func (e *requestBodyError) Error() string { return "connection reset: " + e.body }
+
+// TestATransportFailureDuringTheExchangeCarriesNothingOfTheRequest mirrors
+// test_a_transport_failure_during_the_exchange_carries_nothing_of_the_request.
+func TestATransportFailureDuringTheExchangeCarriesNothingOfTheRequest(t *testing.T) {
+	config, _ := json.Marshal(unitNativeConfig)
+	plane := NewControlPlane("http://127.0.0.1:9", "")
+	plane.HTTPClient = &http.Client{Transport: browserTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Path == "/v1/auth/native/config" {
+			return &http.Response{StatusCode: 200, Header: http.Header{"Content-Type": {"application/json"}},
+				Body: io.NopCloser(strings.NewReader(string(config))), Request: r}, nil
+		}
+		raw, _ := io.ReadAll(r.Body)
+		return nil, &requestBodyError{body: string(raw)}
+	})}
+	open := false
+	opened, done := startSignIn(context.Background(), plane, BrowserLoginOptions{OpenBrowser: &open})
+	port, state, _ := urlParts(t, receive(t, opened, "the URL"))
+	browserTab(t, port, "GET", "/callback?code=transport-code&state="+state, nil)
+	err := receive(t, done, "the sign-in").err
+	var (
+		apiErr    *APIError
+		transport *requestBodyError
+	)
+	if err == nil || errors.As(err, &apiErr) || errors.As(err, &transport) {
+		t.Fatalf("err = %#v, want a no-status error with no cause", err)
+	}
+	for form, text := range displayForms(err) {
+		for _, secret := range []string{"transport-code", "code_verifier", state} {
+			if strings.Contains(text, secret) {
+				t.Errorf("%s carries %q", form, secret)
+			}
+		}
+	}
+}
+
+// sendWhileReading sends request while reading the answer, as a browser
+// does, and says how the connection ended.
+func sendWhileReading(t *testing.T, port int, request []byte) ([]byte, error) {
+	t.Helper()
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	sent := make(chan struct{})
+	go func() {
+		defer close(sent)
+		_, _ = conn.Write(request)
+	}()
+	data, readErr := io.ReadAll(conn)
+	<-sent
+	return data, readErr
+}
+
+// TestAnEarlyAnswerIsNotLostToAReset mirrors
+// test_an_early_answer_is_not_lost_to_a_reset.
+func TestAnEarlyAnswerIsNotLostToAReset(t *testing.T) {
+	for name, request := range map[string][]byte{
+		// A head far beyond the listener's limit: most of it is never read.
+		"oversized head": []byte("GET /callback?code=" + strings.Repeat("a", 600_000) + " HTTP/1.1\r\nHost: x\r\n\r\n"),
+		// A body nobody asked for, behind a 404.
+		"unread body": []byte("POST /callback HTTP/1.1\r\nHost: x\r\nContent-Length: 600000\r\n\r\n" + strings.Repeat("b", 600_000)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			listener := newLoopbackListener("the-state")
+			port, err := listener.start()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer listener.close()
+			data, err := sendWhileReading(t, port, request)
+			line, _, _ := strings.Cut(string(data), "\r\n")
+			if line != "HTTP/1.1 400 Bad Request" && line != "HTTP/1.1 404 Not Found" {
+				t.Errorf("the answer was %q", line)
+			}
+			if err != nil {
+				t.Errorf("the connection ended with %v", err)
+			}
+		})
+	}
+}
+
+// TestDrainingAConnectionIsBounded mirrors test_draining_a_connection_is_bounded.
+func TestDrainingAConnectionIsBounded(t *testing.T) {
+	original := loopbackDrainTimeout
+	loopbackDrainTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { loopbackDrainTimeout = original })
+	listener := newLoopbackListener("the-state")
+	port, err := listener.start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.close()
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	_, _ = conn.Write([]byte("GET /favicon.ico HTTP/1.1\r\n\r\n"))
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// The answer ends: our side is shut.
+	if raw, _ := io.ReadAll(conn); !strings.HasPrefix(string(raw), "HTTP/1.1 404 ") {
+		t.Fatalf("got %q", raw)
+	}
+	time.Sleep(500 * time.Millisecond) // ours stays open
+	listener.mu.Lock()
+	left := len(listener.conns)
+	listener.mu.Unlock()
+	if left != 0 {
+		t.Errorf("%d connections still drained past the bound", left)
+	}
 }

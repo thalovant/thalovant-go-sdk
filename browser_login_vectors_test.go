@@ -692,6 +692,15 @@ func runBrowserSignIn(t *testing.T, vectors, spec map[string]any, start func(pla
 	return produced, api
 }
 
+// callDeviceName is a case's device_name: nil when the case names none (the
+// default then applies), and the string, empty included, when it names one.
+func callDeviceName(call map[string]any) *string {
+	if name, ok := call["device_name"].(string); ok {
+		return &name
+	}
+	return nil
+}
+
 func callScopes(call map[string]any) []string {
 	var scopes []string
 	for _, scope := range anySlice(call["scopes"]) {
@@ -708,7 +717,7 @@ func TestBrowserLoginSignInVectors(t *testing.T) {
 		produced, api := runBrowserSignIn(t, vectors, spec, func(plane *ControlPlane, handOver func(string)) (map[string]any, error) {
 			return plane.BrowserLogin(context.Background(), BrowserLoginOptions{
 				Scopes:      callScopes(call),
-				DeviceName:  fmt.Sprint(call["device_name"]),
+				DeviceName:  callDeviceName(call),
 				OpenBrowser: &open,
 				Timeout:     milliseconds(call["timeout_ms"]),
 				Prompt:      handOver,
@@ -745,7 +754,7 @@ func TestBrowserLoginChooserVectors(t *testing.T) {
 		produced, api := runBrowserSignIn(t, vectors, spec, func(plane *ControlPlane, handOver func(string)) (map[string]any, error) {
 			return plane.InteractiveLogin(context.Background(), InteractiveLoginOptions{
 				Method:     LoginMethod(fmt.Sprint(call["method"])),
-				DeviceName: fmt.Sprint(call["device_name"]),
+				DeviceName: callDeviceName(call),
 				Timeout:    milliseconds(call["timeout_ms"]),
 				// The browser the SDK opens. A device login opens its
 				// verification page too; only the consent page is this

@@ -1269,6 +1269,13 @@ func (c *ControlPlane) sendRequest(ctx context.Context, method string, path stri
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("%w: invalid control request", ErrAPI)
 	}
+	// No request leaves the API's origin. The path is appended to APIURL, so a
+	// ControlPlane built by hand with no trailing slash on APIURL would read
+	// "https://api.thalovant.com" + ".elsewhere.example/x" as another host,
+	// and the bearer token, or a sign-in's code and verifier, would go there.
+	if api, parseErr := url.Parse(c.APIURL); parseErr != nil || urlOrigin(req.URL) != urlOrigin(api) {
+		return 0, nil, nil, fmt.Errorf("%w: refusing a request off the Thalovant API's origin", ErrAPI)
+	}
 	if !replayable {
 		req.GetBody = nil
 	}

@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Audit browser sign-in for 0.15.0, with the fixes from CodeRabbit's review of #90.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Audit browser sign-in for 0.15.0 against the final reference (39e31d8), with the fixes from CodeRabbit's review of #90.
 
 ## 2026-11-06 — CVE-2026-78661 in golang.org/x/net
 
@@ -8,18 +8,19 @@ HIGH, found by the dependency scan in infra-manifests' `contracts` gate at v0.61
 
 Known issues, technical debt and their status, from test runs and code reading. Each entry names the code it concerns.
 
-Evidence: `go test -race -count=1 -timeout=5m ./...` on 2026-11-08 (Go 1.26.10, linux/amd64): 433
+Evidence: `go test -race -count=1 -timeout=5m ./...` on 2026-11-08 (Go 1.26.10, linux/amd64): 443
 top-level tests pass, 0 fail, 1 skipped (`TestNoiseInteropAgainstLiveHub`, which needs a live hub).
 `gofmt -l .` is empty and `go vet ./...` is clean for linux, windows and darwin. The parity check
 (`check-sdk-parity.py --consumer thalovant-go-sdk`) verifies the acceptance record against the
-Python reference's main (44b6e2b, digest `57c7e71f6456`) and its browser sign-in PR head (e3999cb,
-digest `49744ee385bf`), and every recorded `browser-login-vectors.json` case digest equals the
-reference's.
+Python reference's main (44b6e2b, digest `57c7e71f6456`) and its final browser sign-in PR head
+(39e31d8, digest `6dfb3bb31ac7`), and every recorded `browser-login-vectors.json` case digest (119)
+equals the reference's.
 
 ## Verified in this change (browser sign-in, 0.15.0)
 
-- All 98 cases of `testdata/browser-login-vectors.json` (byte-identical to the reference, sha256
-  `9058adf2ad30…`) run in `browser_login_vectors_test.go`, and the 24 callback cases run a second
+- All 119 cases of `testdata/browser-login-vectors.json` (byte-identical to the reference at
+  39e31d8, sha256 `b0c73f808c4f…`) run in `browser_login_vectors_test.go`; the 98 cases of the
+  first round record exactly the digests they did. The 27 callback cases run a second
   time through a real listener (`TestBrowserLoginCallbackVectorsOverTheListener`). `sign_ins` and
   `chooser` run for real: a loopback httptest API checks every request, a raw TCP client plays the
   browser, and the exchange's verifier is checked against the URL's challenge before it is recorded.
@@ -70,9 +71,41 @@ Each with a test that fails without the fix (checked by reverting the fix and re
   says a connection closing before a whole head is closed without an answer, and the README and
   FAQ say the URL is not printed when `Prompt` is set.
 
-Not changed, with the reason on the thread: the accepted tab's 60-second wait for its page (the
-porting brief bounds it), and `Prompt` running on the calling goroutine (the reference calls its
-prompt synchronously, as the print it replaces).
+Not changed in that round, with the reason on the thread: the accepted tab's 60-second wait for
+its page, which the porting brief bounded then, and `Prompt` running on the calling goroutine (the
+reference calls its prompt synchronously, as the print it replaces).
+
+## Ported from the reference's final round (39e31d8)
+
+The brief's "What changed since 49744ee385bf" table, each row with its vector cases or a test
+mirroring the Python one it names; every row with an observable behaviour was checked by reverting
+it and seeing its test fail:
+
+1. No control-plane request leaves the API's origin (`sendRequest` in `control.go`, `urlOrigin`):
+   `TestNoRequestLeavesTheAPIOrigin`, `TestTheExchangeNeverLeavesTheAPIOrigin`. Go appends a path
+   to `APIURL` instead of joining it, so the reference's `/https://...` paths stay on the API's
+   host here; what the check stops is a hand-built `APIURL` without its trailing slash.
+2. `token_endpoint`: no colon, whole escapes only (`usableTokenEndpoint`, `wholeEscapes`): five
+   `config` cases.
+3. `authorization_endpoint` openable: port 1-65535, host as written (`dashboardHost`): nine
+   `config` cases.
+4. Only RFC 6749's codes kept from a callback (`oauthErrors` in `loopback.go`): three `callbacks`
+   cases and `sign_ins/an error that repeats the state never reaches the error`.
+5. Only a missing device name gets the default (`DeviceName *string`): `sign_ins/an empty device
+   name keeps the hostname off the consent page`, `chooser/an empty device name is not sent to a
+   device login either`.
+6. No 60-second bound on the accepted tab (`handle`): `TestTheAcceptedTabWaitsAsLongAsTheSignInTakes`,
+   `TestClosingTheListenerAnswersATabThatIsStillWaiting`. Like the reference's, a 300 ms test
+   cannot tell a 60-second bound from none, so this row was not checked by reverting it.
+7. HEAD answers with headers and no body (`loopbackResponse`): `TestAHeadRequestGetsTheHeadersAndNoBody`.
+8. Redaction before formatting, one pass, longest first, never inside `[redacted]` (`scrubText`,
+   `redactExchangeAnswer`): `TestAMessageCutToLengthKeepsNoPartOfASecret`,
+   `TestScrubbingIsOnePassLongestFirstAndLeavesItsMarkerAlone`,
+   `TestATransportFailureDuringTheExchangeCarriesNothingOfTheRequest`.
+9. Drain before closing (`reply`: `CloseWrite`, then at most 2 s / 1 MiB): `TestAnEarlyAnswerIsNotLostToAReset`,
+   `TestDrainingAConnectionIsBounded`.
+10. Wording: README, CHANGELOG and the package comment say a link or code sent to someone on
+    another computer delivers nothing to the sender.
 
 ## Verified in 0.14.0 (chat apps)
 
@@ -129,6 +162,6 @@ prompt synchronously, as the print it replaces).
 ## Open
 
 - **Drop the older reference digest** (`57c7e71f6456…`) from `contracts/sdk-parity.json` once the
-  Python SDK's `main` carries `49744ee385bf…` (thalovant/thalovant-python-sdk#113).
+  Python SDK's `main` carries `6dfb3bb31ac7…` (thalovant/thalovant-python-sdk#113).
 - **The Rust port's `usual_form` still answers the way Go did** on the two kinds of tag above (noted 2026-11-03). No shared vector covers `usual_form`, so the parity gate sees no difference; see SUGGESTIONS.md.
 - **The home-goroutine bound is Go's own.** The reference caps plain handlers at four threads running at once; Go caps only the handlers and replies still running past their time, so handlers that honour their context are never refused. The count is checked when a request arrives, so requests already running when the fourth runs over can still add to it before new ones are refused. A `Replier` value that cannot be compared (a struct holding a slice) is not counted for calls of `AnswerHomeRequest` on their own, since it cannot be told apart from another value; pointers, which `Client` and `HubSession` are, always are.
