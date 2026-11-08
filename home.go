@@ -273,21 +273,34 @@ type replierOverruns struct {
 
 // count is replier's own count.
 func (r *replierOverruns) count(replier Replier) overrunCount {
-	return replierCount{counts: r, key: replierKey(replier)}
+	key, ok := replierKey(replier)
+	if !ok {
+		return uncounted{}
+	}
+	return replierCount{counts: r, key: key}
 }
 
-// replierKey is what a Replier is counted under: itself when it is a
-// pointer, a channel or an unsafe pointer, which are always safe to compare;
-// otherwise its type, which every value of that type then shares. A struct
-// value holding a slice would panic as a map key.
-func replierKey(replier Replier) any {
-	switch reflect.ValueOf(replier).Kind() {
-	case reflect.Pointer, reflect.Chan, reflect.UnsafePointer:
-		return replier
-	default:
-		return reflect.TypeOf(replier)
+// replierKey is what a Replier is counted under: the Replier itself, so two
+// Repliers share a count only when they are equal (the same pointer, or equal
+// values). It reports false for a value that cannot be compared, a struct
+// holding a slice say, which would panic as a map key and cannot be told
+// apart from another value of its type.
+func replierKey(replier Replier) (any, bool) {
+	if replier == nil || !reflect.ValueOf(replier).Comparable() {
+		return nil, false
 	}
+	return replier, true
 }
+
+// uncounted is the count of a Replier that cannot be told apart from others:
+// never full, so it is never refused for another Replier's stuck replies.
+type uncounted struct{}
+
+// full is always false.
+func (uncounted) full() bool { return false }
+
+// add counts nothing.
+func (uncounted) add(int) {}
 
 // replierCount is one Replier's entry in a replierOverruns.
 type replierCount struct {
@@ -401,8 +414,10 @@ func (r *homeRun) returned() {
 // still running past the bound, no reply is started and the error says so.
 // Neither can then leave a goroutine behind for every request. Calls of
 // AnswerHomeRequest on its own share one count of handlers and keep one
-// count of replies for each Replier; each AnswerHomeRequests subscription
-// has its own counts.
+// count of replies for each Replier, so a stuck Replier holds up only its own
+// answers; a Replier that cannot be compared (a struct value holding a
+// slice, say) cannot be told apart from another and is not counted, so pass
+// a pointer. Each AnswerHomeRequests subscription has its own counts.
 func AnswerHomeRequest(ctx context.Context, replier Replier, event Event, handler HomeHandler, opts HomeAnswerOptions) (Data, error) {
 	return answerHomeRequest(ctx, replier, event, handler, opts, sharedHomeBounds)
 }

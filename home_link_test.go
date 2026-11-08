@@ -858,9 +858,13 @@ func overrunning(o *homeOverruns) int {
 
 // replying is how many of replier's replies r counts.
 func replying(r *replierOverruns, replier Replier) int {
+	key, ok := replierKey(replier)
+	if !ok {
+		return 0
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.running[replierKey(replier)]
+	return r.running[key]
 }
 
 // waitForCount waits up to five seconds for count to say want.
@@ -982,30 +986,74 @@ func TestAStuckReplierHoldsUpOnlyItsOwnAnswers(t *testing.T) {
 	}
 }
 
-// sliceReplier is a Replier that cannot be a map key: a struct value
-// holding a slice.
+// valueReplier is a Replier passed by value: comparable, so each distinct
+// value has a count of its own.
+type valueReplier struct {
+	id      int
+	release chan struct{}
+	calls   *atomic.Int32
+}
+
+// Reply counts the call and waits to be released.
+func (r valueReplier) Reply(context.Context, Event, string, Data, Context) error {
+	r.calls.Add(1)
+	<-r.release
+	return nil
+}
+
+// Two Replier values of one type are counted apart: one stuck value never
+// refuses the other's answers.
+func TestStuckAndWorkingReplierValuesOfOneTypeAreCountedApart(t *testing.T) {
+	bounds := &homeBounds{byReplier: &replierOverruns{}}
+	stuck := valueReplier{id: 1, release: make(chan struct{}), calls: &atomic.Int32{}}
+	defer close(stuck.release)
+	free := make(chan struct{})
+	close(free)
+	working := valueReplier{id: 2, release: free, calls: &atomic.Int32{}}
+	event := Event{Name: HomeRequestEvent, Data: Data{"request_id": "r"}}
+	answer := func(context.Context, HomeRequest) (HomeAnswer, error) { return HomeAnswer{Speech: "done"}, nil }
+	opts := HomeAnswerOptions{HubTimeout: 30 * time.Millisecond}
+	for i := 0; i < homeOverrunLimit; i++ {
+		if payload, err := answerHomeRequest(context.Background(), stuck, event, answer, opts, bounds); err != nil || payload != nil {
+			t.Fatalf("reply %d = %v, %v; want it withdrawn at the bound", i, payload, err)
+		}
+	}
+	if _, err := answerHomeRequest(context.Background(), stuck, event, answer, opts, bounds); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("the stuck value's next answer = %v, want ErrTimeout", err)
+	}
+	if payload, err := answerHomeRequest(context.Background(), working, event, answer, opts, bounds); err != nil || payload["speech"] != "done" || working.calls.Load() != 1 {
+		t.Fatalf("the working value of the same type = %v, %v (%d calls)", payload, err, working.calls.Load())
+	}
+	if got := replying(bounds.byReplier, stuck); got != homeOverrunLimit {
+		t.Fatalf("the stuck value has %d replies counted, want %d", got, homeOverrunLimit)
+	}
+}
+
+// sliceReplier is a Replier that cannot be compared: a struct value holding
+// a slice.
 type sliceReplier struct{ tags []string }
 
 // Reply sends nothing.
 func (sliceReplier) Reply(context.Context, Event, string, Data, Context) error { return nil }
 
-// A Replier that cannot be a map key is counted under its type instead of
-// panicking.
-func TestAReplierThatCannotBeAMapKeyIsCountedByItsType(t *testing.T) {
-	value := sliceReplier{tags: []string{"a"}}
-	if key := replierKey(value); key != reflect.TypeOf(value) {
-		t.Fatalf("a struct value is counted under %v", key)
+// A Replier that cannot be compared is not counted, rather than panicking as
+// a map key or being refused for another value's stuck replies.
+func TestAReplierThatCannotBeComparedIsNotCounted(t *testing.T) {
+	if _, ok := replierKey(sliceReplier{tags: []string{"a"}}); ok {
+		t.Fatal("a struct value holding a slice was given a key")
 	}
 	pointer := &capturingReplier{}
-	if key := replierKey(pointer); key != Replier(pointer) {
-		t.Fatalf("a pointer is counted under %v", key)
+	if key, ok := replierKey(pointer); !ok || key != Replier(pointer) {
+		t.Fatalf("a pointer is counted under %v, %v", key, ok)
 	}
 	counts := &replierOverruns{}
-	counts.count(value).add(1)
-	if got := replying(counts, sliceReplier{tags: []string{"b"}}); got != 1 {
-		t.Fatalf("values of one type share a count: got %d", got)
+	count := counts.count(sliceReplier{tags: []string{"a"}})
+	for i := 0; i < homeOverrunLimit; i++ {
+		count.add(1)
 	}
-	counts.count(value).add(-1)
+	if count.full() || len(counts.running) != 0 {
+		t.Fatalf("an uncomparable Replier was counted: full %v, %d kept", count.full(), len(counts.running))
+	}
 }
 
 // homeLinkFixture delivers requests by hand and collects the answers.
