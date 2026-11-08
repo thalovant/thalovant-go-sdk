@@ -8,7 +8,7 @@ HIGH, found by the dependency scan in infra-manifests' `contracts` gate at v0.61
 
 Known issues, technical debt and their status, from test runs and code reading. Each entry names the code it concerns.
 
-Evidence: `go test -race -count=1 -timeout=5m ./...` on 2026-11-08 (Go 1.26.10, linux/amd64): 443
+Evidence: `go test -race -count=1 -timeout=5m ./...` on 2026-11-08 (Go 1.26.10, linux/amd64): 448
 top-level tests pass, 0 fail, 1 skipped (`TestNoiseInteropAgainstLiveHub`, which needs a live hub).
 `gofmt -l .` is empty and `go vet ./...` is clean for linux, windows and darwin. The parity check
 (`check-sdk-parity.py --consumer thalovant-go-sdk`) verifies the acceptance record against the
@@ -74,6 +74,27 @@ Each with a test that fails without the fix (checked by reverting the fix and re
 Not changed in that round, with the reason on the thread: the accepted tab's 60-second wait for
 its page, which the porting brief bounded then, and `Prompt` running on the calling goroutine (the
 reference calls its prompt synchronously, as the print it replaces).
+
+## Fixed from CodeRabbit's second review of #90 (final-contract commit)
+
+- **Redaction recompiled a pattern per string and could not bound its work** (`scrubText`). The
+  new `secretScrubber` (`browser_login.go`) is built once per answer, uses no regular expression,
+  finds each value's next occurrence once (linear per value), and an answer over
+  `maxRefusedAnswerBytes` (1 MiB) or with more than `maxRefusedAnswerTokens` (64) distinct tokens
+  is omitted rather than echoed (`TestALargeOrTokenStuffedAnswerIsRedactedOrOmitted`).
+- **A token carrying `[redacted]` escaped redaction**, since scrubbing split on the marker first.
+  A match is now skipped only when it lies wholly inside an existing marker
+  (`TestATokenThatCarriesTheMarkerIsStillRedactedWhole`). The reference's `_scrub` splits first
+  and has the same gap.
+- **An oversized `HEAD` got a 400 with a body** (`handle`, `readRequestHead`;
+  `TestAnOversizedHeadRequestGetsHeadersAndNoBody`). The reference sends a body there too.
+- Docs and hygiene: `BrowserLoginFailedError` documents `access_denied` sent with another error
+  (`TestADeniedCallbackWithAnotherErrorFailsAsAccessDenied`); two listener tests close their
+  listener on an early failure; the parity reason says 119 cases; the README says an empty
+  `Scopes` leaves `scope` to the API's default.
+- Answered, not changed (cross-SDK contract): hexadecimal hosts such as `0x100000000` stay usable,
+  as the reference's `_real_host` has them, and the producer's own release gate is the Python
+  checker's.
 
 ## Ported from the reference's final round (39e31d8)
 

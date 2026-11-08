@@ -125,9 +125,10 @@ fmt.Println("signed in; token", control.TokenID, "scopes", token["scopes"])
   `thalovant.LoginMethodDevice` forces one. Once the browser was opened, its outcome stands: it
   never turns into a device login.
 - `BrowserLogin(ctx, thalovant.BrowserLoginOptions{...})` is the browser sign-in on its own:
-  `Scopes` (none asks for `hubs:read clients:write`), `DeviceName` (nil gives `thalovant-go-sdk on
-  <hostname>`; `new("")` sends no name), `OpenBrowser`, `Timeout` (default 5 minutes), `Prompt` and `Opener` (replaces the
-  platform browser; it runs on its own goroutine).
+  `Scopes` (with none, no `scope` is sent and the API grants its default, `hubs:read
+  clients:write` today), `DeviceName` (nil gives `thalovant-go-sdk on <hostname>`; `new("")`
+  sends no name), `OpenBrowser`, `Timeout` (default 5 minutes), `Prompt` and `Opener` (replaces
+  the platform browser; it runs on its own goroutine).
 - Without `Prompt`, the URL is printed to stdout whether or not the browser opens, since opening a
   browser can fail silently. With `Prompt`, nothing is printed: `Prompt` receives the URL instead,
   so show it there. `InteractiveLogin` takes no `Prompt` and always prints.

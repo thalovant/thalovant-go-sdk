@@ -1156,8 +1156,17 @@ func TestTheListenerHandlesABoundedNumberOfConnections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Even if an assertion stops the test early, so that no goroutine of
+	// this listener outlives it into another test's goroutine check. close
+	// may run twice; the explicit one below stays before that check.
+	t.Cleanup(listener.close)
 	// More connections than the bound, none of them sending anything.
 	var idle []net.Conn
+	t.Cleanup(func() {
+		for _, conn := range idle {
+			_ = conn.Close()
+		}
+	})
 	for range loopbackMaxConnections + 6 {
 		conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
@@ -1295,6 +1304,7 @@ func TestClosingTheListenerAnswersATabThatIsStillWaiting(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(listener.close) // the explicit close below is the one tested
 	tab := make(chan tabAnswer, 1)
 	go func() { tab <- browserTab(t, port, "GET", "/callback?code=c&state=the-state", nil) }()
 	if accepted, _ := listener.wait(context.Background(), 5*time.Second); accepted == nil {
@@ -1497,5 +1507,163 @@ func TestDrainingAConnectionIsBounded(t *testing.T) {
 	listener.mu.Unlock()
 	if left != 0 {
 		t.Errorf("%d connections still drained past the bound", left)
+	}
+}
+
+// -- second review of #90 ------------------------------------------------------------
+
+func TestClosingTheListenerTwiceIsHarmless(t *testing.T) {
+	listener := newLoopbackListener("the-state")
+	if _, err := listener.start(); err != nil {
+		t.Fatal(err)
+	}
+	listener.close()
+	listener.close()
+	assertNoLoopbackGoroutines(t)
+}
+
+// refusedExchangeError signs in against an API whose exchange answers 400
+// with answer (built from the request body), and returns the error.
+func refusedExchangeError(t *testing.T, code string, answer func(body map[string]any) any) error {
+	t.Helper()
+	api := newUnitBrowserAPI(t, func(body map[string]any) (int, any) { return 400, answer(body) })
+	plane := NewControlPlane(api.server.URL, "")
+	open := false
+	opened, done := startSignIn(context.Background(), plane, BrowserLoginOptions{OpenBrowser: &open})
+	port, state, _ := urlParts(t, receive(t, opened, "the URL"))
+	browserTab(t, port, "GET", "/callback?code="+code+"&state="+state, nil)
+	return receive(t, done, "the sign-in").err
+}
+
+// shownForms is every place an APIError's text can be read.
+func shownForms(t *testing.T, err error) map[string]string {
+	t.Helper()
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("err = %v, want an APIError", err)
+	}
+	problem, _ := json.Marshal(apiErr.Problem)
+	shown := displayForms(err)
+	shown["%#v"] = fmt.Sprintf("%#v", err)
+	shown["Problem"] = string(problem)
+	shown["ProblemDetail"] = apiErr.ProblemDetail
+	shown["Code"] = apiErr.Code
+	return shown
+}
+
+func TestATokenThatCarriesTheMarkerIsStillRedactedWhole(t *testing.T) {
+	const token = "tvpat_left[redacted]right_tail"
+	err := refusedExchangeError(t, "c", func(map[string]any) any {
+		return map[string]any{"detail": "invalid_grant " + token, "access_token": token, "nested": []any{token}}
+	})
+	for form, text := range shownForms(t, err) {
+		for _, part := range []string{"tvpat_left", "right_tail"} {
+			if strings.Contains(text, part) {
+				t.Errorf("%s keeps %q of the token", form, part)
+			}
+		}
+	}
+	// One pass still leaves a marker that is already there alone.
+	hidden := []string{token, "c"}
+	if once := scrubText("x "+token+" [redacted]", hidden); once != "x [redacted] [redacted]" || scrubText(once, hidden) != once {
+		t.Errorf("scrubText = %q", once)
+	}
+}
+
+func TestALargeOrTokenStuffedAnswerIsRedactedOrOmitted(t *testing.T) {
+	// A token of 700 KB, under the size bound: redacted whole, quickly.
+	big := "tvpat_" + strings.Repeat("x", 700_000)
+	started := time.Now()
+	err := refusedExchangeError(t, "c", func(map[string]any) any {
+		return map[string]any{"detail": "invalid_grant", "access_token": big, "echo": big}
+	})
+	for form, text := range shownForms(t, err) {
+		if strings.Contains(text, "tvpat_xxxx") {
+			t.Errorf("%s keeps the large token", form)
+		}
+	}
+	if took := time.Since(started); took > 5*time.Second {
+		t.Errorf("redacting a large token took %s", took)
+	}
+	// As many distinct tokens as the bound allows: every one redacted.
+	err = refusedExchangeError(t, "c", func(map[string]any) any {
+		items := []any{}
+		for index := range maxRefusedAnswerTokens {
+			items = append(items, map[string]any{"access_token": fmt.Sprintf("tvpat_many_%03d", index)})
+		}
+		return map[string]any{"detail": "invalid_grant", "items": items}
+	})
+	for form, text := range shownForms(t, err) {
+		if strings.Contains(text, "tvpat_many_") {
+			t.Errorf("%s keeps one of the tokens", form)
+		}
+	}
+	// Past either bound the answer is not echoed at all.
+	for name, answer := range map[string]func(map[string]any) any{
+		"too many tokens": func(map[string]any) any {
+			items := []any{}
+			for index := range maxRefusedAnswerTokens + 1 {
+				items = append(items, map[string]any{"access_token": fmt.Sprintf("tvpat_many_%03d", index)})
+			}
+			return map[string]any{"detail": "invalid_grant", "items": items}
+		},
+		"too large": func(map[string]any) any {
+			return map[string]any{"detail": "invalid_grant", "padding": strings.Repeat("p", maxRefusedAnswerBytes)}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := refusedExchangeError(t, "c", answer)
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != 400 || apiErr.Problem != nil || apiErr.Detail != serverErrorOmitted {
+				t.Errorf("err = %#v, want a 400 whose answer is omitted", err)
+			}
+			if strings.Contains(fmt.Sprint(err), "tvpat_many_") {
+				t.Error("a token reached the error")
+			}
+		})
+	}
+}
+
+func TestAnOversizedHeadRequestGetsHeadersAndNoBody(t *testing.T) {
+	listener := newLoopbackListener("the-state")
+	port, err := listener.start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(listener.close)
+	request := []byte("HEAD /callback?code=" + strings.Repeat("a", loopbackMaxRequestHead+10) + " HTTP/1.1\r\n\r\n")
+	data, err := sendWhileReading(t, port, request)
+	if err != nil {
+		t.Fatalf("the connection ended with %v", err)
+	}
+	answer := parseTabAnswer(t, data)
+	if answer.status != 400 || answer.body != "" || answer.headers["Content-Type"] != "text/html; charset=utf-8" {
+		t.Errorf("an oversized HEAD got %d %v %q", answer.status, answer.headers, answer.body)
+	}
+	if want := strconv.Itoa(len(loopbackPage(loopbackWrongStateText))); answer.headers["Content-Length"] != want {
+		t.Errorf("Content-Length %q, want %s", answer.headers["Content-Length"], want)
+	}
+	// An oversized GET still carries its page.
+	data, _ = sendWhileReading(t, port, []byte("GET /callback?code="+strings.Repeat("a", loopbackMaxRequestHead+10)+" HTTP/1.1\r\n\r\n"))
+	if answer := parseTabAnswer(t, data); answer.status != 400 || !strings.Contains(answer.body, loopbackWrongStateText) {
+		t.Errorf("an oversized GET got %d %q", answer.status, answer.body)
+	}
+}
+
+func TestADeniedCallbackWithAnotherErrorFailsAsAccessDenied(t *testing.T) {
+	status, callback := classifyRequest("GET", "/callback?error=access_denied&error=server_error&state=s", "s")
+	if status != 200 || callback.outcome != callbackFailed || callback.errorParam != "access_denied" {
+		t.Fatalf("classifyRequest = %d %+v", status, callback)
+	}
+	api := newUnitBrowserAPI(t, nil)
+	plane := NewControlPlane(api.server.URL, "")
+	open := false
+	opened, done := startSignIn(context.Background(), plane, BrowserLoginOptions{OpenBrowser: &open})
+	port, state, _ := urlParts(t, receive(t, opened, "the URL"))
+	browserTab(t, port, "GET", "/callback?error=access_denied&error=server_error&state="+state, nil)
+	err := receive(t, done, "the sign-in").err
+	var failed *BrowserLoginFailedError
+	if !errors.As(err, &failed) || failed.Code != "access_denied" || errors.Is(err, ErrDeviceAccessDenied) {
+		t.Errorf("err = %v, want a failure with Code access_denied, not a denial", err)
 	}
 }

@@ -328,7 +328,9 @@ func loopbackResponse(status int, text string, head bool) []byte {
 var errHeadTooLarge = errors.New("request head too large")
 
 // readRequestHead reads up to the blank line that ends a request head, at
-// most loopbackMaxRequestHead bytes of it.
+// most loopbackMaxRequestHead bytes of it. A head over that is
+// errHeadTooLarge, with what was read of it, so that its method still
+// decides whether the 400 carries a body.
 func readRequestHead(conn net.Conn) ([]byte, error) {
 	separator := []byte("\r\n\r\n")
 	buffer := make([]byte, 0, 1024)
@@ -338,12 +340,12 @@ func readRequestHead(conn net.Conn) ([]byte, error) {
 		buffer = append(buffer, chunk[:n]...)
 		if index := bytes.Index(buffer, separator); index >= 0 {
 			if index > loopbackMaxRequestHead {
-				return nil, errHeadTooLarge
+				return buffer, errHeadTooLarge
 			}
 			return buffer[:index], nil
 		}
 		if len(buffer) >= loopbackMaxRequestHead+len(separator) {
-			return nil, errHeadTooLarge
+			return buffer, errHeadTooLarge
 		}
 		if err != nil {
 			return nil, err
@@ -498,7 +500,8 @@ func (l *loopbackListener) handle(conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Now().Add(loopbackRequestReadTimeout))
 	head, err := readRequestHead(conn)
 	if errors.Is(err, errHeadTooLarge) {
-		l.reply(conn, 400, loopbackWrongStateText, false)
+		// A HEAD answer carries no body, oversized or not.
+		l.reply(conn, 400, loopbackWrongStateText, bytes.HasPrefix(head, []byte("HEAD ")))
 		return
 	}
 	if err != nil {

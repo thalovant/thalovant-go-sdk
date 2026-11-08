@@ -74,10 +74,11 @@ const (
 
 // BrowserLoginOptions carries the optional inputs of BrowserLogin.
 type BrowserLoginOptions struct {
-	// Scopes are what the token will carry. Empty strings are dropped; none
-	// left (nil or empty) asks for the API's default, hubs:read and
-	// clients:write. Any non-admin scope may be asked for; the API refuses
-	// admin or unknown scopes when the person approves.
+	// Scopes are what the token will carry. Empty strings are dropped; when
+	// none is left (nil or empty) the scope parameter is left out and the API
+	// grants its own default (hubs:read and clients:write today). Any
+	// non-admin scope may be asked for; the API refuses admin or unknown
+	// scopes when the person approves.
 	Scopes []string
 	// DeviceName is what the consent page and the token show. Only nil asks
 	// for DefaultDeviceName ("thalovant-go-sdk on <hostname>"); a pointer to
@@ -111,8 +112,8 @@ type BrowserLoginOptions struct {
 type InteractiveLoginOptions struct {
 	// Method picks the sign-in; "" is LoginMethodAuto.
 	Method LoginMethod
-	// Scopes are what the token will carry, for either method; none asks for
-	// the API's default.
+	// Scopes are what the token will carry, for either method; none sends no
+	// scopes, and the API grants its own default.
 	Scopes []string
 	// DeviceName names this machine on the consent page: BrowserLogin's
 	// DeviceName, or a device login's ClientName. Only nil asks for
@@ -165,12 +166,16 @@ type BrowserAuthorization struct {
 }
 
 // BrowserLoginFailedError is a browser sign-in the browser came back from
-// without a code: the consent page named an error other than access_denied,
-// or sent no single, non-empty code. It matches ErrAPI. The API was not
-// asked, so there is no HTTP status.
+// without a code: the consent page named an error other than a single
+// access_denied, or sent no single, non-empty code. It matches ErrAPI. The
+// API was not asked, so there is no HTTP status. Only error=access_denied
+// given once is a denial; given with another error value, it is a failure
+// whose Code is "access_denied", since the first error value is the one
+// read, as the reference reads it.
 type BrowserLoginFailedError struct {
-	// Code is the error the consent page named when it is one of the codes
-	// RFC 6749 section 4.1.2.1 defines (invalid_request, unauthorized_client,
+	// Code is the first error value the consent page sent when it is one of
+	// the codes RFC 6749 section 4.1.2.1 defines (invalid_request,
+	// unauthorized_client, access_denied when another error came with it,
 	// unsupported_response_type, invalid_scope, server_error,
 	// temporarily_unavailable); "" for anything else, which could be the
 	// state or a code and is never repeated.
@@ -844,8 +849,11 @@ func (c *ControlPlane) exchangeBrowserCode(ctx context.Context, config NativeSig
 		return nil, err
 	}
 	if status < 200 || status > 299 {
-		clean, hidden := redactExchangeAnswer(raw, []string{code, verifier, state})
-		return nil, withoutSecrets(apiErrorFromResponse(status, clean, header), hidden)
+		clean, scrubber, ok := redactExchangeAnswer(raw, []string{code, verifier, state})
+		if !ok {
+			return nil, &APIError{StatusCode: status, Detail: serverErrorOmitted, RetryAfter: retryAfter(nil, header)}
+		}
+		return nil, scrubber.apiError(apiErrorFromResponse(status, clean, header))
 	}
 	token, decodeErr := decodeControlJSON(raw)
 	if decodeErr != nil {
@@ -864,8 +872,17 @@ const redactedSecret = "[redacted]"
 // error answer carries them.
 var answerTokenKeys = map[string]bool{"access_token": true, "refresh_token": true, "id_token": true}
 
+// Bounds on a refused exchange's answer, which this SDK reads into an error.
+// An answer over the first, or carrying more distinct tokens than the
+// second, is not echoed at all: the error says only that it was omitted.
+const (
+	maxRefusedAnswerBytes  = 1 << 20
+	maxRefusedAnswerTokens = 64
+)
+
 // redactExchangeAnswer takes the secrets out of a refused exchange's body
-// before the error is built from it, and answers the secrets it found.
+// before the error is built from it, and answers the scrubber that did it.
+// ok is false for an answer too large, or with too many tokens, to echo.
 //
 // A JSON body is decoded first, so that a secret it spells with escapes
 // ("\u0061...") is matched as the text it decodes to, and is redacted before
@@ -874,25 +891,30 @@ var answerTokenKeys = map[string]bool{"access_token": true, "refresh_token": tru
 // is a secret too, wherever it sits: an answer that refuses the exchange has
 // no business carrying one. Numbers keep their exact spelling. A body that
 // is not JSON is redacted as text; it never reaches the display line.
-func redactExchangeAnswer(raw []byte, hidden []string) ([]byte, []string) {
+func redactExchangeAnswer(raw []byte, hidden []string) ([]byte, secretScrubber, bool) {
+	if len(raw) > maxRefusedAnswerBytes {
+		return nil, secretScrubber{}, false
+	}
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	var body any
 	if err := decoder.Decode(&body); err != nil {
-		return redactAll(raw, hidden), hidden
+		scrubber := newSecretScrubber(hidden)
+		return []byte(scrubber.text(string(raw))), scrubber, true
 	}
 	if _, err := decoder.Token(); err != io.EOF {
 		// Trailing data: not one JSON value, so not a problem body either.
-		return redactAll(raw, hidden), hidden
+		scrubber := newSecretScrubber(hidden)
+		return []byte(scrubber.text(string(raw))), scrubber, true
 	}
-	found := append([]string{}, hidden...)
+	tokens := map[string]bool{}
 	var collect func(any)
 	collect = func(item any) {
 		switch typed := item.(type) {
 		case map[string]any:
 			for key, member := range typed {
 				if text, ok := member.(string); ok && answerTokenKeys[key] && text != "" {
-					found = append(found, text)
+					tokens[text] = true
 				}
 				collect(member)
 			}
@@ -903,90 +925,165 @@ func redactExchangeAnswer(raw []byte, hidden []string) ([]byte, []string) {
 		}
 	}
 	collect(body)
+	if len(tokens) > maxRefusedAnswerTokens {
+		return nil, secretScrubber{}, false
+	}
+	found := append([]string{}, hidden...)
+	for token := range tokens {
+		found = append(found, token)
+	}
+	scrubber := newSecretScrubber(found)
 	var out bytes.Buffer
 	encoder := json.NewEncoder(&out)
 	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(scrubSecrets(body, found)); err != nil {
-		return redactAll(raw, found), found
+	if err := encoder.Encode(scrubber.value(body)); err != nil {
+		return []byte(scrubber.text(string(raw))), scrubber, true
 	}
-	return bytes.TrimRight(out.Bytes(), "\n"), found
+	return bytes.TrimRight(out.Bytes(), "\n"), scrubber, true
 }
 
-// redactAll takes every value in hidden out of a body as text.
-func redactAll(raw []byte, hidden []string) []byte {
-	return []byte(scrubText(string(raw), hidden))
+// secretScrubber replaces secrets with [redacted]: the values are kept
+// non-empty, without duplicates, longest first, and the scrubber is built
+// once for everything one error carries.
+type secretScrubber struct {
+	values []string
 }
 
-// scrubText replaces every value in hidden within text with [redacted], in
-// one pass, the longest value first, so that a value which is part of
-// another cannot break the longer one up before it is matched; and never
-// inside a [redacted] already there (whose letters a short value can hold),
-// so scrubbing twice changes nothing. This is the reference's _scrub.
-func scrubText(text string, hidden []string) string {
+func newSecretScrubber(hidden []string) secretScrubber {
+	seen := map[string]bool{}
 	values := make([]string, 0, len(hidden))
 	for _, value := range hidden {
-		if value != "" {
+		if value != "" && !seen[value] {
+			seen[value] = true
 			values = append(values, value)
 		}
 	}
-	if len(values) == 0 {
-		return text
-	}
 	sort.SliceStable(values, func(i, j int) bool { return len(values[i]) > len(values[j]) })
-	quoted := make([]string, len(values))
-	for index, value := range values {
-		quoted[index] = regexp.QuoteMeta(value)
-	}
-	// Go's regexp takes the first alternative that matches at the leftmost
-	// position, as Python's re does, so longest first wins.
-	pattern := regexp.MustCompile(strings.Join(quoted, "|"))
-	parts := strings.Split(text, redactedSecret)
-	for index, part := range parts {
-		parts[index] = pattern.ReplaceAllLiteralString(part, redactedSecret)
-	}
-	return strings.Join(parts, redactedSecret)
+	return secretScrubber{values: values}
 }
 
-// scrubSecrets is item with every value in hidden taken out of every string
-// in it, the keys of its objects included.
-func scrubSecrets(item any, hidden []string) any {
+// text replaces every value within text with [redacted], in one pass: at
+// each point the leftmost occurrence of any value is taken, the longest one
+// when several start there, so that a value which is part of another cannot
+// break the longer one up first. A match that lies wholly inside a
+// [redacted] already there (whose letters a short value can spell) is
+// skipped, so scrubbing twice changes nothing; a value that spans one, as a
+// token carrying "[redacted]" in it does, is still matched whole. Each
+// value's next occurrence is searched for once and kept until passed, so the
+// work is linear in the text for each value, and nothing is compiled.
+func (s secretScrubber) text(text string) string {
+	if len(s.values) == 0 || text == "" {
+		return text
+	}
+	var markers []int
+	for offset := 0; ; {
+		index := strings.Index(text[offset:], redactedSecret)
+		if index < 0 {
+			break
+		}
+		markers = append(markers, offset+index)
+		offset += index + len(redactedSecret)
+	}
+	insideMarker := func(start, length int) bool {
+		// The last marker starting at or before start.
+		at := sort.SearchInts(markers, start+1) - 1
+		return at >= 0 && start+length <= markers[at]+len(redactedSecret)
+	}
+	next := make([]int, len(s.values))
+	for index := range next {
+		next[index] = -2 // not searched yet
+	}
+	find := func(index, from int) int {
+		value := s.values[index]
+		for from <= len(text) {
+			found := strings.Index(text[from:], value)
+			if found < 0 {
+				return -1
+			}
+			at := from + found
+			if !insideMarker(at, len(value)) {
+				return at
+			}
+			from = at + 1
+		}
+		return -1
+	}
+	var out strings.Builder
+	position := 0
+	for {
+		best, bestLength := -1, 0
+		for index, value := range s.values {
+			if next[index] == -1 {
+				continue // no occurrence left
+			}
+			if next[index] < position {
+				next[index] = find(index, position)
+				if next[index] == -1 {
+					continue
+				}
+			}
+			// Longest first: an equal start keeps the longer value found
+			// before it.
+			if best < 0 || next[index] < best {
+				best, bestLength = next[index], len(value)
+			}
+		}
+		if best < 0 {
+			break
+		}
+		out.WriteString(text[position:best])
+		out.WriteString(redactedSecret)
+		position = best + bestLength
+	}
+	out.WriteString(text[position:])
+	return out.String()
+}
+
+// value is item with every value taken out of every string in it, the keys
+// of its objects included.
+func (s secretScrubber) value(item any) any {
 	switch typed := item.(type) {
 	case string:
-		return scrubText(typed, hidden)
+		return s.text(typed)
 	case map[string]any:
 		clean := make(map[string]any, len(typed))
 		for key, member := range typed {
-			clean[scrubText(key, hidden)] = scrubSecrets(member, hidden)
+			clean[s.text(key)] = s.value(member)
 		}
 		return clean
 	case []any:
 		clean := make([]any, len(typed))
 		for index, member := range typed {
-			clean[index] = scrubSecrets(member, hidden)
+			clean[index] = s.value(member)
 		}
 		return clean
 	}
 	return item
 }
 
-// withoutSecrets is apiErr with every value in hidden taken out of every
-// field, the problem's keys included. An API that echoes a request back, as a
-// FastAPI 422 lists each field's input, would otherwise hand the code and the
-// verifier to whoever logs the error. The returned copy is the only error
-// that leaves; nothing keeps the original.
-func withoutSecrets(apiErr *APIError, hidden []string) *APIError {
+// apiError is a new APIError like apiErr with every value taken out of every
+// field, the problem's keys included. An API that echoes a request back, as
+// a FastAPI 422 lists each field's input, would otherwise hand the code and
+// the verifier to whoever logs the error. The copy is the only error that
+// leaves; nothing keeps the original, and an APIError wraps no cause.
+func (s secretScrubber) apiError(apiErr *APIError) *APIError {
 	clean := *apiErr
-	clean.Detail = scrubText(apiErr.Detail, hidden)
-	clean.Code = scrubText(apiErr.Code, hidden)
-	clean.ProblemDetail = scrubText(apiErr.ProblemDetail, hidden)
+	clean.Detail = s.text(apiErr.Detail)
+	clean.Code = s.text(apiErr.Code)
+	clean.ProblemDetail = s.text(apiErr.ProblemDetail)
 	if apiErr.Problem != nil {
-		clean.Problem, _ = scrubSecrets(apiErr.Problem, hidden).(map[string]any)
+		clean.Problem, _ = s.value(apiErr.Problem).(map[string]any)
 	}
 	if apiErr.Fields != nil {
 		clean.Fields = make([]string, len(apiErr.Fields))
 		for index, field := range apiErr.Fields {
-			clean.Fields[index] = scrubText(field, hidden)
+			clean.Fields[index] = s.text(field)
 		}
 	}
 	return &clean
 }
+
+// scrubText and scrubSecrets are secretScrubber for one text or one value.
+func scrubText(text string, hidden []string) string { return newSecretScrubber(hidden).text(text) }
+
+func scrubSecrets(item any, hidden []string) any { return newSecretScrubber(hidden).value(item) }

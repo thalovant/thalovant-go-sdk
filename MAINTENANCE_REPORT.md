@@ -1,4 +1,15 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Port the browser-login reference's final round (Python 39e31d8) to #90.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Address CodeRabbit's second review of #90 (9 threads) against the final contract.
+
+## 2026-11-08 — second review of #90 (final-contract commit 291b49b)
+
+CodeRabbit opened nine threads on the final-contract commit. Seven are fixed, two are answered as the cross-SDK contract and reported to the rollout lead. Nothing the 119 shared vectors decide changed: the recorded conformance file is byte-identical to the committed one, and equal to the reference's.
+
+- **Fixed:** redaction is a `secretScrubber` built once per answer with no regular expression, linear per value, and a refused answer over 1 MiB or with more than 64 distinct tokens is omitted rather than echoed; a token that carries `[redacted]` is matched whole (a match is skipped only when it lies wholly inside an existing marker); an oversized `HEAD` gets its 400 without a body; `BrowserLoginFailedError` documents `access_denied` sent with another error; two listener tests close their listener on an early failure; the parity reason says 119 cases; the README says no scopes leaves `scope` to the API's default.
+- **Answered as the contract:** hexadecimal hosts (`0x100000000`) stay usable, as the reference's `_real_host` has them, and the ahead-of-reference capability is the rollout order the contract sets, gated by the Python checker in the Python repository.
+- **Parity:** evidence refreshed only for the changed files (`browser_login.go`, `loopback.go`, `browser_login_test.go` in `browser-login`); `control.go` and the reference digests are unchanged.
+- **Verification:** `gofmt -l .` empty; `go vet ./...` clean for linux, windows and darwin; `THALOVANT_CONFORMANCE_OUT=... go test -race -count=1 -timeout=5m -v ./...`: 448 top-level tests pass, 0 fail, 1 skipped (`TestNoiseInteropAgainstLiveHub`), no data race; the 119 recorded `browser-login-vectors.json` digests equal the reference's; `check-sdk-parity.py --consumer thalovant-go-sdk` verified against the reference's `main` (44b6e2b) and against 39e31d8. Each fix's test fails with the fix reverted.
+
+Transparency Report. AI Model: Claude Opus 5.5 (claude-opus-5-5). Actions Taken: read each thread against the code, the final reference and its brief; wrote the fixes and six tests; checked each test against a reverted fix; replied on and resolved every thread. Oversight: the rollout lead asked for the round and decides on the two contract items; hosted CI runs on the pull request. Not merged, tagged or released.
 
 ## 2026-11-08 — browser sign-in against the final reference (Python 39e31d8)
 
