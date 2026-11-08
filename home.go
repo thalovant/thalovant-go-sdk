@@ -208,13 +208,86 @@ func DecodeReferences(text string) string {
 // HomeHandler answers one request. It runs on its own goroutine under a
 // context that ends when the handler's time is up; an error, a panic or
 // running out of time is answered for it (failed_to_handle, failed_to_handle,
-// timeout).
+// timeout). A handler should return once its context ends: Go cannot stop a
+// goroutine, so one that does not keeps it until it returns (see
+// AnswerHomeRequest for the bound on those).
 type HomeHandler func(ctx context.Context, request HomeRequest) (HomeAnswer, error)
 
 // Replier sends a reply to an event, back along the route it came. Client and
 // HubSession are Repliers.
+//
+// Reply must return once ctx ends, as Client's and HubSession's do: the
+// answer to a home request has to be withdrawn at the hub's bound.
+// AnswerHomeRequest stops waiting at the bound whatever Reply does, but a
+// Reply that ignores ctx keeps its goroutine until it returns.
 type Replier interface {
 	Reply(ctx context.Context, event Event, msgType string, data Data, eventContext Context) error
+}
+
+// homeOverrunLimit is how many handlers, and apart from them how many
+// replies, may still be running past their time before the next request
+// stops starting another. A handler or a Replier that ignores its context
+// keeps its goroutine until it returns, and without a limit a stuck one would
+// leave a goroutine behind for every request. Four, as the Python reference
+// runs at most four plain handlers at once.
+const homeOverrunLimit = 4
+
+// homeOverruns counts the goroutines of one kind that ran past their time and
+// have not returned yet.
+type homeOverruns struct {
+	mu      sync.Mutex
+	running int
+}
+
+func (o *homeOverruns) full() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.running >= homeOverrunLimit
+}
+
+func (o *homeOverruns) add(delta int) {
+	o.mu.Lock()
+	o.running += delta
+	o.mu.Unlock()
+}
+
+// homeBounds are one subscription's counts, handlers and replies apart, so a
+// stuck handler never keeps an answer from being sent.
+type homeBounds struct {
+	handlers, replies homeOverruns
+}
+
+// sharedHomeBounds are the counts of AnswerHomeRequest called on its own,
+// with no subscription of its own.
+var sharedHomeBounds = &homeBounds{}
+
+// homeRun is one goroutine's place in a count. It takes a place when its
+// caller stops waiting for it (abandoned) and gives it back when the
+// goroutine returns (returned), whichever order the two come in.
+type homeRun struct {
+	mu          sync.Mutex
+	count       *homeOverruns
+	finished    bool
+	overrunning bool
+}
+
+func (r *homeRun) abandoned() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.finished && !r.overrunning {
+		r.overrunning = true
+		r.count.add(1)
+	}
+}
+
+func (r *homeRun) returned() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.finished = true
+	if r.overrunning {
+		r.overrunning = false
+		r.count.add(-1)
+	}
 }
 
 // AnswerHomeRequest answers one request: it runs handler, then replies with
@@ -236,7 +309,20 @@ type Replier interface {
 // answer, AnswerHomeRequest returns a nil payload and a nil error. When ctx
 // itself ends first, nothing is sent and ctx's error is returned: the link is
 // going away.
+//
+// Go cannot stop a goroutine, so a handler that ignores its context, or a
+// Replier that ignores its own, keeps its goroutine until it returns. While
+// four handlers are still running past their time, a request is answered
+// timeout at once and its handler is not started; while four replies are
+// still running past the bound, no reply is started and the error says so.
+// Neither can then leave a goroutine behind for every request. Calls of
+// AnswerHomeRequest on its own share those counts; each AnswerHomeRequests
+// subscription has its own.
 func AnswerHomeRequest(ctx context.Context, replier Replier, event Event, handler HomeHandler, opts HomeAnswerOptions) (Data, error) {
+	return answerHomeRequest(ctx, replier, event, handler, opts, sharedHomeBounds)
+}
+
+func answerHomeRequest(ctx context.Context, replier Replier, event Event, handler HomeHandler, opts HomeAnswerOptions, bounds *homeBounds) (Data, error) {
 	if replier == nil {
 		return nil, fmt.Errorf("%w: answering a home request needs somewhere to reply", ErrRuntime)
 	}
@@ -254,7 +340,7 @@ func AnswerHomeRequest(ctx context.Context, replier Replier, event Event, handle
 	if hubDeadline.Before(handlerDeadline) {
 		handlerDeadline = hubDeadline
 	}
-	answer, err := runHomeHandler(ctx, request, handler, handlerDeadline)
+	answer, err := runHomeHandler(ctx, request, handler, handlerDeadline, &bounds.handlers)
 	if err != nil {
 		return nil, err
 	}
@@ -262,12 +348,22 @@ func AnswerHomeRequest(ctx context.Context, replier Replier, event Event, handle
 	if !time.Now().Before(hubDeadline) {
 		return nil, nil // no time left: the hub has given up on this request
 	}
+	if bounds.replies.full() {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		return nil, fmt.Errorf("%w: %d home replies are still running past the hub's bound; this answer was not sent", ErrTimeout, homeOverrunLimit)
+	}
 	replyCtx, cancel := context.WithDeadline(ctx, hubDeadline)
 	defer cancel()
 	// Sent on its own goroutine, so a Replier that does not honour its context
 	// still cannot hold this past the bound.
+	run := &homeRun{count: &bounds.replies}
 	sent := make(chan error, 1)
-	go func() { sent <- replier.Reply(replyCtx, event, HomeResponseEvent, payload, nil) }()
+	go func() {
+		defer run.returned()
+		sent <- replier.Reply(replyCtx, event, HomeResponseEvent, payload, nil)
+	}()
 	select {
 	case err := <-sent:
 		if err == nil {
@@ -281,6 +377,7 @@ func AnswerHomeRequest(ctx context.Context, replier Replier, event Event, handle
 		}
 		return payload, err
 	case <-replyCtx.Done():
+		run.abandoned()
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -289,10 +386,20 @@ func AnswerHomeRequest(ctx context.Context, replier Replier, event Event, handle
 }
 
 // runHomeHandler is the handler's answer, or the one the SDK gives for it.
-func runHomeHandler(ctx context.Context, request HomeRequest, handler HomeHandler, deadline time.Time) (HomeAnswer, error) {
+// overruns counts the handlers still running past their time.
+func runHomeHandler(ctx context.Context, request HomeRequest, handler HomeHandler, deadline time.Time, overruns *homeOverruns) (HomeAnswer, error) {
 	failed := HomeAnswer{ResponseType: HomeError, ErrorCode: HomeErrorFailedToHandle}
 	if handler == nil {
 		return failed, nil
+	}
+	timedOut := HomeAnswer{ResponseType: HomeError, ErrorCode: HomeErrorTimeout}
+	if overruns.full() {
+		// Every place is held by a handler that has not returned: starting
+		// another would only leave one more goroutine behind.
+		if err := ctx.Err(); err != nil {
+			return HomeAnswer{}, err
+		}
+		return timedOut, nil
 	}
 	handlerCtx, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
@@ -302,7 +409,11 @@ func runHomeHandler(ctx context.Context, request HomeRequest, handler HomeHandle
 	}
 	// Buffered, so a handler that finishes after the deadline never blocks.
 	done := make(chan outcome, 1)
+	run := &homeRun{count: overruns}
 	go func() {
+		// Deferred first, so it runs last: the place is given back only once
+		// the handler has returned, a panic included.
+		defer run.returned()
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				done <- outcome{err: fmt.Errorf("%w: the home handler panicked: %v", ErrRuntime, recovered)}
@@ -311,7 +422,6 @@ func runHomeHandler(ctx context.Context, request HomeRequest, handler HomeHandle
 		answer, err := handler(handlerCtx, request)
 		done <- outcome{answer, err}
 	}()
-	timedOut := HomeAnswer{ResponseType: HomeError, ErrorCode: HomeErrorTimeout}
 	select {
 	case result := <-done:
 		switch {
@@ -326,6 +436,7 @@ func runHomeHandler(ctx context.Context, request HomeRequest, handler HomeHandle
 		}
 		return result.answer, nil
 	case <-handlerCtx.Done():
+		run.abandoned()
 		if err := ctx.Err(); err != nil {
 			return HomeAnswer{}, err
 		}
@@ -356,7 +467,10 @@ type HomeAnswerOptions struct {
 // AnswerHomeRequests answers every thalovant.home.request that reaches link,
 // each on a goroutine of its own so a slow one does not hold up the next, and
 // returns a function that stops it. Stopping cancels the contexts of the
-// answers still running; those send nothing.
+// answers still running; those send nothing. The subscription has its own
+// counts of handlers and replies still running past their time (see
+// AnswerHomeRequest): four of either and requests are answered without
+// starting another.
 //
 // With a HubSession, requests keep arriving across reconnects while the
 // session's Run keeps the link up:
@@ -367,12 +481,13 @@ type HomeAnswerOptions struct {
 //	go session.Run(ctx)
 func AnswerHomeRequests(link HomeLink, handler HomeHandler, opts HomeAnswerOptions) (stop func()) {
 	ctx, cancel := context.WithCancel(context.Background())
+	bounds := &homeBounds{}
 	unsubscribe := link.On(HomeRequestEvent, func(event Event) {
 		if ctx.Err() != nil {
 			return // stopped: nothing new starts
 		}
 		go func() {
-			_, err := AnswerHomeRequest(ctx, link, event, handler, opts)
+			_, err := answerHomeRequest(ctx, link, event, handler, opts, bounds)
 			if err != nil && ctx.Err() == nil && opts.OnReplyError != nil {
 				opts.OnReplyError(HomeRequestFromEvent(event), err)
 			}

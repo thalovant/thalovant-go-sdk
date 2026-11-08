@@ -460,7 +460,9 @@ type HubIntentInventory struct {
 	// its own language. Two languages that land on the same listing share
 	// one tag, the first spelling used. Callers rendering sentences must
 	// read them from the tag that answered, and should say which language
-	// they are in when it is not the person's.
+	// they are in when it is not the person's. It is empty, not one tag per
+	// language, on the names-only fallback (IntentSourceEngines): nothing was
+	// listed by manifest there, and the inventory has no sentences to read.
 	ListedIn []string `json:"listed_in"`
 }
 
@@ -1220,6 +1222,9 @@ func inventoryFromNames(manifests []engineNames, languages []string, denied stri
 		Skills:    groupBySkill(intents),
 		Source:    IntentSourceEngines,
 		Denied:    []string{denied},
+		// Nothing was listed by manifest, so no tag answered: empty, as in
+		// the Python reference, and [] rather than null in JSON.
+		ListedIn: []string{},
 	}
 }
 

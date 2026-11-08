@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-06 - Motive: Upgrade golang.org/x/net to 0.62.0 for CVE-2026-78661.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Record the UsualForm and home-goroutine fixes from CodeRabbit's review-body items on #65 and #69.
 
 ## 2026-11-06 — CVE-2026-78661 in golang.org/x/net
 
@@ -8,11 +8,10 @@ HIGH, found by the dependency scan in infra-manifests' `contracts` gate at v0.61
 
 Known issues, technical debt and their status, from test runs and code reading. Each entry names the code it concerns.
 
-Evidence: `go test -race -count=1 ./...` on 2026-11-03 (Go 1.26.10, linux/amd64): 384 top-level tests
-pass, 0 fail, 1 skipped (`TestNoiseInteropAgainstLiveHub`, which needs a live hub). `gofmt -l .` is
-empty and `go vet ./...` is clean. The parity check (`check-sdk-parity.py --consumer
-thalovant-go-sdk`) verifies the acceptance record and reports `chat-apps` as a capability the
-reference does not know yet, which is expected until the Python reference declares it.
+Evidence: `go test -race -count=1 -timeout=5m ./...` on 2026-11-08 (Go 1.26.10, linux/amd64): 388
+top-level tests pass, 0 fail, 1 skipped (`TestNoiseInteropAgainstLiveHub`, which needs a live hub).
+`gofmt -l .` is empty and `go vet ./...` is clean. The parity check (`check-sdk-parity.py --consumer
+thalovant-go-sdk`, reference at bd4061f) verifies the acceptance record.
 
 ## Verified in this change
 
@@ -48,13 +47,13 @@ reference does not know yet, which is expected until the Python reference declar
 
 ## Fixed
 
+- **Stuck home handlers and replies left a goroutine per request** (CodeRabbit on #69). Fixed on 2026-11-08 (Unreleased): `answerHomeRequest` and `runHomeHandler` in `home.go` count the handlers and the replies still running past their time (`homeBounds`, `homeRun`); at four of either, a request is answered `timeout` without starting a handler, or no reply is started and the call returns `ErrTimeout`. Tests: `TestHandlersThatNeverReturnCannotLeaveAGoroutinePerRequest`, `TestRepliesThatNeverReturnCannotLeaveAGoroutinePerRequest`, `TestASubscriptionCountsItsOwnStuckHandlers`, and `TestHandlersThatHonourTheirTimeAreNotLimited`, which checks that handlers honouring their context are not capped (`home_link_test.go`).
+- **`UsualForm` differed from the Python reference on two kinds of tag** (found 2026-11-03, raised again by CodeRabbit's singleton item on #65). Fixed on 2026-11-08 (Unreleased) in `UsualForm` (`language_matching.go`): an empty subtag (`"en-"`, `"en--US"`, `"en-US-"`) has no usual form, and a language known through its macrolanguage keeps its own code (`"arb"` to `arb-eg`, `"cmn"` to `cmn-cn`). Pinned in `usual_form_test.go`; a run of both implementations over 4,453 tags found no difference. Dangling singletons (`"en-u"`, `"en-x"`) matched the reference before and still do.
+- **`ListedIn` was nil on the names-only fallback** (CodeRabbit on #65). Now `[]` (`inventoryFromNames` in `intents.go`), as in the reference, which leaves `listed_in` empty when nothing was listed by manifest; `TestTheFallbackListsNamesAndSaysWhatWasRefused` checks both the slice and the JSON.
 - **`UsualForm` suppressed its own retry for `en-US`** (CodeRabbit on #65). Fixed in d61624f (#66, v0.10.4): byte comparison in `UsualForm` (`language_matching.go`), pinned in `usual_form_test.go`. The CHANGELOG entry was missing and is added now.
 - **`%#v` printed `APIError.Problem`** (CodeRabbit on #68). Fixed in 5715299 (#70): `APIError.GoString()` in `errors.go`, tested in `api_error_vectors_test.go`.
 
 ## Open
 
-- **`UsualForm` differs from the Python reference on two kinds of tag** (found by running both on the same inputs, 2026-11-03; not changed here):
-  - A tag with an empty subtag (`"en-"`, `"en--US"`, `"en-US-"`): the reference returns `None`; `UsualForm` returns `"en-us", true`.
-  - A language CLDR knows only through its macrolanguage (`"arb"`, `"cmn"`): the reference returns `arb-eg` / `cmn-cn`; `UsualForm` returns `"", false` because `matching.Likely` has no direct entry.
-  - The Rust port answers the same as Go. No shared vector covers `usual_form`, so the parity gate sees neither difference.
-  - Dangling singletons (`"en-u"`) already match the reference (`en-us`).
+- **The Rust port's `usual_form` still answers the way Go did** on the two kinds of tag above (noted 2026-11-03). No shared vector covers `usual_form`, so the parity gate sees no difference; see SUGGESTIONS.md.
+- **The home-goroutine bound is Go's own.** The reference caps plain handlers at four threads running at once; Go caps only the handlers and replies still running past their time, so handlers that honour their context are never refused. The count is checked when a request arrives, so requests already running when the fourth runs over can still add to it before new ones are refused.

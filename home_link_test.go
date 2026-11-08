@@ -662,14 +662,14 @@ func TestAHomeReplyGetsWhatIsLeftOfTheHubsBound(t *testing.T) {
 	}
 }
 
-// deafReplier never returns, whatever its context says.
-type deafReplier struct{}
-
-func (deafReplier) Reply(context.Context, Event, string, Data, Context) error { select {} }
-
 func TestAReplierThatIgnoresItsContextCannotHoldTheAnswerPastTheBound(t *testing.T) {
+	// Released at the end, so the reply it leaves running does not hold one
+	// of the places AnswerHomeRequest's calls share (go test -count=N).
+	replier := &stuckReplier{release: make(chan struct{})}
+	defer waitForOverruns(t, &sharedHomeBounds.replies, overrunning(&sharedHomeBounds.replies))
+	defer close(replier.release)
 	started := time.Now()
-	sent, err := AnswerHomeRequest(context.Background(), deafReplier{}, Event{Name: HomeRequestEvent}, func(context.Context, HomeRequest) (HomeAnswer, error) {
+	sent, err := AnswerHomeRequest(context.Background(), replier, Event{Name: HomeRequestEvent}, func(context.Context, HomeRequest) (HomeAnswer, error) {
 		return HomeAnswer{Speech: "done"}, nil
 	}, HomeAnswerOptions{HubTimeout: 100 * time.Millisecond})
 	if err != nil || sent != nil || time.Since(started) > time.Second {
@@ -819,5 +819,208 @@ func TestARevokeRacingASignInKeepsTheNewToken(t *testing.T) {
 	controlTokens.Unlock()
 	if strings.TrimPrefix(token, "tok-") != strings.TrimPrefix(id, "id-") {
 		t.Fatalf("a token beside another token's id: %q / %q", token, id)
+	}
+}
+
+// stuckHandler never returns until released, whatever its context says.
+type stuckHandler struct {
+	calls   atomic.Int32
+	release chan struct{}
+}
+
+func (h *stuckHandler) handle(context.Context, HomeRequest) (HomeAnswer, error) {
+	h.calls.Add(1)
+	<-h.release
+	return HomeAnswer{Speech: "late"}, nil
+}
+
+// stuckReplier never returns from Reply until released, whatever its
+// context says.
+type stuckReplier struct {
+	calls   atomic.Int32
+	release chan struct{}
+}
+
+func (r *stuckReplier) Reply(context.Context, Event, string, Data, Context) error {
+	r.calls.Add(1)
+	<-r.release
+	return nil
+}
+
+func overrunning(o *homeOverruns) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.running
+}
+
+func waitForOverruns(t *testing.T, o *homeOverruns, want int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for overrunning(o) != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d still running past their time, want %d", overrunning(o), want)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestHandlersThatNeverReturnCannotLeaveAGoroutinePerRequest(t *testing.T) {
+	bounds := &homeBounds{}
+	handler := &stuckHandler{release: make(chan struct{})}
+	event := Event{Name: HomeRequestEvent, Data: Data{"request_id": "r"}}
+	opts := HomeAnswerOptions{Timeout: 20 * time.Millisecond}
+	timedOut := Data{"request_id": "r", "speech": "", "response_type": "error", "error_code": "timeout", "continue_conversation": false}
+	for i := 0; i < homeOverrunLimit+3; i++ {
+		replier := &capturingReplier{}
+		payload, err := answerHomeRequest(context.Background(), replier, event, handler.handle, opts, bounds)
+		if err != nil || !reflect.DeepEqual(payload, timedOut) || len(replier.sent) != 1 {
+			t.Fatalf("request %d answered %v, %v (%d replies), want one timeout answer", i, payload, err, len(replier.sent))
+		}
+	}
+	// Four handlers are still running: the requests after them were answered
+	// without starting a fifth.
+	if calls := handler.calls.Load(); calls != homeOverrunLimit {
+		t.Fatalf("the handler was started %d times with %d still running", calls, homeOverrunLimit)
+	}
+	if got := overrunning(&bounds.handlers); got != homeOverrunLimit {
+		t.Fatalf("%d handlers counted as running past their time, want %d", got, homeOverrunLimit)
+	}
+	// Once they return, their places are free again.
+	close(handler.release)
+	waitForOverruns(t, &bounds.handlers, 0)
+	replier := &capturingReplier{}
+	payload, err := answerHomeRequest(context.Background(), replier, event, handler.handle, opts, bounds)
+	if err != nil || payload["response_type"] != HomeActionDone || payload["speech"] != "late" {
+		t.Fatalf("after the handlers returned: %v, %v", payload, err)
+	}
+	if calls := handler.calls.Load(); calls != homeOverrunLimit+1 {
+		t.Fatalf("the handler was started %d times", calls)
+	}
+}
+
+func TestRepliesThatNeverReturnCannotLeaveAGoroutinePerRequest(t *testing.T) {
+	bounds := &homeBounds{}
+	replier := &stuckReplier{release: make(chan struct{})}
+	event := Event{Name: HomeRequestEvent, Data: Data{"request_id": "r"}}
+	answer := func(context.Context, HomeRequest) (HomeAnswer, error) { return HomeAnswer{Speech: "done"}, nil }
+	opts := HomeAnswerOptions{HubTimeout: 30 * time.Millisecond}
+	for i := 0; i < homeOverrunLimit; i++ {
+		started := time.Now()
+		payload, err := answerHomeRequest(context.Background(), replier, event, answer, opts, bounds)
+		if err != nil || payload != nil {
+			t.Fatalf("reply %d = %v, %v; want it withdrawn at the bound", i, payload, err)
+		}
+		if elapsed := time.Since(started); elapsed > time.Second {
+			t.Fatalf("a stuck reply held the answer for %s against a 30ms bound", elapsed)
+		}
+	}
+	payload, err := answerHomeRequest(context.Background(), replier, event, answer, opts, bounds)
+	if payload != nil || !errors.Is(err, ErrTimeout) {
+		t.Fatalf("with %d replies stuck = %v, %v; want ErrTimeout and nothing sent", homeOverrunLimit, payload, err)
+	}
+	if calls := replier.calls.Load(); calls != homeOverrunLimit {
+		t.Fatalf("Reply was called %d times with %d still running", calls, homeOverrunLimit)
+	}
+	close(replier.release)
+	waitForOverruns(t, &bounds.replies, 0)
+	if payload, err := answerHomeRequest(context.Background(), replier, event, answer, opts, bounds); err != nil || payload["speech"] != "done" {
+		t.Fatalf("after the replies returned: %v, %v", payload, err)
+	}
+}
+
+// homeLinkFixture delivers requests by hand and collects the answers.
+type homeLinkFixture struct {
+	mu      sync.Mutex
+	handler func(Event)
+	replies chan Data
+}
+
+func (l *homeLinkFixture) On(_ string, handler func(Event)) func() {
+	l.mu.Lock()
+	l.handler = handler
+	l.mu.Unlock()
+	return func() {}
+}
+
+func (l *homeLinkFixture) Reply(_ context.Context, _ Event, _ string, data Data, _ Context) error {
+	l.replies <- data
+	return nil
+}
+
+func (l *homeLinkFixture) deliver(requestID string) {
+	l.mu.Lock()
+	handler := l.handler
+	l.mu.Unlock()
+	handler(Event{Name: HomeRequestEvent, Data: Data{"request_id": requestID}})
+}
+
+func (l *homeLinkFixture) answer(t *testing.T) Data {
+	t.Helper()
+	select {
+	case data := <-l.replies:
+		return data
+	case <-time.After(5 * time.Second):
+		t.Fatal("no answer")
+		return nil
+	}
+}
+
+func TestASubscriptionCountsItsOwnStuckHandlers(t *testing.T) {
+	before := overrunning(&sharedHomeBounds.handlers)
+	link := &homeLinkFixture{replies: make(chan Data, 16)}
+	handler := &stuckHandler{release: make(chan struct{})}
+	defer close(handler.release)
+	stop := AnswerHomeRequests(link, handler.handle, HomeAnswerOptions{Timeout: 20 * time.Millisecond})
+	defer stop()
+	for i := 0; i < homeOverrunLimit; i++ {
+		link.deliver(fmt.Sprint("r", i))
+	}
+	for i := 0; i < homeOverrunLimit; i++ {
+		if answer := link.answer(t); answer["error_code"] != HomeErrorTimeout {
+			t.Fatalf("answer %v, want timeout", answer)
+		}
+	}
+	link.deliver("next")
+	if answer := link.answer(t); answer["request_id"] != "next" || answer["error_code"] != HomeErrorTimeout {
+		t.Fatalf("answer %v, want a timeout for next", answer)
+	}
+	if calls := handler.calls.Load(); calls != homeOverrunLimit {
+		t.Fatalf("the handler was started %d times with %d still running", calls, homeOverrunLimit)
+	}
+	if got := overrunning(&sharedHomeBounds.handlers); got != before {
+		t.Fatalf("a subscription's handlers were counted against AnswerHomeRequest's own: %d, was %d", got, before)
+	}
+}
+
+func TestHandlersThatHonourTheirTimeAreNotLimited(t *testing.T) {
+	link := &homeLinkFixture{replies: make(chan Data, 16)}
+	gate := make(chan struct{})
+	var running atomic.Int32
+	stop := AnswerHomeRequests(link, func(ctx context.Context, _ HomeRequest) (HomeAnswer, error) {
+		running.Add(1)
+		select {
+		case <-gate:
+			return HomeAnswer{Speech: "done"}, nil
+		case <-ctx.Done():
+			return HomeAnswer{}, ctx.Err()
+		}
+	}, HomeAnswerOptions{Timeout: 5 * time.Second})
+	defer stop()
+	const requests = 3 * homeOverrunLimit
+	for i := 0; i < requests; i++ {
+		link.deliver(fmt.Sprint("r", i))
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for running.Load() != requests {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of %d handlers started", running.Load(), requests)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(gate)
+	for i := 0; i < requests; i++ {
+		if answer := link.answer(t); answer["speech"] != "done" {
+			t.Fatalf("answer %v, want the handler's own", answer)
+		}
 	}
 }

@@ -1,6 +1,14 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Add the 0.14.0 entry for chat apps.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Unreleased fixes from CodeRabbit's review-body items on #65 and #69.
 
 # Changelog
+
+## Unreleased
+
+- `AnswerHomeRequests` and `AnswerHomeRequest` no longer leave a goroutine behind for every request when a handler or a `Replier` ignores its context. Go cannot stop a goroutine, so such a handler or reply keeps its goroutine until it returns. Now, while four handlers are still running past their time, a request is answered `timeout` at once and its handler is not started; while four replies are still running past the hub's bound, no reply is started and `AnswerHomeRequest` returns an `ErrTimeout` that says so (`OnReplyError` hears it). Each `AnswerHomeRequests` subscription keeps its own counts; calls of `AnswerHomeRequest` on its own share one. Handlers and Repliers that honour their context are not limited, since their goroutines end at their deadline; the SDK's `Client` and `HubSession` honour it. The `Replier` doc now says `Reply` must return once its context ends. The Python reference runs at most four plain handlers at once and answers `timeout` when all four are taken. (CodeRabbit on #69.)
+- `UsualForm` agrees with the Python reference on two kinds of tag. A tag with an empty subtag (`"en-"`, `"en--us"`) has no usual form; it was `"en-us"`. A language CLDR knows through its macrolanguage has one, in its own code: `"arb"` is `"arb-eg"` and `"cmn"` is `"cmn-cn"`, where there was none. Run against the reference over 4,453 tags (every language, alias, macrolanguage and likely-subtag key in the shared data, every tag in the language-matching vectors, and malformed ones), the two now answer the same for all of them. A tag ending in a singleton (`"en-x"`) is still English, as in the reference. `Client.Intents` retries an empty listing in `UsualForm`'s answer, so it now retries those languages and no longer retries the malformed tags. (CodeRabbit on #65.)
+- `HubIntentInventory.ListedIn` is an empty slice, `[]` in JSON, on the names-only fallback (`IntentSourceEngines`), where it was nil (`null`): nothing is listed by manifest there, as in the Python reference. Its doc comment says so instead of promising one tag per language on every path. (CodeRabbit on #65.)
+- `ClosestLanguage`'s doc comment is attached to it again; it sat above `UsualForm`'s.
+- The parity contract's `home-link` reason describes the new bound, and the evidence hashes of `home-link`, `connection-admission`, `listing` and `runtime` are refreshed.
 
 ## 0.14.0 — 2026-11-03
 

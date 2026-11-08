@@ -6,6 +6,7 @@ import (
 	_ "embed"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -171,8 +172,6 @@ func languageDistance(wanted, candidate string) int {
 	return result + regionDistance
 }
 
-// ClosestLanguage returns the nearest OVOS-compatible registration (maximum
-// distance ten). Equal distances preserve the caller's registration order.
 // UsualForm is the form a language is usually written in, when that differs
 // from tag: "en-CA" and "en-AT" both to "en-us", "fr-BE" to "fr-fr", "pt-AO"
 // to "pt-br", from CLDR's likely subtags. The second return is false when
@@ -187,10 +186,14 @@ func languageDistance(wanted, candidate string) int {
 // Lower case, because that is how skills register and how the manifest is
 // keyed: an exact lookup with BCP47's "en-US" finds nothing.
 func UsualForm(tag string) (string, bool) {
-	if strings.TrimSpace(tag) == "" {
+	text := strings.TrimSpace(tag)
+	// A tag with an empty subtag ("en-", "en--us") is not a tag: as in the
+	// Python reference, there is nothing to retry it as, rather than the
+	// usual form of whatever its first subtag happens to be.
+	if text == "" || slices.Contains(strings.Split(strings.ReplaceAll(text, "_", "-"), "-"), "") {
 		return "", false
 	}
-	base := parseLanguage(tag, true).language
+	base := parseLanguage(text, true).language
 	// "und" is the tag for "no idea", and parseLanguage produces it for
 	// anything it cannot read. CLDR's guess for an unknown language is
 	// English, so without this a blank tag lists a hub in a language nobody
@@ -201,24 +204,29 @@ func UsualForm(tag string) (string, bool) {
 	// maximizeLanguage does not fail on a language it has never heard of: it
 	// walks its probes down to "und" and takes the root locale's region, so
 	// "zzz" comes back "zzz-us". Round-tripping the tag does not catch that,
-	// because the unknown language is carried through unchanged. A direct
-	// entry in the likely table is what says CLDR has heard of this language.
-	if matching.Likely[base] == "" {
+	// because the unknown language is carried through unchanged. An entry in
+	// the likely table, for the language or for the macrolanguage it belongs
+	// to ("arb" to "ar", "cmn" to "zh"), is what says CLDR has heard of it.
+	if matching.Likely[base] == "" && matching.Likely[matching.Macrolanguages[base]] == "" {
 		return "", false
 	}
 	likely := maximizeLanguage(languageTag{language: base})
-	usual := likely.language
+	// The language keeps its own code: "arb" is usually written "arb-eg",
+	// not its macrolanguage's "ar-eg", as in the Python reference.
+	usual := base
 	if likely.region != "" {
-		usual = likely.language + "-" + likely.region
+		usual = base + "-" + likely.region
 	}
 	usual = strings.ToLower(usual)
 	// Byte comparison, NOT sameLanguage. They are not the same test, and the difference is the whole point: the canonical spelling is en-US, the manifest is keyed en-us, and sameLanguage calls those equal -- so the retry that exists for exactly this case suppressed itself.
-	if usual == strings.TrimSpace(tag) {
+	if usual == text {
 		return "", false
 	}
 	return usual, true
 }
 
+// ClosestLanguage returns the nearest OVOS-compatible registration (maximum
+// distance ten). Equal distances preserve the caller's registration order.
 func ClosestLanguage(target string, available []string) (string, bool) {
 	best, minimum := "", int(^uint(0)>>1)
 	for _, candidate := range available {

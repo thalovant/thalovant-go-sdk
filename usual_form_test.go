@@ -33,6 +33,18 @@ func TestUsualForm(t *testing.T) {
 		{"zzz", "", false},
 		{"", "", false},
 		{"xx-YY", "", false},
+		// An empty subtag is not a tag: nothing to retry, rather than the
+		// usual form of its first subtag.
+		{"en-", "", false},
+		{"en--us", "", false},
+		{"-en", "", false},
+		// A singleton ends the subtags the reference reads, so "en-x" is
+		// English to it too; matched, not second-guessed.
+		{"en-x", "en-us", true},
+		// A language CLDR knows through its macrolanguage keeps its own code.
+		{"arb", "arb-eg", true},
+		{"cmn", "cmn-cn", true},
+		{"arb-EG", "arb-eg", true},
 	} {
 		got, ok := UsualForm(c.in)
 		if got != c.want || ok != c.ok {

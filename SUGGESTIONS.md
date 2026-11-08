@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Proposals noted while adding chat apps (0.14.0).
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Propose shared usual-form vectors after fixing UsualForm's drift from the reference.
 
 # Suggestions
 
@@ -19,3 +19,9 @@ Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Proposals noted while adding c
 - **Problem:** `APIError.refusal()` reads `Code` from `Problem` when a caller built the error by hand, but `Fields` is only filled by `apiErrorFromResponse`.
 - **Proposal:** if hand-built errors matter to callers, add an accessor that falls back to `problemFieldNames(e.Problem)`.
 - **Impact:** small; only affects code that constructs `APIError` literals (mostly tests).
+
+## Shared vectors for `usual_form`
+
+- **Problem:** `UsualForm` (`language_matching.go`) drifted from the Python reference's `usual_form` on empty subtags and macrolanguage members, and the Rust port still answers the old way. `language-matching-vectors.json` covers `closest_lang` only, so the parity gate could not see either difference; it took running both implementations on the same tags.
+- **Proposal:** record `usual_form` over a fixed tag list in the reference (the shared data's language, alias, macrolanguage and likely-subtag keys, the matching vectors' tags, and malformed ones; 4,453 tags here) as a new shared vector file, and have every port assert it, the way `TestUsualForm` pins a handful of cases now.
+- **Impact:** medium. Which language a listing is retried in decides what a hub appears to offer; one shared file would catch this class of drift in every port at once.
