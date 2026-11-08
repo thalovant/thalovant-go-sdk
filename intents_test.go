@@ -772,6 +772,22 @@ func TestTheFallbackListsNamesAndSaysWhatWasRefused(t *testing.T) {
 			t.Fatalf("expected %s to be asked once, got %d", eventType, len(asked))
 		}
 	}
+	// Nothing was listed by manifest, so no tag answered: empty, as in the
+	// Python reference, and never a tag per language the hub did not list.
+	if inventory.ListedIn == nil || len(inventory.ListedIn) != 0 {
+		t.Fatalf("a names-only inventory was listed in no language, got %#v", inventory.ListedIn)
+	}
+	raw, err := json.Marshal(inventory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var serialized map[string]any
+	if err := json.Unmarshal(raw, &serialized); err != nil {
+		t.Fatal(err)
+	}
+	if listed, ok := serialized["listed_in"].([]any); !ok || len(listed) != 0 {
+		t.Fatalf("listed_in serializes as %v, want []", serialized["listed_in"])
+	}
 }
 
 func TestTheFallbackKeepsTheFirstEngineThatNamesAnIntent(t *testing.T) {
