@@ -21,6 +21,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"regexp"
 	"slices"
 	"strconv"
@@ -232,6 +233,14 @@ type Replier interface {
 // runs at most four plain handlers at once.
 const homeOverrunLimit = 4
 
+// overrunCount is where a goroutine still running past its time is counted.
+type overrunCount interface {
+	// full reports whether homeOverrunLimit goroutines are counted.
+	full() bool
+	// add counts delta more (or, negative, fewer) goroutines.
+	add(delta int)
+}
+
 // homeOverruns counts the goroutines of one kind that ran past their time and
 // have not returned yet.
 type homeOverruns struct {
@@ -239,38 +248,111 @@ type homeOverruns struct {
 	running int
 }
 
+// full reports whether the count has reached homeOverrunLimit.
 func (o *homeOverruns) full() bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.running >= homeOverrunLimit
 }
 
+// add moves the count by delta.
 func (o *homeOverruns) add(delta int) {
 	o.mu.Lock()
 	o.running += delta
 	o.mu.Unlock()
 }
 
-// homeBounds are one subscription's counts, handlers and replies apart, so a
-// stuck handler never keeps an answer from being sent.
+// replierOverruns counts the replies still running past the bound apart for
+// each Replier, so one that is stuck holds up only its own answers. An entry
+// is dropped once its count is back to zero, so a Replier is never kept alive
+// by being counted.
+type replierOverruns struct {
+	mu      sync.Mutex
+	running map[any]int
+}
+
+// count is replier's own count.
+func (r *replierOverruns) count(replier Replier) overrunCount {
+	return replierCount{counts: r, key: replierKey(replier)}
+}
+
+// replierKey is what a Replier is counted under: itself when it is a
+// pointer, a channel or an unsafe pointer, which are always safe to compare;
+// otherwise its type, which every value of that type then shares. A struct
+// value holding a slice would panic as a map key.
+func replierKey(replier Replier) any {
+	switch reflect.ValueOf(replier).Kind() {
+	case reflect.Pointer, reflect.Chan, reflect.UnsafePointer:
+		return replier
+	default:
+		return reflect.TypeOf(replier)
+	}
+}
+
+// replierCount is one Replier's entry in a replierOverruns.
+type replierCount struct {
+	counts *replierOverruns
+	key    any
+}
+
+// full reports whether this Replier has homeOverrunLimit replies counted.
+func (c replierCount) full() bool {
+	c.counts.mu.Lock()
+	defer c.counts.mu.Unlock()
+	return c.counts.running[c.key] >= homeOverrunLimit
+}
+
+// add moves this Replier's count by delta, dropping the entry at zero.
+func (c replierCount) add(delta int) {
+	c.counts.mu.Lock()
+	defer c.counts.mu.Unlock()
+	if c.counts.running == nil {
+		c.counts.running = map[any]int{}
+	}
+	if running := c.counts.running[c.key] + delta; running > 0 {
+		c.counts.running[c.key] = running
+	} else {
+		delete(c.counts.running, c.key)
+	}
+}
+
+// homeBounds are where AnswerHomeRequest counts what runs past its time:
+// handlers and replies apart, so a stuck handler never keeps an answer from
+// being sent.
 type homeBounds struct {
-	handlers, replies homeOverruns
+	handlers homeOverruns
+	// replies counts a subscription's replies, which all go through its one
+	// link.
+	replies homeOverruns
+	// byReplier, when set, counts replies per Replier instead: calls of
+	// AnswerHomeRequest on its own may each name a different one.
+	byReplier *replierOverruns
+}
+
+// replyCount is where a reply through replier is counted.
+func (b *homeBounds) replyCount(replier Replier) overrunCount {
+	if b.byReplier != nil {
+		return b.byReplier.count(replier)
+	}
+	return &b.replies
 }
 
 // sharedHomeBounds are the counts of AnswerHomeRequest called on its own,
 // with no subscription of its own.
-var sharedHomeBounds = &homeBounds{}
+var sharedHomeBounds = &homeBounds{byReplier: &replierOverruns{}}
 
 // homeRun is one goroutine's place in a count. It takes a place when its
 // caller stops waiting for it (abandoned) and gives it back when the
 // goroutine returns (returned), whichever order the two come in.
 type homeRun struct {
 	mu          sync.Mutex
-	count       *homeOverruns
+	count       overrunCount
 	finished    bool
 	overrunning bool
 }
 
+// abandoned counts the goroutine as running past its time, unless it has
+// already returned.
 func (r *homeRun) abandoned() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -280,6 +362,8 @@ func (r *homeRun) abandoned() {
 	}
 }
 
+// returned marks the goroutine as done and gives its place back if it held
+// one.
 func (r *homeRun) returned() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -316,12 +400,15 @@ func (r *homeRun) returned() {
 // timeout at once and its handler is not started; while four replies are
 // still running past the bound, no reply is started and the error says so.
 // Neither can then leave a goroutine behind for every request. Calls of
-// AnswerHomeRequest on its own share those counts; each AnswerHomeRequests
-// subscription has its own.
+// AnswerHomeRequest on its own share one count of handlers and keep one
+// count of replies for each Replier; each AnswerHomeRequests subscription
+// has its own counts.
 func AnswerHomeRequest(ctx context.Context, replier Replier, event Event, handler HomeHandler, opts HomeAnswerOptions) (Data, error) {
 	return answerHomeRequest(ctx, replier, event, handler, opts, sharedHomeBounds)
 }
 
+// answerHomeRequest is AnswerHomeRequest, counting what runs past its time
+// in bounds.
 func answerHomeRequest(ctx context.Context, replier Replier, event Event, handler HomeHandler, opts HomeAnswerOptions, bounds *homeBounds) (Data, error) {
 	if replier == nil {
 		return nil, fmt.Errorf("%w: answering a home request needs somewhere to reply", ErrRuntime)
@@ -348,17 +435,18 @@ func answerHomeRequest(ctx context.Context, replier Replier, event Event, handle
 	if !time.Now().Before(hubDeadline) {
 		return nil, nil // no time left: the hub has given up on this request
 	}
-	if bounds.replies.full() {
+	replies := bounds.replyCount(replier)
+	if replies.full() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		return nil, fmt.Errorf("%w: %d home replies are still running past the hub's bound; this answer was not sent", ErrTimeout, homeOverrunLimit)
+		return nil, fmt.Errorf("%w: %d home replies through this Replier are still running past the hub's bound; this answer was not sent", ErrTimeout, homeOverrunLimit)
 	}
 	replyCtx, cancel := context.WithDeadline(ctx, hubDeadline)
 	defer cancel()
 	// Sent on its own goroutine, so a Replier that does not honour its context
 	// still cannot hold this past the bound.
-	run := &homeRun{count: &bounds.replies}
+	run := &homeRun{count: replies}
 	sent := make(chan error, 1)
 	go func() {
 		defer run.returned()
@@ -387,7 +475,7 @@ func answerHomeRequest(ctx context.Context, replier Replier, event Event, handle
 
 // runHomeHandler is the handler's answer, or the one the SDK gives for it.
 // overruns counts the handlers still running past their time.
-func runHomeHandler(ctx context.Context, request HomeRequest, handler HomeHandler, deadline time.Time, overruns *homeOverruns) (HomeAnswer, error) {
+func runHomeHandler(ctx context.Context, request HomeRequest, handler HomeHandler, deadline time.Time, overruns overrunCount) (HomeAnswer, error) {
 	failed := HomeAnswer{ResponseType: HomeError, ErrorCode: HomeErrorFailedToHandle}
 	if handler == nil {
 		return failed, nil
@@ -470,7 +558,7 @@ type HomeAnswerOptions struct {
 // answers still running; those send nothing. The subscription has its own
 // counts of handlers and replies still running past their time (see
 // AnswerHomeRequest): four of either and requests are answered without
-// starting another.
+// starting another. Its replies all go through link, so they are one count.
 //
 // With a HubSession, requests keep arriving across reconnects while the
 // session's Run keeps the link up:

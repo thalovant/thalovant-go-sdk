@@ -663,10 +663,10 @@ func TestAHomeReplyGetsWhatIsLeftOfTheHubsBound(t *testing.T) {
 }
 
 func TestAReplierThatIgnoresItsContextCannotHoldTheAnswerPastTheBound(t *testing.T) {
-	// Released at the end, so the reply it leaves running does not hold one
-	// of the places AnswerHomeRequest's calls share (go test -count=N).
+	// Released at the end, so the reply it leaves running is not still
+	// counted when the test runs again (go test -count=N).
 	replier := &stuckReplier{release: make(chan struct{})}
-	defer waitForOverruns(t, &sharedHomeBounds.replies, overrunning(&sharedHomeBounds.replies))
+	defer waitForCount(t, func() int { return replying(sharedHomeBounds.byReplier, replier) }, 0)
 	defer close(replier.release)
 	started := time.Now()
 	sent, err := AnswerHomeRequest(context.Background(), replier, Event{Name: HomeRequestEvent}, func(context.Context, HomeRequest) (HomeAnswer, error) {
@@ -828,6 +828,7 @@ type stuckHandler struct {
 	release chan struct{}
 }
 
+// handle counts the call and waits to be released.
 func (h *stuckHandler) handle(context.Context, HomeRequest) (HomeAnswer, error) {
 	h.calls.Add(1)
 	<-h.release
@@ -841,27 +842,43 @@ type stuckReplier struct {
 	release chan struct{}
 }
 
+// Reply counts the call and waits to be released.
 func (r *stuckReplier) Reply(context.Context, Event, string, Data, Context) error {
 	r.calls.Add(1)
 	<-r.release
 	return nil
 }
 
+// overrunning is how many goroutines o counts.
 func overrunning(o *homeOverruns) int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.running
 }
 
-func waitForOverruns(t *testing.T, o *homeOverruns, want int) {
+// replying is how many of replier's replies r counts.
+func replying(r *replierOverruns, replier Replier) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.running[replierKey(replier)]
+}
+
+// waitForCount waits up to five seconds for count to say want.
+func waitForCount(t *testing.T, count func() int, want int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
-	for overrunning(o) != want {
+	for count() != want {
 		if time.Now().After(deadline) {
-			t.Fatalf("%d still running past their time, want %d", overrunning(o), want)
+			t.Fatalf("%d still running past their time, want %d", count(), want)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// waitForOverruns waits for o to count want goroutines.
+func waitForOverruns(t *testing.T, o *homeOverruns, want int) {
+	t.Helper()
+	waitForCount(t, func() int { return overrunning(o) }, want)
 }
 
 func TestHandlersThatNeverReturnCannotLeaveAGoroutinePerRequest(t *testing.T) {
@@ -928,6 +945,69 @@ func TestRepliesThatNeverReturnCannotLeaveAGoroutinePerRequest(t *testing.T) {
 	}
 }
 
+// A Replier that is stuck holds up only its own answers when
+// AnswerHomeRequest is called on its own: another Replier still gets every
+// answer, and nothing is kept once the stuck one returns.
+func TestAStuckReplierHoldsUpOnlyItsOwnAnswers(t *testing.T) {
+	bounds := &homeBounds{byReplier: &replierOverruns{}}
+	stuck := &stuckReplier{release: make(chan struct{})}
+	event := Event{Name: HomeRequestEvent, Data: Data{"request_id": "r"}}
+	answer := func(context.Context, HomeRequest) (HomeAnswer, error) { return HomeAnswer{Speech: "done"}, nil }
+	opts := HomeAnswerOptions{HubTimeout: 30 * time.Millisecond}
+	for i := 0; i < homeOverrunLimit; i++ {
+		if payload, err := answerHomeRequest(context.Background(), stuck, event, answer, opts, bounds); err != nil || payload != nil {
+			t.Fatalf("reply %d = %v, %v; want it withdrawn at the bound", i, payload, err)
+		}
+	}
+	if _, err := answerHomeRequest(context.Background(), stuck, event, answer, opts, bounds); !errors.Is(err, ErrTimeout) {
+		t.Fatalf("the stuck Replier's next answer = %v, want ErrTimeout", err)
+	}
+	other := &capturingReplier{}
+	if payload, err := answerHomeRequest(context.Background(), other, event, answer, opts, bounds); err != nil || payload["speech"] != "done" || len(other.sent) != 1 {
+		t.Fatalf("another Replier's answer = %v, %v (%d sent)", payload, err, len(other.sent))
+	}
+	if got := replying(bounds.byReplier, other); got != 0 {
+		t.Fatalf("the other Replier has %d replies counted", got)
+	}
+	close(stuck.release)
+	waitForCount(t, func() int { return replying(bounds.byReplier, stuck) }, 0)
+	bounds.byReplier.mu.Lock()
+	kept := len(bounds.byReplier.running)
+	bounds.byReplier.mu.Unlock()
+	if kept != 0 {
+		t.Fatalf("%d Repliers still kept after every reply returned", kept)
+	}
+	if payload, err := answerHomeRequest(context.Background(), stuck, event, answer, opts, bounds); err != nil || payload["speech"] != "done" {
+		t.Fatalf("after the stuck replies returned: %v, %v", payload, err)
+	}
+}
+
+// sliceReplier is a Replier that cannot be a map key: a struct value
+// holding a slice.
+type sliceReplier struct{ tags []string }
+
+// Reply sends nothing.
+func (sliceReplier) Reply(context.Context, Event, string, Data, Context) error { return nil }
+
+// A Replier that cannot be a map key is counted under its type instead of
+// panicking.
+func TestAReplierThatCannotBeAMapKeyIsCountedByItsType(t *testing.T) {
+	value := sliceReplier{tags: []string{"a"}}
+	if key := replierKey(value); key != reflect.TypeOf(value) {
+		t.Fatalf("a struct value is counted under %v", key)
+	}
+	pointer := &capturingReplier{}
+	if key := replierKey(pointer); key != Replier(pointer) {
+		t.Fatalf("a pointer is counted under %v", key)
+	}
+	counts := &replierOverruns{}
+	counts.count(value).add(1)
+	if got := replying(counts, sliceReplier{tags: []string{"b"}}); got != 1 {
+		t.Fatalf("values of one type share a count: got %d", got)
+	}
+	counts.count(value).add(-1)
+}
+
 // homeLinkFixture delivers requests by hand and collects the answers.
 type homeLinkFixture struct {
 	mu      sync.Mutex
@@ -935,6 +1015,7 @@ type homeLinkFixture struct {
 	replies chan Data
 }
 
+// On keeps the one handler a subscription registers.
 func (l *homeLinkFixture) On(_ string, handler func(Event)) func() {
 	l.mu.Lock()
 	l.handler = handler
@@ -942,11 +1023,13 @@ func (l *homeLinkFixture) On(_ string, handler func(Event)) func() {
 	return func() {}
 }
 
+// Reply collects the answer.
 func (l *homeLinkFixture) Reply(_ context.Context, _ Event, _ string, data Data, _ Context) error {
 	l.replies <- data
 	return nil
 }
 
+// deliver hands the subscription a request.
 func (l *homeLinkFixture) deliver(requestID string) {
 	l.mu.Lock()
 	handler := l.handler
@@ -954,6 +1037,7 @@ func (l *homeLinkFixture) deliver(requestID string) {
 	handler(Event{Name: HomeRequestEvent, Data: Data{"request_id": requestID}})
 }
 
+// answer is the next answer sent, waiting up to five seconds for it.
 func (l *homeLinkFixture) answer(t *testing.T) Data {
 	t.Helper()
 	select {
@@ -966,7 +1050,10 @@ func (l *homeLinkFixture) answer(t *testing.T) Data {
 }
 
 func TestASubscriptionCountsItsOwnStuckHandlers(t *testing.T) {
-	before := overrunning(&sharedHomeBounds.handlers)
+	// Handlers other tests left running past their time (the vectors' slow
+	// ones end within seconds) return first, so the shared count holds
+	// still while this one is read.
+	waitForOverruns(t, &sharedHomeBounds.handlers, 0)
 	link := &homeLinkFixture{replies: make(chan Data, 16)}
 	handler := &stuckHandler{release: make(chan struct{})}
 	defer close(handler.release)
@@ -987,8 +1074,8 @@ func TestASubscriptionCountsItsOwnStuckHandlers(t *testing.T) {
 	if calls := handler.calls.Load(); calls != homeOverrunLimit {
 		t.Fatalf("the handler was started %d times with %d still running", calls, homeOverrunLimit)
 	}
-	if got := overrunning(&sharedHomeBounds.handlers); got != before {
-		t.Fatalf("a subscription's handlers were counted against AnswerHomeRequest's own: %d, was %d", got, before)
+	if got := overrunning(&sharedHomeBounds.handlers); got != 0 {
+		t.Fatalf("a subscription's handlers were counted against AnswerHomeRequest's own: %d", got)
 	}
 }
 
