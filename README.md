@@ -1,4 +1,4 @@
-Last Edit: Codex - 2026-11-07 - Motive: Add the canonical Thalovant logo with light and dark theme support.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Document browser sign-in (InteractiveLogin, BrowserLogin) for 0.15.0.
 
 <p align="center">
   <picture>
@@ -97,6 +97,43 @@ These topics have no counterpart on the documentation page, so a short version s
   did not come from a file, beside the SDK config file. Back up that directory, not only the
   config directory, and do not regenerate a paired client's key. A hub that pinned another key
   refuses this one with `*thalovant.ClientKeyRejectedError`.
+
+## Signing in through the browser
+
+On a machine with a browser, sign a person in through that browser. The SDK listens on
+`127.0.0.1` on a port the system picks, opens the dashboard's consent page, and the browser that
+approves hands the code back to this computer (OAuth authorization code with PKCE on a loopback
+redirect, RFC 8252). Unlike a device code, such a sign-in cannot be relayed to somebody else.
+
+```go
+ctx := context.Background()
+control := thalovant.NewDefaultControlPlane("")
+token, err := control.InteractiveLogin(ctx, thalovant.InteractiveLoginOptions{})
+if err != nil {
+	panic(err)
+}
+fmt.Println("signed in; token", control.TokenID, "scopes", token["scopes"])
+```
+
+- `InteractiveLogin` uses the browser when the machine can show one (`CanOpenBrowser`: never with
+  `CI`, `SSH_CONNECTION` or `SSH_TTY` set; macOS and Windows yes; elsewhere only with `DISPLAY` or
+  `WAYLAND_DISPLAY`) and the API offers it (`GET /v1/auth/native/config`), and a device login
+  (`LoginWithBrowser`) otherwise. `Method: thalovant.LoginMethodBrowser` or
+  `thalovant.LoginMethodDevice` forces one. Once the browser was opened, its outcome stands: it
+  never turns into a device login.
+- `BrowserLogin(ctx, thalovant.BrowserLoginOptions{...})` is the browser sign-in on its own:
+  `Scopes` (none asks for `hubs:read clients:write`), `DeviceName` (default `thalovant-go-sdk on
+  <hostname>`), `OpenBrowser`, `Timeout` (default 5 minutes), `Prompt` (receives the URL instead
+  of the printed message) and `Opener` (replaces the platform browser; it runs on its own
+  goroutine). The URL is always printed as well, since opening a browser can fail silently.
+- The token is kept exactly as a device login keeps it (`AccessToken`, `TokenID`), and
+  `RevokeAPIToken(ctx, "")` revokes it.
+- Errors: `errors.Is(err, thalovant.ErrDeviceAccessDenied)` when the person denies,
+  `thalovant.ErrDeviceCodeExpired` when nobody answers in time, a `*thalovant.BrowserLoginFailedError`
+  when the browser came back without a code, and the `*thalovant.APIError` (400, `invalid_grant`)
+  when the API will not exchange the code. An API without browser sign-in answers the
+  configuration 404. A cancelled `ctx` closes the port. The code, the PKCE verifier, the state and
+  the token never appear in an error.
 
 ## Chat apps
 

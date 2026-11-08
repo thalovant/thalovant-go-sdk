@@ -1,0 +1,936 @@
+package thalovant
+
+// Browser sign-in beyond the shared vectors: what is printed and opened, the
+// generated secrets, the listener's own edges, the goroutines it runs, and
+// what never reaches an error. browser_login_vectors_test.go runs the
+// contract every SDK shares; these are this SDK's own, as the reference's
+// tests/test_browser_login.py is the Python SDK's.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"os"
+	"regexp"
+	"runtime"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+var unitNativeConfig = map[string]any{
+	"authorization_endpoint":           "https://dash.thalovant.com/authorize",
+	"token_endpoint":                   "/v1/auth/native/token",
+	"device_authorization_endpoint":    "/v1/auth/device/authorize",
+	"sdk_client_id":                    "thalovant-sdk",
+	"loopback_redirect_uri":            "http://127.0.0.1:{port}/callback",
+	"code_challenge_methods_supported": []any{"S256"},
+}
+
+var unitToken = map[string]any{"access_token": "tvpat_unit_token", "token_type": "bearer", "scopes": []any{"hubs:read"},
+	"expires_at": "2027-11-08T12:00:00Z", "token_id": "tok-unit", "ai_disclosure": "AI"}
+
+// unitBrowserAPI answers the configuration and the token routes; token, when
+// set, answers the exchange.
+type unitBrowserAPI struct {
+	mu       sync.Mutex
+	requests []string
+	token    func(body map[string]any) (int, any)
+	server   *httptest.Server
+}
+
+func newUnitBrowserAPI(t *testing.T, token func(body map[string]any) (int, any)) *unitBrowserAPI {
+	t.Helper()
+	api := &unitBrowserAPI{token: token}
+	api.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		api.mu.Lock()
+		api.requests = append(api.requests, r.Method+" "+r.URL.Path)
+		api.mu.Unlock()
+		answer := func(status int, body any) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			_ = json.NewEncoder(w).Encode(body)
+		}
+		switch r.URL.Path {
+		case "/v1/auth/native/config":
+			answer(200, unitNativeConfig)
+		case "/v1/auth/native/token":
+			if api.token == nil {
+				answer(200, unitToken)
+				return
+			}
+			var body map[string]any
+			_ = json.Unmarshal(raw, &body)
+			answer(api.token(body))
+		default:
+			w.WriteHeader(599)
+		}
+	}))
+	t.Cleanup(api.server.Close)
+	return api
+}
+
+func (a *unitBrowserAPI) sent() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string{}, a.requests...)
+}
+
+// urlParts reads the port, the state and the query out of an authorization
+// URL.
+func urlParts(t *testing.T, target string) (int, string, url.Values) {
+	t.Helper()
+	parsed, err := url.Parse(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := parsed.Query()
+	redirect, err := url.Parse(query.Get("redirect_uri"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var port int
+	if _, err := fmt.Sscanf(redirect.Port(), "%d", &port); err != nil {
+		t.Fatalf("no port in %q", query.Get("redirect_uri"))
+	}
+	return port, query.Get("state"), query
+}
+
+// startSignIn runs BrowserLogin on its own goroutine, handing the URL over
+// through opts.Prompt when it has none of its own.
+func startSignIn(ctx context.Context, plane *ControlPlane, opts BrowserLoginOptions) (<-chan string, <-chan signInOutcome) {
+	opened := make(chan string, 1)
+	if opts.Prompt == nil {
+		opts.Prompt = func(target string) {
+			select {
+			case opened <- target:
+			default:
+			}
+		}
+	}
+	done := make(chan signInOutcome, 1)
+	go func() {
+		token, err := plane.BrowserLogin(ctx, opts)
+		done <- signInOutcome{token, err}
+	}()
+	return opened, done
+}
+
+func receive[T any](t *testing.T, from <-chan T, what string) T {
+	t.Helper()
+	select {
+	case value := <-from:
+		return value
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+	var zero T
+	return zero
+}
+
+// captureStdout swaps os.Stdout for a pipe until the returned function is
+// called, which restores it and answers what was printed.
+func captureStdout(t *testing.T) func() string {
+	t.Helper()
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := os.Stdout
+	os.Stdout = writer
+	printed := make(chan string, 1)
+	go func() {
+		raw, _ := io.ReadAll(reader)
+		printed <- string(raw)
+	}()
+	restored := false
+	restore := func() string {
+		if restored {
+			return ""
+		}
+		restored = true
+		os.Stdout = original
+		_ = writer.Close()
+		text := <-printed
+		_ = reader.Close()
+		return text
+	}
+	t.Cleanup(func() { restore() })
+	return restore
+}
+
+// swapOpenBrowser replaces the platform browser for one test.
+func swapOpenBrowser(t *testing.T, replacement func(string) error) {
+	t.Helper()
+	original := openBrowser
+	openBrowser = replacement
+	t.Cleanup(func() { openBrowser = original })
+}
+
+// assertNoLoopbackGoroutines fails when any goroutine the listener runs is
+// still alive. close waits for every one of them, so they are gone the moment
+// BrowserLogin returns, give or take the instant a goroutine takes to exit
+// after its last deferred call.
+func assertNoLoopbackGoroutines(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		buffer := make([]byte, 1<<20)
+		stacks := string(buffer[:runtime.Stack(buffer, true)])
+		if !strings.Contains(stacks, ".(*loopbackListener).") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("a loopback listener goroutine outlived the sign-in:\n%s", stacks)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// -- what the person sees ---------------------------------------------------------
+
+func TestBrowserLoginPrintsTheURLAndDoesNotWaitForTheOpener(t *testing.T) {
+	api := newUnitBrowserAPI(t, nil)
+	plane := NewControlPlane(api.server.URL, "")
+	swapOpenBrowser(t, func(string) error { t.Error("the platform browser was opened"); return nil })
+	printed := captureStdout(t)
+	opened := make(chan string, 1)
+	release := make(chan struct{})
+	returned := make(chan struct{})
+	done := make(chan signInOutcome, 1)
+	go func() {
+		token, err := plane.BrowserLogin(context.Background(), BrowserLoginOptions{
+			DeviceName: "unit",
+			// A console browser holds the call until it exits.
+			Opener: func(target string) {
+				opened <- target
+				<-release
+				close(returned)
+			},
+		})
+		done <- signInOutcome{token, err}
+	}()
+	target := receive(t, opened, "the browser to be opened")
+	port, state, _ := urlParts(t, target)
+	if answer := browserTab(t, port, "GET", "/callback?code=c&state="+state, nil); answer.status != 200 || !strings.Contains(answer.body, loopbackSignedInText) {
+		t.Fatalf("the tab got %d %q", answer.status, answer.body)
+	}
+	outcome := receive(t, done, "the sign-in to end while the opener still runs")
+	close(release)
+	receive(t, returned, "the opener to return")
+	if outcome.err != nil || outcome.token["access_token"] != "tvpat_unit_token" || plane.TokenID != "tok-unit" {
+		t.Fatalf("sign-in = %v, %v", outcome.token, outcome.err)
+	}
+	want := "Opening your browser to sign in to Thalovant. If it does not open, visit:\n" + target + "\n"
+	if text := printed(); !strings.Contains(text, want) {
+		t.Errorf("printed %q, want %q", text, want)
+	}
+	assertNoLoopbackGoroutines(t)
+}
+
+func TestBrowserLoginWithoutOpenBrowserOnlyShowsTheURL(t *testing.T) {
+	api := newUnitBrowserAPI(t, nil)
+	plane := NewControlPlane(api.server.URL, "")
+	swapOpenBrowser(t, func(string) error { t.Error("the browser was opened"); return nil })
+	printed := captureStdout(t)
+	open := false
+	// Nobody comes back to the port, so the sign-in expires.
+	_, err := plane.BrowserLogin(context.Background(), BrowserLoginOptions{
+		OpenBrowser: &open, Timeout: 200 * time.Millisecond,
+		Opener: func(string) { t.Error("the opener was called") },
+	})
+	var expired *DeviceLoginExpiredError
+	if !errors.As(err, &expired) || expired.APIError != nil || !errors.Is(err, ErrDeviceCodeExpired) || !errors.Is(err, ErrAPI) {
+		t.Fatalf("err = %v, want an expired sign-in with no status", err)
+	}
+	if !strings.Contains(err.Error(), "not completed within 200ms") {
+		t.Errorf("err = %q", err)
+	}
+	if errors.Is(err, ErrTimeout) {
+		t.Error("a browser sign-in's timeout is expired, not ErrTimeout")
+	}
+	if text := printed(); !strings.HasPrefix(text, "To sign in to Thalovant, visit:\nhttps://dash.thalovant.com/authorize?response_type=code&") {
+		t.Errorf("printed %q", text)
+	}
+}
+
+func TestBrowserLoginOpensThePlatformBrowserAndItsFailureChangesNothing(t *testing.T) {
+	api := newUnitBrowserAPI(t, nil)
+	plane := NewControlPlane(api.server.URL, "")
+	var mu sync.Mutex
+	var launched []string
+	swapOpenBrowser(t, func(target string) error {
+		mu.Lock()
+		launched = append(launched, target)
+		mu.Unlock()
+		return errors.New("no runnable browser")
+	})
+	opened, done := startSignIn(context.Background(), plane, BrowserLoginOptions{})
+	target := receive(t, opened, "the URL")
+	port, state, _ := urlParts(t, target)
+	browserTab(t, port, "GET", "/callback?code=c&state="+state, nil)
+	if outcome := receive(t, done, "the sign-in"); outcome.err != nil || outcome.token["token_id"] != "tok-unit" {
+		t.Fatalf("sign-in = %v, %v", outcome.token, outcome.err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(launched) != 1 || launched[0] != target {
+		t.Errorf("the platform browser got %v, want the URL once", launched)
+	}
+}
+
+func TestDefaultDeviceNameIsThisSDKOnThisHost(t *testing.T) {
+	original := hostName
+	t.Cleanup(func() { hostName = original })
+	for _, tc := range []struct {
+		host string
+		err  error
+		want string
+	}{
+		{host: "workstation", want: "thalovant-go-sdk on workstation"},
+		{host: "  spaced  ", want: "thalovant-go-sdk on spaced"},
+		{host: "", want: "thalovant-go-sdk"},
+		{err: errors.New("no hostname"), want: "thalovant-go-sdk"},
+	} {
+		hostName = func() (string, error) { return tc.host, tc.err }
+		if got := DefaultDeviceName(); got != tc.want {
+			t.Errorf("host %q: DefaultDeviceName() = %q, want %q", tc.host, got, tc.want)
+		}
+	}
+	hostName = func() (string, error) { return strings.Repeat("é", 300), nil }
+	if got := []rune(DefaultDeviceName()); len(got) != MaxDeviceNameLength {
+		t.Errorf("a long name has %d code points, want %d", len(got), MaxDeviceNameLength)
+	}
+}
+
+func TestTheDefaultDeviceNameReachesTheConsentPage(t *testing.T) {
+	original := hostName
+	hostName = func() (string, error) { return "workstation", nil }
+	t.Cleanup(func() { hostName = original })
+	api := newUnitBrowserAPI(t, nil)
+	plane := NewControlPlane(api.server.URL, "")
+	open := false
+	opened, done := startSignIn(context.Background(), plane, BrowserLoginOptions{OpenBrowser: &open, Timeout: 200 * time.Millisecond})
+	_, _, query := urlParts(t, receive(t, opened, "the URL"))
+	if got := query.Get("device_name"); got != "thalovant-go-sdk on workstation" {
+		t.Errorf("device_name = %q", got)
+	}
+	if query.Has("scope") {
+		t.Errorf("scope sent when none was asked for: %q", query.Get("scope"))
+	}
+	if outcome := receive(t, done, "the sign-in"); !errors.Is(outcome.err, ErrDeviceCodeExpired) {
+		t.Errorf("err = %v", outcome.err)
+	}
+}
+
+// -- the secrets ----------------------------------------------------------------
+
+func TestEveryVerifierAndStateIsFreshAndWellFormed(t *testing.T) {
+	verifiers, states := map[string]bool{}, map[string]bool{}
+	verifierShape := regexp.MustCompile(`^[A-Za-z0-9\-._~]{43,128}$`)
+	// 24 random bytes: 192 bits, well over the 128 the contract asks for.
+	stateShape := regexp.MustCompile(`^[A-Za-z0-9\-_]{32}$`)
+	for range 50 {
+		verifier, err := NewVerifier()
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, err := NewState()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !verifierShape.MatchString(verifier) || !stateShape.MatchString(state) {
+			t.Fatalf("verifier %q or state %q is malformed", verifier, state)
+		}
+		verifiers[verifier], states[state] = true, true
+	}
+	if len(verifiers) != 50 || len(states) != 50 {
+		t.Errorf("%d verifiers and %d states from 50 draws", len(verifiers), len(states))
+	}
+}
+
+func TestAnEchoedCodeAndVerifierNeverReachTheError(t *testing.T) {
+	var mu sync.Mutex
+	sent := map[string]string{}
+	api := newUnitBrowserAPI(t, func(body map[string]any) (int, any) {
+		// A validation error lists each field's input, as FastAPI's 422
+		// does, and a secret can sit in a key too.
+		mu.Lock()
+		defer mu.Unlock()
+		detail := []any{}
+		for key, value := range body {
+			sent[key] = fmt.Sprint(value)
+			detail = append(detail, map[string]any{"loc": []any{"body", key}, "msg": "bad", "input": value})
+		}
+		return 422, map[string]any{"detail": detail, "seen:" + fmt.Sprint(body["code"]): "x",
+			"code": "echo-" + fmt.Sprint(body["code"]), "fields": []any{"code_verifier=" + fmt.Sprint(body["code_verifier"])}}
+	})
+	plane := NewControlPlane(api.server.URL, "")
+	open := false
+	opened, done := startSignIn(context.Background(), plane, BrowserLoginOptions{OpenBrowser: &open})
+	port, state, _ := urlParts(t, receive(t, opened, "the URL"))
+	answer := browserTab(t, port, "GET", "/callback?code=secret-code-value&state="+state, nil)
+	if answer.status != 200 || !strings.Contains(answer.body, loopbackNotCompletedText) {
+		t.Fatalf("the tab got %d %q", answer.status, answer.body)
+	}
+	err := receive(t, done, "the sign-in").err
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 422 {
+		t.Fatalf("err = %v, want the 422", err)
+	}
+	problem, _ := json.Marshal(apiErr.Problem)
+	shown := displayForms(err)
+	shown["%#v"] = fmt.Sprintf("%#v", err)
+	shown["Problem"] = string(problem)
+	shown["ProblemDetail"] = apiErr.ProblemDetail
+	shown["Code"] = apiErr.Code
+	shown["Fields"] = strings.Join(apiErr.Fields, ",")
+	mu.Lock()
+	secrets := []string{sent["code"], sent["code_verifier"], state}
+	mu.Unlock()
+	for form, text := range shown {
+		for _, secret := range secrets {
+			if secret == "" || strings.Contains(text, secret) {
+				t.Errorf("%s carries a secret (or a secret was never sent)", form)
+			}
+		}
+	}
+	if !strings.Contains(string(problem), redactedSecret) {
+		t.Errorf("the problem was not redacted: %s", problem)
+	}
+	if plane.AccessToken != "" {
+		t.Error("a refused exchange left a token")
+	}
+}
+
+func TestACleartextAPIIsRefusedBeforeAnythingIsAskedOrOpened(t *testing.T) {
+	swapOpenBrowser(t, func(string) error { t.Error("the browser was opened"); return nil })
+	plane := NewControlPlane("http://control.example.test", "")
+	plane.HTTPClient = &http.Client{Transport: browserTransport(func(r *http.Request) (*http.Response, error) {
+		t.Errorf("a request was sent: %s %s", r.Method, r.URL.Path)
+		return nil, errors.New("no network")
+	})}
+	opener := func(string) { t.Error("the opener was called") }
+	if _, err := plane.BrowserLogin(context.Background(), BrowserLoginOptions{Opener: opener}); !errors.Is(err, ErrAPI) || !strings.Contains(err.Error(), "cleartext") {
+		t.Errorf("BrowserLogin err = %v", err)
+	}
+	if _, err := plane.InteractiveLogin(context.Background(), InteractiveLoginOptions{Method: LoginMethodBrowser, Opener: opener}); !errors.Is(err, ErrAPI) || !strings.Contains(err.Error(), "cleartext") {
+		t.Errorf("InteractiveLogin(browser) err = %v", err)
+	}
+	// Auto counts a cleartext API as one without browser sign-in: the device
+	// login it falls back to is refused by the control plane's own HTTPS rule.
+	becomeMachine(t, map[string]any{"platform": "macos", "env": map[string]any{}})
+	if _, err := plane.InteractiveLogin(context.Background(), InteractiveLoginOptions{Opener: opener}); !errors.Is(err, ErrAPI) || !strings.Contains(err.Error(), "require HTTPS") {
+		t.Errorf("InteractiveLogin(auto) err = %v", err)
+	}
+}
+
+type browserTransport func(*http.Request) (*http.Response, error)
+
+func (f browserTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestInteractiveLoginRefusesAMethodItDoesNotKnow(t *testing.T) {
+	plane := NewControlPlane("http://127.0.0.1:9", "")
+	plane.HTTPClient = &http.Client{Transport: browserTransport(func(r *http.Request) (*http.Response, error) {
+		t.Errorf("a request was sent: %s %s", r.Method, r.URL.Path)
+		return nil, errors.New("no network")
+	})}
+	_, err := plane.InteractiveLogin(context.Background(), InteractiveLoginOptions{Method: "password"})
+	if !errors.Is(err, ErrAPI) || !strings.Contains(err.Error(), "LoginMethodAuto") {
+		t.Errorf("err = %v", err)
+	}
+}
+
+// -- the chooser's own edges --------------------------------------------------------
+
+func TestInteractiveLoginDeviceOpensTheVerificationPageWithTheOpener(t *testing.T) {
+	becomeMachine(t, map[string]any{"platform": "macos", "env": map[string]any{}})
+	swapOpenBrowser(t, func(string) error { t.Error("the platform browser was opened"); return nil })
+	var mu sync.Mutex
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/auth/device/authorize":
+			_, _ = io.WriteString(w, `{"device_code":"dc","user_code":"WDJB-MJHT","verification_uri":"https://dash.thalovant.com/device","verification_uri_complete":"https://dash.thalovant.com/device?code=WDJB-MJHT","interval":0,"expires_in":900}`)
+		case "/v1/auth/device/token":
+			_, _ = io.WriteString(w, `{"access_token":"tvpat_device","token_type":"bearer","scopes":[],"token_id":"tok-device"}`)
+		default:
+			w.WriteHeader(599)
+		}
+	}))
+	defer server.Close()
+	plane := NewControlPlane(server.URL, "")
+	opened := make(chan string, 1)
+	printed := captureStdout(t)
+	token, err := plane.InteractiveLogin(context.Background(), InteractiveLoginOptions{
+		Method: LoginMethodDevice, DeviceName: "unit", Opener: func(target string) { opened <- target },
+	})
+	printed()
+	if err != nil || token["access_token"] != "tvpat_device" || plane.TokenID != "tok-device" {
+		t.Fatalf("sign-in = %v, %v", token, err)
+	}
+	if got := receive(t, opened, "the verification page"); got != "https://dash.thalovant.com/device?code=WDJB-MJHT" {
+		t.Errorf("opened %q", got)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(requests, ",") != "POST /v1/auth/device/authorize,POST /v1/auth/device/token" {
+		t.Errorf("requests = %v", requests)
+	}
+}
+
+func TestInteractiveLoginCancelledWhileAskingForTheConfigurationIsNoDeviceLogin(t *testing.T) {
+	becomeMachine(t, map[string]any{"platform": "windows", "env": map[string]any{}})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var mu sync.Mutex
+	var requests []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests = append(requests, r.Method+" "+r.URL.Path)
+		mu.Unlock()
+		if r.URL.Path == "/v1/auth/native/config" {
+			cancel()
+			<-r.Context().Done()
+			return
+		}
+		w.WriteHeader(599)
+	}))
+	defer server.Close()
+	plane := NewControlPlane(server.URL, "")
+	_, err := plane.InteractiveLogin(ctx, InteractiveLoginOptions{Opener: func(string) { t.Error("opened") }})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want the cancellation", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(requests, ",") != "GET /v1/auth/native/config" {
+		t.Errorf("requests = %v", requests)
+	}
+}
+
+// -- the listener's own edges ---------------------------------------------------------
+
+func TestCancellingTheSignInClosesThePort(t *testing.T) {
+	api := newUnitBrowserAPI(t, nil)
+	plane := NewControlPlane(api.server.URL, "")
+	ctx, cancel := context.WithCancel(context.Background())
+	open := false
+	opened, done := startSignIn(ctx, plane, BrowserLoginOptions{OpenBrowser: &open})
+	port, _, _ := urlParts(t, receive(t, opened, "the URL"))
+	cancel()
+	if err := receive(t, done, "the sign-in").err; !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v", err)
+	}
+	if !refusedPort(port) {
+		t.Error("the port still listens after the sign-in was cancelled")
+	}
+	assertNoLoopbackGoroutines(t)
+}
+
+func TestAConnectionThatSendsNothingDoesNotHoldTheSignIn(t *testing.T) {
+	api := newUnitBrowserAPI(t, nil)
+	plane := NewControlPlane(api.server.URL, "")
+	open := false
+	opened, done := startSignIn(context.Background(), plane, BrowserLoginOptions{OpenBrowser: &open})
+	port, state, _ := urlParts(t, receive(t, opened, "the URL"))
+	idle, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer idle.Close()
+	started := time.Now()
+	if answer := browserTab(t, port, "GET", "/callback?code=c&state="+state, nil); answer.status != 200 {
+		t.Fatalf("status %d", answer.status)
+	}
+	if err := receive(t, done, "the sign-in").err; err != nil {
+		t.Fatal(err)
+	}
+	if took := time.Since(started); took >= 900*time.Millisecond {
+		t.Errorf("an idle connection held the sign-in for %s", took)
+	}
+	assertNoLoopbackGoroutines(t)
+}
+
+func TestARequestThatIsNotOneIs400AndTheWaitGoesOn(t *testing.T) {
+	vectors := loadBrowserVectors(t)
+	api := newUnitBrowserAPI(t, nil)
+	plane := NewControlPlane(api.server.URL, "")
+	open := false
+	opened, done := startSignIn(context.Background(), plane, BrowserLoginOptions{OpenBrowser: &open})
+	port, state, _ := urlParts(t, receive(t, opened, "the URL"))
+	for name, request := range map[string][]byte{
+		"no request line": []byte("hello\r\n\r\n"),
+		"a head over 16 KiB": []byte("GET /callback?code=" + strings.Repeat("a", loopbackMaxRequestHead+10) +
+			" HTTP/1.1\r\n\r\n"),
+	} {
+		answer := rawTab(t, port, request, nil)
+		if answer.status != 400 {
+			t.Errorf("%s: status %d, want 400", name, answer.status)
+		}
+		checkPageHeaders(t, answer, vectors)
+	}
+	select {
+	case outcome := <-done:
+		t.Fatalf("the sign-in ended on a bad request: %v", outcome.err)
+	default:
+	}
+	// No Host header: the reference reads the request line alone.
+	answer := rawTab(t, port, []byte("GET /callback?code=c&state="+state+" HTTP/1.1\r\n\r\n"), nil)
+	if answer.status != 200 {
+		t.Fatalf("status %d", answer.status)
+	}
+	if outcome := receive(t, done, "the sign-in"); outcome.err != nil || outcome.token["access_token"] != "tvpat_unit_token" {
+		t.Fatalf("sign-in = %v, %v", outcome.token, outcome.err)
+	}
+}
+
+// waitForConnections waits until the listener holds n connections.
+func waitForConnections(t *testing.T, listener *loopbackListener, n int) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		listener.mu.Lock()
+		held := len(listener.conns)
+		listener.mu.Unlock()
+		if held >= n {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the listener holds %d connections, want %d", held, n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestASecondAnswerAfterTheFirstIsTurnedAway(t *testing.T) {
+	listener := newLoopbackListener("the-state-of-this-sign-in")
+	port, err := listener.start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.close()
+	// Both connected before the first is accepted, so the second still
+	// reaches the listener after the port has stopped listening.
+	first, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	second, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	waitForConnections(t, listener, 2)
+	request := []byte("GET /callback?code=c&state=the-state-of-this-sign-in HTTP/1.1\r\n\r\n")
+	if _, err := first.Write(request); err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := listener.wait(context.Background(), 5*time.Second)
+	if err != nil || accepted == nil || accepted.code != "c" {
+		t.Fatalf("accepted %v, %v", accepted, err)
+	}
+	if !refusedPort(port) {
+		t.Error("the port still listens after a callback was accepted")
+	}
+	if _, err := second.Write(request); err != nil {
+		t.Fatal(err)
+	}
+	_ = second.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if raw, _ := io.ReadAll(second); !strings.HasPrefix(string(raw), "HTTP/1.1 400 ") {
+		t.Errorf("the second answer got %q", raw)
+	}
+	listener.finish(true)
+	_ = first.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if raw, _ := io.ReadAll(first); !strings.Contains(string(raw), loopbackSignedInText) {
+		t.Errorf("the accepted tab got %q", raw)
+	}
+}
+
+func TestTheWaitIsNeverCutShort(t *testing.T) {
+	listener := newLoopbackListener("s")
+	if _, err := listener.start(); err != nil {
+		t.Fatal(err)
+	}
+	defer listener.close()
+	started := time.Now()
+	if accepted, err := listener.wait(context.Background(), 250*time.Millisecond); accepted != nil || err != nil {
+		t.Fatalf("wait = %v, %v", accepted, err)
+	}
+	if took := time.Since(started); took < 250*time.Millisecond {
+		t.Errorf("the wait ended after %s", took)
+	}
+}
+
+func TestTheListenerBindsLoopbackOnly(t *testing.T) {
+	listener := newLoopbackListener("s")
+	if _, err := listener.start(); err != nil {
+		t.Fatal(err)
+	}
+	defer listener.close()
+	address, ok := listener.listener.Addr().(*net.TCPAddr)
+	if !ok || !address.IP.Equal(net.IPv4(127, 0, 0, 1)) || address.IP.To4() == nil {
+		t.Errorf("bound %v", listener.listener.Addr())
+	}
+	if address.Port < 1024 || address.Port > 65535 {
+		t.Errorf("bound port %d", address.Port)
+	}
+}
+
+func TestAConnectionThatClosesBeforeItsAnswerChangesNothing(t *testing.T) {
+	original := loopbackAnswerTimeout
+	loopbackAnswerTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { loopbackAnswerTimeout = original })
+	listener := newLoopbackListener("the-state")
+	port, err := listener.start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.close()
+	// Gone before sending a whole request head.
+	gone, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = gone.Write([]byte("GET /callback?code=c&st"))
+	_ = gone.Close()
+	if accepted, _ := listener.wait(context.Background(), 100*time.Millisecond); accepted != nil {
+		t.Fatalf("a half request was accepted: %v", accepted)
+	}
+	// Nothing was accepted, so this sign-in's own answer still is; nobody
+	// finishes the sign-in, so its tab is told it was not completed.
+	answer := browserTab(t, port, "GET", "/callback?code=c&state=the-state", nil)
+	if answer.status != 200 || !strings.Contains(answer.body, loopbackNotCompletedText) {
+		t.Errorf("the tab got %d %q", answer.status, answer.body)
+	}
+	if accepted, _ := listener.wait(context.Background(), 0); accepted == nil || accepted.code != "c" {
+		t.Errorf("accepted %v", accepted)
+	}
+}
+
+// -- what a callback says -------------------------------------------------------------
+
+func TestCallbackValuesAreDecodedAsPythonsParseQslDecodesThem(t *testing.T) {
+	// Expectations from CPython 3.14's urllib.parse.parse_qsl(query,
+	// keep_blank_values=True), which is how the reference reads a callback.
+	for query, want := range map[string][][2]string{
+		"code=a%2Bb%2Fc%3D%2541&state=x": {{"code", "a+b/c=%41"}, {"state", "x"}},
+		"a=1;b=2":                        {{"a", "1;b=2"}},
+		"a&&b=&=c":                       {{"a", ""}, {"b", ""}, {"", "c"}},
+		"c=%zz%4":                        {{"c", "%zz%4"}},
+		"c=%E2%82x":                      {{"c", "�x"}},
+		"c=%F0%80%80":                    {{"c", "���"}},
+		"c=%ff%fe":                       {{"c", "��"}},
+		"c=a+b":                          {{"c", "a b"}},
+		"c=%C3%A9t%C3%A9":                {{"c", "été"}},
+		"c=%%41":                         {{"c", "%A"}},
+		"c=é%41":                         {{"c", "éA"}},
+		"c=%e2%82%ac%ED%A0%80":           {{"c", "€���"}},
+	} {
+		if got := formPairs(query); fmt.Sprint(got) != fmt.Sprint(want) {
+			t.Errorf("formPairs(%q) = %q, want %q", query, got, want)
+		}
+	}
+	// A request line is read as Latin-1, as the reference reads it: a raw
+	// byte 0xE9 is "é", not a broken UTF-8 sequence.
+	method, target, ok := requestLine([]byte("GET /callback?code=\xe9&state=s HTTP/1.1"))
+	if !ok || method != "GET" {
+		t.Fatalf("requestLine = %q %q %v", method, target, ok)
+	}
+	if status, callback := classifyRequest(method, target, "s"); status != 200 || callback.code != "é" {
+		t.Errorf("classifyRequest = %d %v", status, callback)
+	}
+}
+
+func TestAFailedCallbackNamesOnlyAWellFormedError(t *testing.T) {
+	for errorParam, want := range map[string]string{
+		"server_error":                 "server_error",
+		"temporarily_unavailable":      "temporarily_unavailable",
+		"bad%20code":                   "",
+		strings.Repeat("x", 81):        "",
+		"invalid_request:scope.denied": "invalid_request:scope.denied",
+	} {
+		api := newUnitBrowserAPI(t, nil)
+		plane := NewControlPlane(api.server.URL, "")
+		open := false
+		opened, done := startSignIn(context.Background(), plane, BrowserLoginOptions{OpenBrowser: &open})
+		port, state, _ := urlParts(t, receive(t, opened, "the URL"))
+		browserTab(t, port, "GET", "/callback?error="+errorParam+"&state="+state, nil)
+		err := receive(t, done, "the sign-in").err
+		var failed *BrowserLoginFailedError
+		if !errors.As(err, &failed) || failed.Code != want || !errors.Is(err, ErrAPI) {
+			t.Errorf("error=%s: err = %v, want Code %q", errorParam, err, want)
+		}
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			t.Errorf("error=%s: a failed callback carries an HTTP status", errorParam)
+		}
+	}
+}
+
+// -- the remaining edges ------------------------------------------------------------
+
+func TestThisMachineIsNamedAsTheBrowserRuleNamesIt(t *testing.T) {
+	for goos, want := range map[string]string{"darwin": "macos", "windows": "windows", "linux": "linux",
+		"android": "linux", "ios": "ios", "freebsd": "freebsd"} {
+		if got := platformName(goos); got != want {
+			t.Errorf("platformName(%q) = %q, want %q", goos, got, want)
+		}
+	}
+}
+
+func TestTheBrowserRuleReadsThisProcessByDefault(t *testing.T) {
+	becomeMachine(t, map[string]any{"platform": "linux", "env": map[string]any{}})
+	if CanOpenBrowser(nil, "") {
+		t.Error("Linux without a display has a browser")
+	}
+	t.Setenv("DISPLAY", ":0")
+	if !CanOpenBrowser(nil, "") {
+		t.Error("Linux with DISPLAY has none")
+	}
+	t.Setenv("SSH_TTY", "/dev/pts/1")
+	if CanOpenBrowser(nil, "") {
+		t.Error("over SSH there is one")
+	}
+}
+
+func TestAnAuthorizationEndpointNoBrowserCanOpenIsUnusable(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://dash.thalovant.com/author\x07ize", "https://dash.thalovant.com /authorize",
+		"https://dash.thalovant.com:99999/authorize", "https://[::1/authorize", "https://dash.thalovant.com/authorize?",
+		"https:///authorize", "javascript://dash.thalovant.com/authorize", "https://dash.thalovant.com/\u0085authorize",
+	} {
+		payload := map[string]any{}
+		for key, value := range unitNativeConfig {
+			payload[key] = value
+		}
+		payload["authorization_endpoint"] = endpoint
+		if _, err := ParseNativeSignInConfig(payload); !errors.Is(err, ErrAPI) {
+			t.Errorf("%q is usable", endpoint)
+		}
+	}
+	for _, endpoint := range []string{"https://dash.thalovant.com:8443/authorize", "http://[::1]:5173/authorize", "HTTPS://Dash.Thalovant.com/authorize"} {
+		payload := map[string]any{}
+		for key, value := range unitNativeConfig {
+			payload[key] = value
+		}
+		payload["authorization_endpoint"] = endpoint
+		if _, err := ParseNativeSignInConfig(payload); err != nil {
+			t.Errorf("%q is unusable: %v", endpoint, err)
+		}
+	}
+	if _, err := ParseNativeSignInConfig(nil); !errors.Is(err, ErrAPI) {
+		t.Error("a configuration that is not an object is usable")
+	}
+}
+
+func TestAnAnswerThatIsNotJSONIsAnErrorWithNoStatus(t *testing.T) {
+	for _, route := range []string{"config", "token"} {
+		t.Run(route, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch {
+				case r.URL.Path == "/v1/auth/native/"+route:
+					w.Header().Set("Content-Type", "text/html")
+					_, _ = io.WriteString(w, "<html>not json</html>")
+				case r.URL.Path == "/v1/auth/native/config":
+					_ = json.NewEncoder(w).Encode(unitNativeConfig)
+				default:
+					w.WriteHeader(599)
+				}
+			}))
+			defer server.Close()
+			plane := NewControlPlane(server.URL, "")
+			open := false
+			opened, done := startSignIn(context.Background(), plane, BrowserLoginOptions{OpenBrowser: &open})
+			if route == "token" {
+				port, state, _ := urlParts(t, receive(t, opened, "the URL"))
+				if answer := browserTab(t, port, "GET", "/callback?code=c&state="+state, nil); answer.status != 200 {
+					t.Fatalf("status %d", answer.status)
+				}
+			}
+			err := receive(t, done, "the sign-in").err
+			var apiErr *APIError
+			if !errors.Is(err, ErrAPI) || errors.As(err, &apiErr) {
+				t.Errorf("err = %#v, want an ErrAPI error with no status", err)
+			}
+		})
+	}
+}
+
+func TestNoGoroutineOutlivesTheSignInOnAnyPath(t *testing.T) {
+	for name, play := range map[string]func(t *testing.T, port int, state string, cancel context.CancelFunc){
+		"approved": func(t *testing.T, port int, state string, _ context.CancelFunc) {
+			browserTab(t, port, "GET", "/callback?code=c&state="+state, nil)
+		},
+		"denied": func(t *testing.T, port int, state string, _ context.CancelFunc) {
+			browserTab(t, port, "GET", "/callback?error=access_denied&state="+state, nil)
+		},
+		"failed": func(t *testing.T, port int, state string, _ context.CancelFunc) {
+			browserTab(t, port, "GET", "/callback?state="+state, nil)
+		},
+		"refused exchange": func(t *testing.T, port int, state string, _ context.CancelFunc) {
+			browserTab(t, port, "GET", "/callback?code=refuse&state="+state, nil)
+		},
+		"expired with an idle connection": func(t *testing.T, port int, _ string, _ context.CancelFunc) {
+			if idle, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port)); err == nil {
+				t.Cleanup(func() { _ = idle.Close() })
+			}
+		},
+		"cancelled": func(_ *testing.T, _ int, _ string, cancel context.CancelFunc) { cancel() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := newUnitBrowserAPI(t, func(body map[string]any) (int, any) {
+				if body["code"] == "refuse" {
+					return 400, map[string]any{"detail": "invalid_grant"}
+				}
+				return 200, unitToken
+			})
+			plane := NewControlPlane(api.server.URL, "")
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			open := false
+			opened, done := startSignIn(ctx, plane, BrowserLoginOptions{OpenBrowser: &open, Timeout: 300 * time.Millisecond})
+			port, state, _ := urlParts(t, receive(t, opened, "the URL"))
+			play(t, port, state, cancel)
+			receive(t, done, "the sign-in")
+			if !refusedPort(port) {
+				t.Error("the port still listens")
+			}
+			assertNoLoopbackGoroutines(t)
+		})
+	}
+	t.Run("a panicking prompt", func(t *testing.T) {
+		api := newUnitBrowserAPI(t, nil)
+		plane := NewControlPlane(api.server.URL, "")
+		var port int
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Error("the prompt's panic did not reach the caller")
+				}
+			}()
+			_, _ = plane.BrowserLogin(context.Background(), BrowserLoginOptions{Prompt: func(target string) {
+				port, _, _ = urlParts(t, target)
+				panic("prompt")
+			}})
+		}()
+		if port == 0 || !refusedPort(port) {
+			t.Error("the port still listens after the prompt panicked")
+		}
+		assertNoLoopbackGoroutines(t)
+	})
+}

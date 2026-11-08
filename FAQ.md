@@ -1,6 +1,46 @@
-Last Edit: Claude Opus 5.5 - 2026-11-03 - Motive: Answer the common chat apps questions for 0.14.0.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Answer the common browser sign-in questions for 0.15.0.
 
 # FAQ
+
+## How do I sign a person in from a CLI or a desktop tool?
+
+`ControlPlane.InteractiveLogin(ctx, thalovant.InteractiveLoginOptions{})`. On a machine with a browser it
+signs in through that browser (`BrowserLogin`: PKCE on `http://127.0.0.1:<port>/callback`); over SSH, in
+CI, or on Linux without `DISPLAY`/`WAYLAND_DISPLAY` it uses a device login (`LoginWithBrowser`). Both keep
+the token on the `ControlPlane` (`AccessToken`, `TokenID`) and return the token answer.
+
+## Why did InteractiveLogin use a device login on my desktop?
+
+Either `CanOpenBrowser(nil, "")` is false (a non-empty `CI`, `SSH_CONNECTION` or `SSH_TTY`, even `CI=false`,
+or no display on Linux and the BSDs), or `GET /v1/auth/native/config` did not answer a usable
+configuration: an API older than browser sign-in answers 404, and a cleartext API URL (not https, not
+loopback http) counts too. Pass `Method: thalovant.LoginMethodBrowser` to force the browser and see the
+error.
+
+## The browser did not open. What now?
+
+The URL is always printed as well (`Opening your browser to sign in to Thalovant. If it does not open,
+visit:`); open it in a browser on the same machine. A browser on another machine cannot reach
+`127.0.0.1` here, which is the point: a link sent to somebody else delivers nothing to the sender.
+
+## A stray tab hit the callback. Did it end the sign-in?
+
+No. A request without this sign-in's `state` is a 400 and the wait goes on; anything but `GET /callback`
+is a 404. Only the first callback with the right state is accepted.
+
+## How do I show the URL myself, or open it with my own launcher?
+
+`BrowserLoginOptions.Prompt` receives the URL instead of the printed message, and `Opener` replaces the
+platform browser (it is called on its own goroutine, so a console browser can hold it). Set
+`OpenBrowser` to a false pointer to only show the URL.
+
+## Which errors can a browser sign-in return?
+
+`errors.Is(err, thalovant.ErrDeviceAccessDenied)` when the person denies, `ErrDeviceCodeExpired` when
+nobody answers within `Timeout` (default 5 minutes), `*thalovant.BrowserLoginFailedError` when the browser
+came back without a code, an `*APIError` with status 400 and `ProblemDetail` `invalid_grant` when the API
+refuses the code, and `ctx.Err()` when `ctx` is done. A code is single-use: start a new sign-in instead
+of retrying.
 
 ## How do I connect a hub to Telegram, Discord, Matrix, Mattermost or Twitch?
 

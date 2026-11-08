@@ -1,0 +1,797 @@
+package thalovant
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/url"
+	"os"
+	"regexp"
+	"runtime"
+	"strings"
+	"time"
+	"unicode"
+)
+
+// Browser sign-in: the authorization code grant with PKCE (RFC 7636, S256
+// only) on a loopback redirect (RFC 8252 section 7.3), for a program on a
+// machine with a browser.
+//
+// A device code can be relayed: somebody reads it off one screen and types it
+// in anywhere, which is what device-code phishing is. A loopback redirect
+// cannot be: the browser that approves hands the code to its own computer, so
+// a sign-in link sent to somebody else delivers nothing to the sender.
+// BrowserLogin signs a program in that way, and InteractiveLogin uses it
+// whenever the machine can show a browser, with device login (LoginWithBrowser)
+// as the fallback for one that cannot.
+//
+// The behaviour is the shared contract in browser-login-vectors.json, whose
+// reference is the Python SDK's browser_login and interactive_login.
+
+const (
+	// SDKClientID is the SDKs' own registered app, which a program signs in
+	// as through the browser. GET /v1/auth/native/config names it as
+	// sdk_client_id, and BrowserLogin uses what the API names.
+	SDKClientID = "thalovant-sdk"
+	// LoopbackCallbackPath is the one path the loopback listener answers.
+	LoopbackCallbackPath = "/callback"
+	// DefaultBrowserLoginTimeout bounds how long BrowserLogin waits for the
+	// browser to come back.
+	DefaultBrowserLoginTimeout = 300 * time.Second
+	// MaxDeviceNameLength is the longest device name the consent page shows
+	// and the token is named by, in Unicode code points. The API refuses a
+	// longer one, so BrowserLogin cuts it to this length.
+	MaxDeviceNameLength = 120
+
+	// sdkDeviceLabel is the name this SDK gives itself in DefaultDeviceName.
+	sdkDeviceLabel = "thalovant-go-sdk"
+)
+
+// LoginMethod is how InteractiveLogin signs a person in.
+type LoginMethod string
+
+const (
+	// LoginMethodAuto signs in through the browser when this machine can show
+	// one (CanOpenBrowser) and the API offers browser sign-in, and with a
+	// device login otherwise. It is what an empty LoginMethod means.
+	LoginMethodAuto LoginMethod = "auto"
+	// LoginMethodBrowser always signs in through the browser (BrowserLogin),
+	// whatever the machine. An API without browser sign-in is an error; it
+	// never becomes a device login.
+	LoginMethodBrowser LoginMethod = "browser"
+	// LoginMethodDevice always signs in with a device login
+	// (LoginWithBrowser), and never asks for the browser sign-in
+	// configuration.
+	LoginMethodDevice LoginMethod = "device"
+)
+
+// BrowserLoginOptions carries the optional inputs of BrowserLogin.
+type BrowserLoginOptions struct {
+	// Scopes are what the token will carry. Empty strings are dropped; none
+	// left (nil or empty) asks for the API's default, hubs:read and
+	// clients:write. Any non-admin scope may be asked for; the API refuses
+	// admin or unknown scopes when the person approves.
+	Scopes []string
+	// DeviceName is what the consent page and the token show; "" uses
+	// DefaultDeviceName ("thalovant-go-sdk on <hostname>"). It is cut to
+	// MaxDeviceNameLength code points.
+	DeviceName string
+	// OpenBrowser defaults to true when nil. False only shows the URL.
+	OpenBrowser *bool
+	// Timeout bounds the wait for the browser to come back, from the moment
+	// the URL is shown; DefaultBrowserLoginTimeout when zero or negative.
+	Timeout time.Duration
+	// Prompt, when set, receives the authorization URL in place of the
+	// message printed to stdout. It does not stop the browser from opening.
+	Prompt func(url string)
+	// Opener opens the URL in place of the platform's browser (open on
+	// macOS, url.dll's FileProtocolHandler on Windows, xdg-open elsewhere). It
+	// is called on a goroutine of its own, since a console browser can hold
+	// the call until it exits, and BrowserLogin does not wait for it to
+	// return. Opening can fail without a word; the URL is always shown too.
+	Opener func(url string)
+}
+
+// InteractiveLoginOptions carries the optional inputs of InteractiveLogin.
+type InteractiveLoginOptions struct {
+	// Method picks the sign-in; "" is LoginMethodAuto.
+	Method LoginMethod
+	// Scopes are what the token will carry, for either method; none asks for
+	// the API's default.
+	Scopes []string
+	// DeviceName names this machine on the consent page: BrowserLogin's
+	// DeviceName, or a device login's ClientName. "" uses DefaultDeviceName.
+	DeviceName string
+	// OpenBrowser defaults to true when nil, for either method.
+	OpenBrowser *bool
+	// Timeout bounds the wait; zero or negative uses each method's own
+	// default: DefaultBrowserLoginTimeout for the browser,
+	// DefaultDeviceLoginTimeout for a device login.
+	Timeout time.Duration
+	// Opener opens a URL in place of the platform's browser, for either
+	// method: the consent page, or a device login's verification page. See
+	// BrowserLoginOptions.Opener.
+	Opener func(url string)
+}
+
+// NativeSignInConfig is where a program signs in through the browser, as GET
+// /v1/auth/native/config says. The API reads it from its own settings, so a
+// staging or self-hosted API sends the browser to its own dashboard.
+type NativeSignInConfig struct {
+	// AuthorizationEndpoint is the dashboard page the browser opens.
+	AuthorizationEndpoint string
+	// TokenEndpoint is the path on the API the code is exchanged at.
+	TokenEndpoint string
+	// SDKClientID is the registered app the program signs in as.
+	SDKClientID string
+	// DeviceAuthorizationEndpoint is the device login's path, when the API
+	// named one; "" otherwise. BrowserLogin does not read it.
+	DeviceAuthorizationEndpoint string
+}
+
+// BrowserAuthorization is what BrowserAuthorizationURL puts in the address
+// a browser sign-in opens.
+type BrowserAuthorization struct {
+	// ClientID is the configuration's SDKClientID; "" uses SDKClientID.
+	ClientID string
+	// RedirectURI is LoopbackRedirectURI of the port the listener bound.
+	RedirectURI string
+	// CodeChallenge is ChallengeFor(verifier).
+	CodeChallenge string
+	// State is NewState's value for this sign-in.
+	State string
+	// Scopes: empty strings are dropped, the rest joined by one space, and
+	// scope is left out when nothing is left.
+	Scopes []string
+	// DeviceName is cut to MaxDeviceNameLength code points and left out when
+	// empty.
+	DeviceName string
+}
+
+// BrowserLoginFailedError is a browser sign-in the browser came back from
+// without a code: the consent page named an error other than access_denied,
+// or sent no single, non-empty code. It matches ErrAPI. The API was not
+// asked, so there is no HTTP status.
+type BrowserLoginFailedError struct {
+	// Code is the error the consent page named, such as "server_error", when
+	// it named a well-formed one (1-80 of A-Z a-z 0-9 _ . : -); "" otherwise.
+	Code string
+}
+
+func (e *BrowserLoginFailedError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("%v: the browser came back without a sign-in code (%s)", ErrAPI, e.Code)
+	}
+	return fmt.Sprintf("%v: the browser came back without a sign-in code", ErrAPI)
+}
+
+// Unwrap makes a BrowserLoginFailedError match ErrAPI.
+func (e *BrowserLoginFailedError) Unwrap() error { return ErrAPI }
+
+// browserDeniedError is a sign-in the person refused on the consent page,
+// told in a browser sign-in's own words. errors.As reaches the
+// *DeviceLoginDeniedError inside it, whose APIError is nil since the API was
+// not asked, and errors.Is matches ErrDeviceAccessDenied and ErrAPI.
+type browserDeniedError struct {
+	denied *DeviceLoginDeniedError
+}
+
+func (e *browserDeniedError) Error() string {
+	return fmt.Sprintf("%v: the sign-in request was denied in the browser", ErrDeviceAccessDenied)
+}
+
+func (e *browserDeniedError) Unwrap() error { return e.denied }
+
+// browserExpiredError is a browser sign-in nobody completed in time.
+// errors.As reaches the *DeviceLoginExpiredError inside it (APIError nil),
+// and errors.Is matches ErrDeviceCodeExpired and ErrAPI.
+type browserExpiredError struct {
+	wait    time.Duration
+	expired *DeviceLoginExpiredError
+}
+
+func (e *browserExpiredError) Error() string {
+	return fmt.Sprintf("%v: the browser sign-in was not completed within %s; call BrowserLogin again to start a new one",
+		ErrDeviceCodeExpired, e.wait)
+}
+
+func (e *browserExpiredError) Unwrap() error { return e.expired }
+
+// BrowserLogin signs in through the browser and stores the API token.
+//
+// It reads GET /v1/auth/native/config for where to send the browser, listens
+// on 127.0.0.1 on a port the system picks, shows the consent page's URL
+// (printed as "Opening your browser to sign in to Thalovant. If it does not
+// open, visit:" and the URL, or given to opts.Prompt), opens the browser
+// unless opts.OpenBrowser is false, and waits for the browser to come back to
+// http://127.0.0.1:<port>/callback. A tab that answers with another sign-in's
+// state is turned away (400) and the wait goes on. The code is then
+// exchanged, once, with its PKCE verifier, and the accepted tab is told how
+// the sign-in ended.
+//
+// It returns the token answer and keeps its access_token and token_id on
+// this ControlPlane exactly as a device login does (AccessToken, TokenID), so
+// RevokeAPIToken revokes it the same way. Errors:
+//
+//   - denied on the consent page: errors.Is ErrDeviceAccessDenied
+//     (a *DeviceLoginDeniedError, APIError nil);
+//   - no answer within opts.Timeout: errors.Is ErrDeviceCodeExpired
+//     (a *DeviceLoginExpiredError, APIError nil);
+//   - another error from the consent page, or no code: a
+//     *BrowserLoginFailedError;
+//   - a code the API will not exchange: an *APIError (400, detail
+//     invalid_grant); a token answer that is not a JSON object with an
+//     access_token is an ErrAPI error with no status;
+//   - an API without browser sign-in answers the configuration 404, an
+//     *APIError; InteractiveLogin falls back to a device login for it;
+//   - ctx done while waiting: ctx.Err().
+//
+// The API URL must be https, or http on a loopback address while developing:
+// a code and its verifier never cross the network in cleartext, so anything
+// else is refused before anything is asked or opened. Neither the code, the
+// verifier, the state nor the token appears in an error. Every goroutine the
+// sign-in runs has ended, and the port is closed, when BrowserLogin returns;
+// only opts.Opener's own call may still be running.
+func (c *ControlPlane) BrowserLogin(ctx context.Context, opts BrowserLoginOptions) (map[string]any, error) {
+	// Before anything is asked or opened.
+	if err := requireSecureTokenExchange(c.APIURL); err != nil {
+		return nil, err
+	}
+	config, err := c.nativeSignInConfig(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.browserLogin(ctx, config, opts)
+}
+
+// InteractiveLogin signs a person in the best way this machine allows, and
+// stores the API token.
+//
+// LoginMethodAuto (the default) signs in through the browser (BrowserLogin)
+// when this machine can show one (CanOpenBrowser: never in CI or over SSH; on
+// Linux and the BSDs only with a display) and the API answers GET
+// /v1/auth/native/config with a usable configuration. Otherwise it uses a
+// device login (LoginWithBrowser), whose code can be approved from any
+// browser: a 404, any other failure, an unusable answer and a cleartext API
+// URL all count, and nothing has been opened yet, so that is not a downgrade.
+// LoginMethodBrowser and LoginMethodDevice force one. Once the browser has
+// been sent to the consent page, the browser sign-in's own outcome stands,
+// whether denied, expired or a refused exchange: it never turns into a
+// device login.
+//
+// It returns the token answer, from either method, and keeps the token as
+// both do. An unknown Method is an ErrAPI error, before anything is sent.
+func (c *ControlPlane) InteractiveLogin(ctx context.Context, opts InteractiveLoginOptions) (map[string]any, error) {
+	method := opts.Method
+	if method == "" {
+		method = LoginMethodAuto
+	}
+	switch method {
+	case LoginMethodAuto, LoginMethodBrowser, LoginMethodDevice:
+	default:
+		return nil, fmt.Errorf("%w: Method must be LoginMethodAuto, LoginMethodBrowser or LoginMethodDevice, not %q", ErrAPI, method)
+	}
+	name := opts.DeviceName
+	if name == "" {
+		name = DefaultDeviceName()
+	}
+	var config *NativeSignInConfig
+	switch {
+	case method == LoginMethodBrowser:
+		if err := requireSecureTokenExchange(c.APIURL); err != nil {
+			return nil, err
+		}
+		found, err := c.nativeSignInConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		config = &found
+	case method == LoginMethodAuto && CanOpenBrowser(nil, ""):
+		if requireSecureTokenExchange(c.APIURL) == nil {
+			found, err := c.nativeSignInConfig(ctx)
+			switch {
+			case err == nil:
+				config = &found
+			case ctx.Err() != nil:
+				// Cancelled, not unusable: a device login would fail the
+				// same way.
+				return nil, err
+			}
+			// An older API (404), or one that cannot say: the browser has
+			// not been opened, so a device login is not a downgrade.
+		}
+	}
+	if config == nil {
+		timeout := opts.Timeout
+		if timeout <= 0 {
+			timeout = DefaultDeviceLoginTimeout
+		}
+		return c.loginWithDevice(ctx, DeviceLoginOptions{
+			Scopes:      opts.Scopes,
+			ClientName:  name,
+			OpenBrowser: opts.OpenBrowser,
+			Timeout:     timeout,
+		}, opts.Opener)
+	}
+	return c.browserLogin(ctx, *config, BrowserLoginOptions{
+		Scopes:      opts.Scopes,
+		DeviceName:  name,
+		OpenBrowser: opts.OpenBrowser,
+		Timeout:     opts.Timeout,
+		Opener:      opts.Opener,
+	})
+}
+
+// browserLogin is one browser sign-in against config: listen, show and open
+// the URL, wait, exchange, and answer the tab.
+func (c *ControlPlane) browserLogin(ctx context.Context, config NativeSignInConfig, opts BrowserLoginOptions) (map[string]any, error) {
+	if err := requireSecureTokenExchange(c.APIURL); err != nil {
+		return nil, err
+	}
+	verifier, err := NewVerifier()
+	if err != nil {
+		return nil, err
+	}
+	state, err := NewState()
+	if err != nil {
+		return nil, err
+	}
+	listener := newLoopbackListener(state)
+	// Bound before the URL is built: the redirect names the port.
+	port, err := listener.start()
+	if err != nil {
+		return nil, err
+	}
+	// On every path, a panicking Prompt included: stop listening, give an
+	// accepted tab its page, close every connection, and wait for every
+	// goroutine the listener runs.
+	defer listener.close()
+	redirectURI, err := LoopbackRedirectURI(port)
+	if err != nil {
+		return nil, err
+	}
+	deviceName := opts.DeviceName
+	if deviceName == "" {
+		deviceName = DefaultDeviceName()
+	}
+	authorizationURL := BrowserAuthorizationURL(config.AuthorizationEndpoint, BrowserAuthorization{
+		ClientID:      config.SDKClientID,
+		RedirectURI:   redirectURI,
+		CodeChallenge: ChallengeFor(verifier),
+		State:         state,
+		Scopes:        opts.Scopes,
+		DeviceName:    deviceName,
+	})
+	presentBrowserLogin(authorizationURL, opts.Prompt, opts.OpenBrowser == nil || *opts.OpenBrowser, opts.Opener)
+	timeout := opts.Timeout
+	if timeout <= 0 {
+		timeout = DefaultBrowserLoginTimeout
+	}
+	callback, err := listener.wait(ctx, timeout)
+	if err != nil {
+		return nil, err
+	}
+	if callback == nil {
+		return nil, &browserExpiredError{wait: timeout, expired: &DeviceLoginExpiredError{}}
+	}
+	switch callback.outcome {
+	case callbackDenied:
+		return nil, &browserDeniedError{denied: &DeviceLoginDeniedError{}}
+	case callbackFailed:
+		code := ""
+		if problemCodePattern.MatchString(callback.errorParam) {
+			code = callback.errorParam
+		}
+		return nil, &BrowserLoginFailedError{Code: code}
+	}
+	// A code is single-use and lives 60 seconds: a failed exchange is never
+	// retried, since presenting a code twice revokes the token the first
+	// exchange minted (RFC 9700).
+	token, err := c.exchangeBrowserCode(ctx, config, callback.code, verifier, redirectURI, state)
+	if err != nil {
+		return nil, err
+	}
+	listener.finish(true)
+	return token, nil
+}
+
+// problemCodePattern is what a code from the consent page has to look like to
+// be repeated in an error.
+var problemCodePattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,80}$`)
+
+// presentBrowserLogin shows the URL, since opening a browser can fail
+// without a word, and opens it.
+func presentBrowserLogin(target string, prompt func(string), open bool, opener func(string)) {
+	switch {
+	case prompt != nil:
+		prompt(target)
+	case open:
+		fmt.Printf("Opening your browser to sign in to Thalovant. If it does not open, visit:\n%s\n", target)
+	default:
+		fmt.Printf("To sign in to Thalovant, visit:\n%s\n", target)
+	}
+	if open {
+		openWith(opener, target)
+	}
+}
+
+// nativeSignInConfig reads GET /v1/auth/native/config: where to send the
+// browser, and where to exchange the code.
+func (c *ControlPlane) nativeSignInConfig(ctx context.Context) (NativeSignInConfig, error) {
+	status, raw, header, err := c.send(ctx, http.MethodGet, "/v1/auth/native/config", nil, nil, false)
+	if err != nil {
+		return NativeSignInConfig{}, err
+	}
+	if status == http.StatusNotFound {
+		// The API's own fields stay as they were sent; only the display line
+		// says what the 404 means.
+		apiErr := apiErrorFromResponse(status, raw, header)
+		apiErr.Detail = "this Thalovant API does not offer browser sign-in; sign in with a device login instead"
+		return NativeSignInConfig{}, apiErr
+	}
+	if status < 200 || status > 299 {
+		return NativeSignInConfig{}, apiErrorFromResponse(status, raw, header)
+	}
+	// A 2xx this SDK cannot use is an error with no status, as a token
+	// answer's is: the API did not refuse.
+	payload, decodeErr := decodeControlJSON(raw)
+	if decodeErr != nil {
+		return NativeSignInConfig{}, fmt.Errorf("%w: the API answered an unusable browser sign-in configuration: it is not a JSON object", ErrAPI)
+	}
+	return ParseNativeSignInConfig(payload)
+}
+
+// ParseNativeSignInConfig reads GET /v1/auth/native/config's answer and
+// refuses one a browser sign-in cannot safely use, with an ErrAPI error:
+//
+//   - an authorization_endpoint that is not https (or http on localhost,
+//     127.0.0.1 or ::1), has no host, carries credentials, a query (or a bare
+//     ?), a fragment, whitespace or control characters, or a port no browser
+//     can open;
+//   - a token_endpoint that is not a path on the API: one leading /, not //,
+//     and no ?, #, \ or whitespace;
+//   - an sdk_client_id that is not 1-64 of A-Z a-z 0-9 . _ -;
+//   - code_challenge_methods_supported that is not a list holding "S256".
+//
+// A nil payload is not an object. Other members are ignored, and
+// loopback_redirect_uri is never used: the redirect is LoopbackRedirectURI.
+func ParseNativeSignInConfig(payload map[string]any) (NativeSignInConfig, error) {
+	unusable := func(why string) (NativeSignInConfig, error) {
+		return NativeSignInConfig{}, fmt.Errorf("%w: the API answered an unusable browser sign-in configuration: %s", ErrAPI, why)
+	}
+	if payload == nil {
+		return unusable("it is not a JSON object")
+	}
+	authorization, _ := payload["authorization_endpoint"].(string)
+	if !usableAuthorizationEndpoint(authorization) {
+		return unusable("no usable authorization_endpoint")
+	}
+	token, _ := payload["token_endpoint"].(string)
+	if !usableTokenEndpoint(token) {
+		return unusable("no usable token_endpoint")
+	}
+	clientID, _ := payload["sdk_client_id"].(string)
+	if !sdkClientIDPattern.MatchString(clientID) {
+		return unusable("no usable sdk_client_id")
+	}
+	offersS256 := false
+	if methods, ok := payload["code_challenge_methods_supported"].([]any); ok {
+		for _, method := range methods {
+			if method == "S256" {
+				offersS256 = true
+			}
+		}
+	}
+	if !offersS256 {
+		return unusable("it does not offer S256")
+	}
+	device, _ := payload["device_authorization_endpoint"].(string)
+	return NativeSignInConfig{
+		AuthorizationEndpoint:       authorization,
+		TokenEndpoint:               token,
+		SDKClientID:                 clientID,
+		DeviceAuthorizationEndpoint: device,
+	}, nil
+}
+
+var sdkClientIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// unsafeInURL reports a whitespace or control character, C1 included.
+func unsafeInURL(r rune) bool {
+	return unicode.IsSpace(r) || r < 32 || (r >= 127 && r <= 159)
+}
+
+// usableAuthorizationEndpoint: https, or http on a loopback host while
+// developing; a host; no credentials, query, fragment, whitespace or control
+// characters; a port from 0 to 65535 when one is given.
+func usableAuthorizationEndpoint(value string) bool {
+	if value == "" || strings.IndexFunc(value, unsafeInURL) >= 0 || strings.ContainsAny(value, "?#") {
+		return false
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.User != nil || parsed.Opaque != "" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host == "" || !validPort(parsed.Port()) {
+		return false
+	}
+	switch strings.ToLower(parsed.Scheme) {
+	case "https":
+		return true
+	case "http":
+		return host == "localhost" || host == "127.0.0.1" || host == "::1"
+	}
+	return false
+}
+
+// validPort is "" or a decimal port from 0 to 65535.
+func validPort(port string) bool {
+	if port == "" {
+		return true
+	}
+	if len(port) > 5 {
+		return false
+	}
+	number := 0
+	for _, digit := range port {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+		number = number*10 + int(digit-'0')
+	}
+	return number <= 65535
+}
+
+// usableTokenEndpoint: a path on the API, with one leading slash and no
+// query, fragment, backslash, whitespace or control character.
+func usableTokenEndpoint(value string) bool {
+	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") {
+		return false
+	}
+	return strings.IndexFunc(value, func(r rune) bool { return strings.ContainsRune(`?#\`, r) || unsafeInURL(r) }) < 0
+}
+
+// NewState returns an OAuth state: 24 random bytes (192 bits) from the
+// operating system, base64url without padding (32 characters). It ties the
+// answer the browser brings back to the request that sent it.
+func NewState() (string, error) { return randomURLSafe(24) }
+
+// LoopbackRedirectURI is http://127.0.0.1:<port>/callback, the one redirect a
+// browser sign-in is answered on: the IP literal, never localhost, which a
+// hosts file or a resolver can send elsewhere; no query and no trailing
+// slash. The API matches it exactly and only for a port from 1024 to 65535,
+// which an ephemeral port always is; any other port is an ErrAPI error.
+func LoopbackRedirectURI(port int) (string, error) {
+	if port < 1024 || port > 65535 {
+		return "", fmt.Errorf("%w: a loopback redirect needs a port from 1024 to 65535, not %d", ErrAPI, port)
+	}
+	return fmt.Sprintf("http://127.0.0.1:%d%s", port, LoopbackCallbackPath), nil
+}
+
+// BrowserAuthorizationURL is the address a browser sign-in opens:
+// {authorizationEndpoint}?response_type=code&client_id=&redirect_uri=
+// &code_challenge=&code_challenge_method=S256&state=&scope=&device_name=, in
+// that order, every value percent-encoded as RFC 3986 has it (A-Z a-z 0-9 -
+// . _ ~ as they are, every other UTF-8 byte as %XX, a space as %20). scope is
+// left out when no non-empty scope is asked for, and the API then grants its
+// default (hubs:read clients:write); device_name is cut to
+// MaxDeviceNameLength code points and left out when empty.
+func BrowserAuthorizationURL(authorizationEndpoint string, a BrowserAuthorization) string {
+	clientID := a.ClientID
+	if clientID == "" {
+		clientID = SDKClientID
+	}
+	parameters := [][2]string{
+		{"response_type", "code"},
+		{"client_id", clientID},
+		{"redirect_uri", a.RedirectURI},
+		{"code_challenge", a.CodeChallenge},
+		// S256 only: plain puts the verifier in the browser.
+		{"code_challenge_method", "S256"},
+		{"state", a.State},
+	}
+	scopes := make([]string, 0, len(a.Scopes))
+	for _, scope := range a.Scopes {
+		if scope != "" {
+			scopes = append(scopes, scope)
+		}
+	}
+	if len(scopes) > 0 {
+		parameters = append(parameters, [2]string{"scope", strings.Join(scopes, " ")})
+	}
+	if a.DeviceName != "" {
+		parameters = append(parameters, [2]string{"device_name", truncateCodePoints(a.DeviceName, MaxDeviceNameLength)})
+	}
+	query := make([]string, len(parameters))
+	for index, parameter := range parameters {
+		query[index] = parameter[0] + "=" + queryValue(parameter[1])
+	}
+	return authorizationEndpoint + "?" + strings.Join(query, "&")
+}
+
+// queryValue percent-encodes as RFC 3986 has it. url.QueryEscape writes a
+// space as "+"; a literal "+" is already "%2B", so the swap is safe.
+func queryValue(value string) string {
+	return strings.ReplaceAll(url.QueryEscape(value), "+", "%20")
+}
+
+// truncateCodePoints cuts text to at most limit code points, never inside one.
+func truncateCodePoints(text string, limit int) string {
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit])
+}
+
+// hostName is os.Hostname; tests replace it.
+var hostName = os.Hostname
+
+// DefaultDeviceName is "thalovant-go-sdk on <hostname>", what the consent
+// page and the token show when the caller names nothing, cut to
+// MaxDeviceNameLength code points; "thalovant-go-sdk" when the host has no
+// name.
+func DefaultDeviceName() string {
+	host, err := hostName()
+	if err != nil {
+		host = ""
+	}
+	host = strings.TrimSpace(host)
+	if host == "" {
+		return sdkDeviceLabel
+	}
+	return truncateCodePoints(sdkDeviceLabel+" on "+host, MaxDeviceNameLength)
+}
+
+// browserPlatform is this machine as the browser rule names it; tests
+// replace it.
+var browserPlatform = func() string { return platformName(runtime.GOOS) }
+
+// platformName maps a GOOS to the browser rule's names: "macos", "windows",
+// "linux", or the GOOS itself. Android is "linux" (a phone has no DISPLAY, so
+// LoginMethodAuto picks a device login; the app signs in through its own
+// flow), and iOS stays "ios", which the rule treats like Linux without a
+// display.
+func platformName(goos string) string {
+	switch goos {
+	case "darwin":
+		return "macos"
+	case "android":
+		return "linux"
+	}
+	return goos
+}
+
+// CanOpenBrowser reports whether a machine can show a browser to the person
+// signing in.
+//
+// Never in CI (CI set) or over SSH (SSH_CONNECTION or SSH_TTY set): the
+// browser would open on another machine, or nowhere. Otherwise yes on
+// "macos" and "windows"; on any other platform (Linux, the BSDs) only with a
+// display (DISPLAY or WAYLAND_DISPLAY). A variable counts as set when it has
+// a non-empty value: CI=false is set, an empty DISPLAY is not.
+//
+// env nil reads this process's environment; platform "" is this machine
+// ("macos", "windows", "linux", or runtime.GOOS otherwise).
+func CanOpenBrowser(env map[string]string, platform string) bool {
+	present := func(name string) bool {
+		if env == nil {
+			return os.Getenv(name) != ""
+		}
+		return env[name] != ""
+	}
+	if present("CI") || present("SSH_CONNECTION") || present("SSH_TTY") {
+		return false
+	}
+	if platform == "" {
+		platform = browserPlatform()
+	}
+	if platform == "macos" || platform == "windows" {
+		return true
+	}
+	return present("DISPLAY") || present("WAYLAND_DISPLAY")
+}
+
+// exchangeBrowserCode sends POST {token_endpoint} with exactly code,
+// code_verifier, client_id and redirect_uri, and keeps the token.
+//
+// Read as a device-login token answer is: a 2xx whose body is not a JSON
+// object with an access_token is an error with no status -- the API did not
+// refuse, its answer could not be used -- and any other failure carries the
+// api-errors fields (invalid_grant for every way an exchange fails), with
+// the code, the verifier and the state taken out.
+func (c *ControlPlane) exchangeBrowserCode(ctx context.Context, config NativeSignInConfig, code, verifier, redirectURI, state string) (map[string]any, error) {
+	if err := requireSecureTokenExchange(c.APIURL); err != nil {
+		return nil, err
+	}
+	payload := map[string]any{
+		"code":          code,
+		"code_verifier": verifier,
+		"client_id":     config.SDKClientID,
+		"redirect_uri":  redirectURI,
+	}
+	status, raw, header, err := c.send(ctx, http.MethodPost, config.TokenEndpoint, payload, nil, false)
+	if err != nil {
+		// send never keeps the transport's own error, which could name the
+		// request.
+		return nil, err
+	}
+	hidden := []string{code, verifier, state}
+	if status < 200 || status > 299 {
+		return nil, withoutSecrets(apiErrorFromResponse(status, redactAll(raw, hidden), header), hidden)
+	}
+	token, decodeErr := decodeControlJSON(raw)
+	if decodeErr != nil {
+		return nil, fmt.Errorf("%w: the browser sign-in token response was not a JSON object", ErrAPI)
+	}
+	if _, err := c.acceptToken(token); err != nil {
+		return nil, err
+	}
+	return token, nil
+}
+
+// redactedSecret replaces a secret an API echoed back.
+const redactedSecret = "[redacted]"
+
+// redactAll takes every value in hidden out of a body before it is read, so
+// a display line cut short cannot keep half of one.
+func redactAll(raw []byte, hidden []string) []byte {
+	text := string(raw)
+	for _, value := range hidden {
+		if value != "" {
+			text = strings.ReplaceAll(text, value, redactedSecret)
+		}
+	}
+	return []byte(text)
+}
+
+// withoutSecrets is apiErr with every value in hidden taken out of every
+// field, the problem's keys included. An API that echoes a request back, as a
+// FastAPI 422 lists each field's input, would otherwise hand the code and the
+// verifier to whoever logs the error. The returned copy is the only error
+// that leaves; nothing keeps the original.
+func withoutSecrets(apiErr *APIError, hidden []string) *APIError {
+	scrubText := func(text string) string {
+		for _, value := range hidden {
+			if value != "" {
+				text = strings.ReplaceAll(text, value, redactedSecret)
+			}
+		}
+		return text
+	}
+	var scrub func(any) any
+	scrub = func(item any) any {
+		switch typed := item.(type) {
+		case string:
+			return scrubText(typed)
+		case map[string]any:
+			clean := make(map[string]any, len(typed))
+			for key, member := range typed {
+				clean[scrubText(key)] = scrub(member)
+			}
+			return clean
+		case []any:
+			clean := make([]any, len(typed))
+			for index, member := range typed {
+				clean[index] = scrub(member)
+			}
+			return clean
+		}
+		return item
+	}
+	clean := *apiErr
+	clean.Detail = scrubText(apiErr.Detail)
+	clean.Code = scrubText(apiErr.Code)
+	clean.ProblemDetail = scrubText(apiErr.ProblemDetail)
+	if apiErr.Problem != nil {
+		clean.Problem, _ = scrub(apiErr.Problem).(map[string]any)
+	}
+	if apiErr.Fields != nil {
+		clean.Fields = make([]string, len(apiErr.Fields))
+		for index, field := range apiErr.Fields {
+			clean.Fields[index] = scrubText(field)
+		}
+	}
+	return &clean
+}

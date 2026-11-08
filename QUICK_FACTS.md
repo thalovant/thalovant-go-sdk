@@ -1,17 +1,34 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Record the 0.14.2 release.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Add browser sign-in (0.15.0): entry points, constants, errors and the parity capability.
 
 # Quick Facts
 
 | Item | Value |
 | :--- | :--- |
 | Module | `github.com/thalovant/thalovant-go-sdk` (package `thalovant`) |
-| Version | 0.14.2 (`VERSION` and `const Version` in `version.go`, kept equal by `TestVersionMatchesVersionFile`; the Auto Release workflow bumps both for a patch release) |
+| Version | 0.15.0 (`VERSION` and `const Version` in `version.go`, kept equal by `TestVersionMatchesVersionFile`; the Auto Release workflow bumps both for a patch release) |
 | Go | 1.26.9 or newer (`go.mod`) |
 | Data-plane entry points | `NewClient`, `NewClientFromConfig`, `Client.Ask`, `Client.Intents`, `HubSession` |
-| Control-plane entry points | `NewControlPlane`, `NewDefaultControlPlane`, methods on `*ControlPlane` (`control.go`, `hub_skills.go`, `chat_apps.go`) |
+| Control-plane entry points | `NewControlPlane`, `NewDefaultControlPlane`, methods on `*ControlPlane` (`control.go`, `hub_skills.go`, `chat_apps.go`, `browser_login.go`) |
+| Sign-in entry points | `InteractiveLogin` (chooser), `BrowserLogin` (browser, PKCE on a loopback redirect), `LoginWithBrowser` (device login, unchanged), `BeginDeviceLogin`/`PollDeviceLogin`, `RevokeAPIToken` |
 | Errors | `*APIError` (`StatusCode`, `Code`, `ProblemDetail`, `Problem`, `Fields`, `RetryAfter`); `ErrAPI`, `ErrAuth`, `ErrPlan`, `ErrAPIUnreachable` (`errors.go`) |
 | Validation | `test -z "$(gofmt -l .)"`, `go vet ./...`, `go test -race -count=1 ./...` |
-| Parity contract | `contracts/sdk-parity.json`, checked by the Python SDK's `scripts/check-sdk-parity.py --consumer thalovant-go-sdk` |
+| Parity contract | `contracts/sdk-parity.json`, checked by the Python SDK's `scripts/check-sdk-parity.py --consumer thalovant-go-sdk`; reference digests accepted: `57c7e71f6456…` (current) and `49744ee385bf…` (browser-login candidate) |
+| Conformance results | `contracts/conformance-results.json`, written by `THALOVANT_CONFORMANCE_OUT=contracts/conformance-results.json go test ./...` |
+
+## Browser sign-in (`browser_login.go`, `loopback.go`)
+
+| Item | Value |
+| :--- | :--- |
+| Methods on `*ControlPlane` | `BrowserLogin(ctx, BrowserLoginOptions) (map[string]any, error)`, `InteractiveLogin(ctx, InteractiveLoginOptions) (map[string]any, error)` |
+| `LoginMethod` | `LoginMethodAuto` (`"auto"`, default), `LoginMethodBrowser` (`"browser"`), `LoginMethodDevice` (`"device"`) |
+| Options | `Scopes`, `DeviceName`, `OpenBrowser *bool` (nil is true), `Timeout`, `Prompt func(url string)` (browser only), `Opener func(url string)`, `Method` (chooser only) |
+| Routes | `GET /v1/auth/native/config` (no auth; 404 = no browser sign-in), `POST {token_endpoint}` with exactly `code`, `code_verifier`, `client_id`, `redirect_uri` |
+| Redirect | `http://127.0.0.1:<port>/callback` (`LoopbackRedirectURI`, ports 1024-65535), listener on `127.0.0.1:0` (`tcp4`), `SO_EXCLUSIVEADDRUSE` on Windows |
+| Constants | `SDKClientID = "thalovant-sdk"`, `LoopbackCallbackPath = "/callback"`, `DefaultBrowserLoginTimeout = 300s`, `MaxDeviceNameLength = 120` (code points) |
+| Helpers | `CanOpenBrowser(env, platform)`, `ParseNativeSignInConfig`, `NativeSignInConfig`, `BrowserAuthorizationURL`, `BrowserAuthorization`, `NewState` (24 bytes), `NewVerifier` (64 bytes), `ChallengeFor`, `DefaultDeviceName` (`thalovant-go-sdk on <hostname>`) |
+| Errors | denied: `ErrDeviceAccessDenied` / `*DeviceLoginDeniedError`; timeout: `ErrDeviceCodeExpired` / `*DeviceLoginExpiredError` (both with nil `APIError`); no code: `*BrowserLoginFailedError` (`Code`); exchange refused: `*APIError` 400 `invalid_grant` |
+| Parity capability | `browser-login`; vectors `testdata/browser-login-vectors.json` (98 cases, sha256 `9058adf2ad30…`) |
+| Tests | `browser_login_vectors_test.go` (every vector case, plus the 24 callbacks through a real listener), `browser_login_test.go` (prints, opener goroutine, listener edges, goroutine accounting, secrets) |
 
 ## Chat apps (`chat_apps.go`)
 

@@ -313,6 +313,14 @@ type DeviceLoginOptions struct {
 // *DeviceLoginExpiredError), and ErrTimeout respectively. BeginDeviceLogin and
 // PollDeviceLogin are the same flow one step at a time.
 func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOptions) (map[string]any, error) {
+	return c.loginWithDevice(ctx, opts, nil)
+}
+
+// loginWithDevice is LoginWithBrowser opening the verification page with
+// opener, or with the platform's browser when opener is nil (openWith).
+// InteractiveLogin passes its Opener here when it falls back to a device
+// login.
+func (c *ControlPlane) loginWithDevice(ctx context.Context, opts DeviceLoginOptions, opener func(string)) (map[string]any, error) {
 	grant, err := c.request(ctx, http.MethodPost, "/v1/auth/device/authorize", deviceAuthorizePayload(opts), nil, false)
 	if err != nil {
 		return nil, err
@@ -330,7 +338,7 @@ func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOpt
 	if opts.OpenBrowser == nil || *opts.OpenBrowser {
 		if completeURI := authorization.VerificationURIComplete; completeURI != "" {
 			// Browser availability is best-effort; a headless host is fine.
-			_ = openBrowser(completeURI)
+			openWith(opener, completeURI)
 		}
 	}
 
@@ -394,6 +402,18 @@ var openBrowser = func(target string) error {
 	}
 	go func() { _ = cmd.Wait() }()
 	return nil
+}
+
+// openWith opens target with the caller's opener, on a goroutine of its own
+// since a console browser can hold the call until it exits, or with the
+// platform's browser (openBrowser), which only starts the process and
+// returns. A failure changes nothing: the URL was already shown.
+func openWith(opener func(string), target string) {
+	if opener != nil {
+		go opener(target)
+		return
+	}
+	_ = openBrowser(target)
 }
 
 // validateBrowserURL rejects option-like targets, local files, executable URI

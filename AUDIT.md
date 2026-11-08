@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Record the UsualForm and home-goroutine fixes from CodeRabbit's review-body items on #65 and #69.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Audit browser sign-in (BrowserLogin, InteractiveLogin, the loopback listener) for 0.15.0.
 
 ## 2026-11-06 — CVE-2026-78661 in golang.org/x/net
 
@@ -8,12 +8,41 @@ HIGH, found by the dependency scan in infra-manifests' `contracts` gate at v0.61
 
 Known issues, technical debt and their status, from test runs and code reading. Each entry names the code it concerns.
 
-Evidence: `go test -race -count=1 -timeout=5m ./...` on 2026-11-08 (Go 1.26.10, linux/amd64): 391
+Evidence: `go test -race -count=1 -timeout=5m ./...` on 2026-11-08 (Go 1.26.10, linux/amd64): 426
 top-level tests pass, 0 fail, 1 skipped (`TestNoiseInteropAgainstLiveHub`, which needs a live hub).
-`gofmt -l .` is empty and `go vet ./...` is clean. The parity check (`check-sdk-parity.py --consumer
-thalovant-go-sdk`, reference at bd4061f) verifies the acceptance record.
+`gofmt -l .` is empty and `go vet ./...` is clean for linux, windows and darwin. The parity check
+(`check-sdk-parity.py --consumer thalovant-go-sdk`) verifies the acceptance record against the
+Python reference's main (44b6e2b, digest `57c7e71f6456`) and its browser sign-in PR head (e3999cb,
+digest `49744ee385bf`), and every recorded `browser-login-vectors.json` case digest equals the
+reference's.
 
-## Verified in this change
+## Verified in this change (browser sign-in, 0.15.0)
+
+- All 98 cases of `testdata/browser-login-vectors.json` (byte-identical to the reference, sha256
+  `9058adf2ad30…`) run in `browser_login_vectors_test.go`, and the 24 callback cases run a second
+  time through a real listener (`TestBrowserLoginCallbackVectorsOverTheListener`). `sign_ins` and
+  `chooser` run for real: a loopback httptest API checks every request, a raw TCP client plays the
+  browser, and the exchange's verifier is checked against the URL's challenge before it is recorded.
+- No secret reaches an error: the vectors check every printed form of every error against the
+  synthetic secrets, the generated verifier and the state (`assertBrowserNoSecrets`); a 422 that
+  echoes the code and the verifier, in values and in a key, is redacted in every field
+  (`TestAnEchoedCodeAndVerifierNeverReachTheError`; `withoutSecrets` and `redactAll` in
+  `browser_login.go`).
+- No goroutine outlives a sign-in: the listener counts its accept loop and every connection
+  (`loopbackListener.goroutines` in `loopback.go`) and `close` waits for them; checked by stack on
+  every path, a panicking `Prompt` included (`TestNoGoroutineOutlivesTheSignInOnAnyPath`), and an
+  idle connection does not hold the sign-in (`TestAConnectionThatSendsNothingDoesNotHoldTheSignIn`).
+  Two mutations were run and caught: calling the `Opener` synchronously
+  (`TestBrowserLoginPrintsTheURLAndDoesNotWaitForTheOpener` fails), and not closing the port on
+  acceptance (`TestASecondAnswerAfterTheFirstIsTurnedAway` fails).
+- Callback values decode as CPython's `parse_qsl` decodes them, checked against its output for 12
+  queries (`TestCallbackValuesAreDecodedAsPythonsParseQslDecodesThem`; `formPairs`, `formUnquote`,
+  `utf8Replacing` in `loopback.go`).
+- Device login is unchanged: `LoginWithBrowser` delegates to `loginWithDevice` (`control.go`), and
+  `device-login-vectors.json` and the existing `TestControlPlaneLoginWithBrowser*` tests pass
+  unchanged; every other recorded vector result is identical to the committed record.
+
+## Verified in 0.14.0 (chat apps)
 
 - Secrets stay out of output: `SecretValue` (`chat_apps.go`, `type SecretValue`) prints the marker
   for every fmt verb, JSON, text and slog, including inside caller structs with an unexported field
@@ -28,6 +57,18 @@ thalovant-go-sdk`, reference at bd4061f) verifies the acceptance record.
 
 ## Known issues and debt
 
+- **An `Opener` that never returns keeps its goroutine.** `BrowserLogin` calls
+  `BrowserLoginOptions.Opener` on its own goroutine (`openWith` in `control.go`) and does not wait
+  for it, since a console browser can hold the call until it exits; Go cannot stop it. The default
+  opener (`openBrowser`) returns once the process has started, and its `cmd.Wait` goroutine lives
+  as long as the launcher process, as it always has for device login.
+- **`ParseNativeSignInConfig` reads the dashboard address with `url.Parse`**, which refuses a path
+  with a malformed escape (`https://dash.example/%zz`) that Python's `urlsplit` accepts. Go then
+  calls the configuration unusable, the safe side; no vector or API answer has such an address
+  (`usableAuthorizationEndpoint` in `browser_login.go`).
+- **`*BrowserLoginFailedError` is Go's own type.** The reference raises its API error with no
+  status and the page's error as `code`; Go's `APIError.StatusCode` is an `int` with no "none", so
+  a callback without a code is a separate type that matches `ErrAPI` (`browser_login.go`).
 - **Unbounded JSON reads.** `ControlPlane.send` calls `sendWithin` with no cap (`control.go`), so JSON
   responses are read whole. `GetBridgeAvatar` passes a 4 MiB cap (`maxBridgeAvatarBytes` in
   `chat_apps.go`, `TestChatAppAvatarReadIsBounded`). See SUGGESTIONS.md.
@@ -55,5 +96,7 @@ thalovant-go-sdk`, reference at bd4061f) verifies the acceptance record.
 
 ## Open
 
+- **Drop the older reference digest** (`57c7e71f6456…`) from `contracts/sdk-parity.json` once the
+  Python SDK's `main` carries `49744ee385bf…` (thalovant/thalovant-python-sdk#113).
 - **The Rust port's `usual_form` still answers the way Go did** on the two kinds of tag above (noted 2026-11-03). No shared vector covers `usual_form`, so the parity gate sees no difference; see SUGGESTIONS.md.
 - **The home-goroutine bound is Go's own.** The reference caps plain handlers at four threads running at once; Go caps only the handlers and replies still running past their time, so handlers that honour their context are never refused. The count is checked when a request arrives, so requests already running when the fourth runs over can still add to it before new ones are refused. A `Replier` value that cannot be compared (a struct holding a slice) is not counted for calls of `AnswerHomeRequest` on their own, since it cannot be told apart from another value; pointers, which `Client` and `HubSession` are, always are.
