@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Document browser sign-in (InteractiveLogin, BrowserLogin) for 0.15.0.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Document browser sign-in (InteractiveLogin, BrowserLogin) for 0.15.0, with when the URL is printed.
 
 <p align="center">
   <picture>
@@ -123,9 +123,11 @@ fmt.Println("signed in; token", control.TokenID, "scopes", token["scopes"])
   never turns into a device login.
 - `BrowserLogin(ctx, thalovant.BrowserLoginOptions{...})` is the browser sign-in on its own:
   `Scopes` (none asks for `hubs:read clients:write`), `DeviceName` (default `thalovant-go-sdk on
-  <hostname>`), `OpenBrowser`, `Timeout` (default 5 minutes), `Prompt` (receives the URL instead
-  of the printed message) and `Opener` (replaces the platform browser; it runs on its own
-  goroutine). The URL is always printed as well, since opening a browser can fail silently.
+  <hostname>`), `OpenBrowser`, `Timeout` (default 5 minutes), `Prompt` and `Opener` (replaces the
+  platform browser; it runs on its own goroutine).
+- Without `Prompt`, the URL is printed to stdout whether or not the browser opens, since opening a
+  browser can fail silently. With `Prompt`, nothing is printed: `Prompt` receives the URL instead,
+  so show it there. `InteractiveLogin` takes no `Prompt` and always prints.
 - The token is kept exactly as a device login keeps it (`AccessToken`, `TokenID`), and
   `RevokeAPIToken(ctx, "")` revokes it.
 - Errors: `errors.Is(err, thalovant.ErrDeviceAccessDenied)` when the person denies,

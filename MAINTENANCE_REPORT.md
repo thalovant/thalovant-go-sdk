@@ -1,4 +1,16 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Port browser sign-in (browser-login) from the Python reference as 0.15.0.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Address CodeRabbit's 14 review threads on #90 (browser sign-in).
+
+## 2026-11-08 — review of #90 (browser sign-in)
+
+CodeRabbit left 14 threads on #90. Twelve are fixed, each with a test that fails when the fix is reverted (checked one by one); two are answered on their threads and left as the reference and the porting brief have them. Nothing a shared vector decides changed: all 98 recorded `browser-login-vectors.json` digests, and every other recorded result, are identical to the committed ones.
+
+- **Fixed:** the exchange is sent at most once (`sendNoReplay` in `control.go`, no `GetBody`, since HTTP/2 replays a written body after a peer `PROTOCOL_ERROR`); a refused exchange's body is redacted after decoding and before its display line is cut, including any `access_token`, `refresh_token` or `id_token` it carries (`redactExchangeAnswer`); a consent-page `error` carrying the state is not repeated in `Code`; a ctx done by the time `Prompt` returns opens nothing; the listener handles at most 64 connections at once; an authorization endpoint on port 0, a token endpoint with a malformed escape, and a `[]string` method list are handled; the goroutine guarantee, the incomplete-head note and the printing rule are corrected in the doc comments, CHANGELOG, README and FAQ.
+- **Answered, not changed:** the accepted tab's 60-second wait (the porting brief bounds it; reported to the rollout lead), and `Prompt` on the calling goroutine (the reference calls its prompt synchronously, as the print it replaces).
+- **Live check:** API #501 is deployed. `GET https://api.thalovant.com/v1/auth/native/config` answered 200 with `authorization_endpoint` `https://dash.thalovant.com/authorize`, `token_endpoint` `/v1/auth/native/token`, `sdk_client_id` `thalovant-sdk` and `["S256"]`; `ParseNativeSignInConfig` accepts it, and a `BrowserLogin` against it with nothing opened built the consent URL on a loopback redirect and expired after 1 s as it should, holding no token.
+- **Parity:** `browser-login` evidence and the `control.go` hash in the six capabilities that list it refreshed from the files the passing run tested; the reference digests are unchanged (`57c7e71f6456…`, `49744ee385bf…`), pending the producer's final one.
+- **Verification:** `gofmt -l .` empty; `go vet ./...` clean for linux, windows and darwin; `go test -race -count=1 -timeout=5m -v ./...`: 433 top-level tests pass, 0 fail, 1 skipped (`TestNoiseInteropAgainstLiveHub`), no data race; `check-sdk-parity.py --consumer thalovant-go-sdk` verified against the reference's `main` (44b6e2b) and PR head (e3999cb).
+
+Transparency Report. AI Model: Claude Opus 5.5 (claude-opus-5-5). Actions Taken: read each thread against the code, the Go 1.26 transport source and the porting brief; wrote the fixes and seven tests; checked each test against a reverted fix; ran the live configuration check; replied on and resolved every thread. Oversight: the rollout lead asked for the review round and decides on the two contract items; hosted CI runs on the pull request. Not merged, tagged or released.
 
 ## 2026-11-08 — browser sign-in (0.15.0)
 

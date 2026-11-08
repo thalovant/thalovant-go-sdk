@@ -1239,6 +1239,24 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 // sendWithin is send with the response body capped at limit bytes (0 for no
 // cap). A body over the cap is an *APIError, never silently shortened.
 func (c *ControlPlane) sendWithin(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool, limit int64) (int, []byte, http.Header, error) {
+	return c.sendRequest(ctx, method, path, payload, headers, auth, limit, true)
+}
+
+// sendNoReplay is send, unauthenticated, for a request the API must receive
+// at most once: the browser sign-in's code exchange, whose code is
+// single-use. Its body cannot be rewound (no GetBody), so the HTTP transport
+// never sends it twice. HTTP/2 otherwise replays a body it has written on a
+// stream the server reset with PROTOCOL_ERROR (golang/go#47635), which the
+// API may have processed. A request that fails before any of its body was
+// read is still retried on a new connection; one that fails after is an
+// error, and the person signs in again.
+func (c *ControlPlane) sendNoReplay(ctx context.Context, method string, path string, payload map[string]any) (int, []byte, http.Header, error) {
+	return c.sendRequest(ctx, method, path, payload, nil, false, 0, false)
+}
+
+// sendRequest is sendWithin; replayable false leaves the request without
+// GetBody (sendNoReplay).
+func (c *ControlPlane) sendRequest(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool, limit int64, replayable bool) (int, []byte, http.Header, error) {
 	var body io.Reader
 	if payload != nil {
 		raw, err := json.Marshal(payload)
@@ -1250,6 +1268,9 @@ func (c *ControlPlane) sendWithin(ctx context.Context, method string, path strin
 	req, err := http.NewRequestWithContext(ctx, method, c.APIURL+strings.TrimLeft(path, "/"), body)
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("%w: invalid control request", ErrAPI)
+	}
+	if !replayable {
+		req.GetBody = nil
 	}
 	req.Header.Set("accept", "application/json")
 	req.Header.Set("user-agent", c.UserAgent)

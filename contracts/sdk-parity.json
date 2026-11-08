@@ -2,7 +2,7 @@
   "capabilities": {
     "api-errors": {
       "implementation": {
-        "control.go": "c882eccf34342cd0f877f606f1001fb921590f935c3a11659d9090ff8051071a",
+        "control.go": "270fa2044c252581fecf48fe8f1ddfaa0e95190a5a8f31a4e5dd741ec48d8884",
         "errors.go": "a99bbd4aef0802da98679fec8a6bf0d3f7b0cd00d6aedad8976bbaba79dd14f5"
       },
       "reason": "apiErrorFromResponse() in control.go builds every non-2xx control-plane error from one decode of the body, and problemFields() in errors.go reads APIError.Code and ProblemDetail out of it beside the whole body as Problem; StatusCode, Detail and Error() are unchanged. Run against the shared api-error vectors, each served by a loopback httptest server and read back through GetHub, the configuration-merge read and the device-flow token poll, with what GetHub produced recorded.",
@@ -35,20 +35,20 @@
     },
     "browser-login": {
       "implementation": {
-        "browser_login.go": "460e3c4248b410bffcb8983ed4b9164c5f90d7e3ae14d458bbcc2316ef47e184",
-        "control.go": "c882eccf34342cd0f877f606f1001fb921590f935c3a11659d9090ff8051071a",
+        "browser_login.go": "cfd94b4fd904a85bc3a419d769c3919ec6a5c9055389efd91055fa60e8e74691",
+        "control.go": "270fa2044c252581fecf48fe8f1ddfaa0e95190a5a8f31a4e5dd741ec48d8884",
         "device_login.go": "824d0a073e74245bcb7722c201d657714f99eaf7886f7aa0e39a9d5bf031474b",
         "errors.go": "a99bbd4aef0802da98679fec8a6bf0d3f7b0cd00d6aedad8976bbaba79dd14f5",
-        "loopback.go": "d6f03c0c4ffec669834c42b5c1277a4328f8e92dd4429b3424f91e7ffcb2c714",
+        "loopback.go": "01ee164184eeff33ccff2bea839d1827889721188b21a8908ed700c57315342f",
         "loopback_other.go": "f688246cf4c4acf0941b5426de72a6ca1e419750429b70dc6fcb73cf866de367",
         "loopback_windows.go": "d62915e3168c2bdcbce99ece131da95d4f2b5497d4fb011a457f3f40a5662529",
         "native_auth.go": "9d6b0af21bfa1614aa36c28c48dc932c69b41a0e670f4a286d983f84f18bf228"
       },
-      "reason": "BrowserLogin and InteractiveLogin on ControlPlane (browser_login.go). BrowserLogin refuses a cleartext API URL before anything is asked (requireSecureTokenExchange, native_auth.go), reads GET /v1/auth/native/config (a 404 stays the API's *APIError with a display line saying browser sign-in is not offered; a 2xx that is not a usable object is an ErrAPI error with no status; ParseNativeSignInConfig applies the endpoint, client id and S256 rules), binds 127.0.0.1:0 (tcp4, SO_EXCLUSIVEADDRUSE on Windows in loopback_windows.go) before building the URL (BrowserAuthorizationURL: the fixed parameter order, RFC 3986 encoding with a space as %20, scope left out when no non-empty scope is asked for, device_name cut to 120 code points), prints the URL or hands it to Prompt, opens it with the Opener on its own goroutine or the platform browser (openWith, control.go), and waits on the monotonic clock. loopback.go reads request heads itself rather than through net/http's server, as the reference reads them over asyncio streams: a 16 KiB cap, the request line as Latin-1, no Host required, nothing logged. classifyRequest serves GET /callback only (else 404); a missing, repeated or wrong state is a 400 and the wait goes on (subtle.ConstantTimeCompare); an error wins over a code; values are decoded as parse_qsl decodes them. The first right-state callback is accepted and the port closed; its tab is answered once the sign-in has ended, with the page headers on every answer; close waits at most 1 s for that tab, closes every other connection, and returns once every listener goroutine has. The exchange posts exactly code, code_verifier, client_id and redirect_uri to the configured token_endpoint, keeps the token through acceptToken (device_login.go) so RevokeAPIToken revokes it the same way, and takes the code, the verifier and the state out of every field of a refused exchange's *APIError. Denied and expired are the device-login types (errors.go) with a nil APIError; a callback without a code is *BrowserLoginFailedError (ErrAPI, with the page's error as Code), since Go's APIError cannot say no status. InteractiveLogin: auto signs in through the browser when CanOpenBrowser holds and the configuration is usable, and with a device login otherwise (loginWithDevice in control.go, given the Opener); browser and device force one; nothing falls back once the URL is shown. browser_login_vectors_test.go runs all 98 cases of browser-login-vectors.json and records each one: the pure sections against their functions (every callback case also through a real listener), and sign_ins and chooser for real over a loopback httptest API and a raw TCP browser, the chooser's machine set with t.Setenv and browserPlatform. browser_login_test.go covers the prints, the opener's goroutine, the listener's edges, goroutine accounting on every path and secrets in errors.",
+      "reason": "BrowserLogin and InteractiveLogin on ControlPlane (browser_login.go). BrowserLogin refuses a cleartext API URL before anything is asked (requireSecureTokenExchange, native_auth.go), reads GET /v1/auth/native/config (a 404 stays the API's *APIError with a display line saying browser sign-in is not offered; a 2xx that is not a usable object is an ErrAPI error with no status; ParseNativeSignInConfig applies the endpoint, client id and S256 rules), binds 127.0.0.1:0 (tcp4, SO_EXCLUSIVEADDRUSE on Windows in loopback_windows.go) before building the URL (BrowserAuthorizationURL: the fixed parameter order, RFC 3986 encoding with a space as %20, scope left out when no non-empty scope is asked for, device_name cut to 120 code points), prints the URL or hands it to Prompt, opens it with the Opener on its own goroutine or the platform browser (openWith, control.go), and waits on the monotonic clock. loopback.go reads request heads itself rather than through net/http's server, as the reference reads them over asyncio streams: a 16 KiB cap, the request line as Latin-1, no Host required, nothing logged. classifyRequest serves GET /callback only (else 404); a missing, repeated or wrong state is a 400 and the wait goes on (subtle.ConstantTimeCompare); an error wins over a code; values are decoded as parse_qsl decodes them. The first right-state callback is accepted and the port closed; its tab is answered once the sign-in has ended, with the page headers on every answer; close waits at most 1 s for that tab, closes every other connection, and returns once every listener goroutine has. The exchange posts exactly code, code_verifier, client_id and redirect_uri to the configured token_endpoint, keeps the token through acceptToken (device_login.go) so RevokeAPIToken revokes it the same way, and takes the code, the verifier and the state out of every field of a refused exchange's *APIError. Denied and expired are the device-login types (errors.go) with a nil APIError; a callback without a code is *BrowserLoginFailedError (ErrAPI, with the page's error as Code), since Go's APIError cannot say no status. InteractiveLogin: auto signs in through the browser when CanOpenBrowser holds and the configuration is usable, and with a device login otherwise (loginWithDevice in control.go, given the Opener); browser and device force one; nothing falls back once the URL is shown. browser_login_vectors_test.go runs all 98 cases of browser-login-vectors.json and records each one: the pure sections against their functions (every callback case also through a real listener), and sign_ins and chooser for real over a loopback httptest API and a raw TCP browser, the chooser's machine set with t.Setenv and browserPlatform. browser_login_test.go covers the prints, the opener's goroutine, the listener's edges, goroutine accounting on every path and secrets in errors. Hardening beyond the reference, none of it changing a vector's outcome (review of #90): the exchange goes through sendNoReplay (control.go), without GetBody, so the HTTP transport never sends it twice; a refused exchange's body is redacted after decoding and before its display line is cut, with any access_token, refresh_token or id_token it carries; a consent-page error carrying the state is not repeated in Code; a ctx done by the time Prompt returns opens nothing; port 0 and a token_endpoint with a malformed escape are unusable; a []string method list is read; and the listener handles at most 64 connections at once.",
       "status": "required",
       "tests": {
         "api_error_vectors_test.go": "fd85c0dc02f45d9944cfb674b9a534770109b631233080e4b312cd6f027dd5be",
-        "browser_login_test.go": "cf27f27a33185ee3a5b41f965b1078f3e6297e71203d41f2489535bf2a8bc3db",
+        "browser_login_test.go": "5a1106d7a23b914923620d8b7730493f728789053333ca25f7accdff79524c2b",
         "browser_login_vectors_test.go": "4fb68ca785bec1e7a2c4ef3bf2c77e6d86a88e533914397f27ca6ec753dc1cd3",
         "conformance_record_test.go": "a12d62d75c6a8f6ff7f606d9941bc7e81fe1658d95b6547b9934f4437b970db5",
         "home_link_vectors_test.go": "fbc11e89bffad994d29b1456fb73f828897bd3a9a8f854605c97244afa79b1bf",
@@ -61,7 +61,7 @@
     "chat-apps": {
       "implementation": {
         "chat_apps.go": "1a844e6ad71e5e10559800892c263a26950a5c75eab6d13c52ac29ab4df6d0e3",
-        "control.go": "c882eccf34342cd0f877f606f1001fb921590f935c3a11659d9090ff8051071a",
+        "control.go": "270fa2044c252581fecf48fe8f1ddfaa0e95190a5a8f31a4e5dd741ec48d8884",
         "errors.go": "a99bbd4aef0802da98679fec8a6bf0d3f7b0cd00d6aedad8976bbaba79dd14f5"
       },
       "reason": "chat_apps.go adds the owner routes under /v1/bridges to ControlPlane: ListChatAppConnectors, GetBridgeNetworks, ListBridges, CreateBridge (exactly one of Token and Secrets, refused locally otherwise; sends connector), GetBridge, UpdateBridge (only the fields set; If-Match only when ETag is set), ReplaceBridgeToken, ReplaceBridgeSecrets, ListBridgeChats, SendBridgeTestMessage, GetBridgeAvatar (bytes and content type) and DeleteBridge, answering typed models whose string enums keep unknown values. SecretValue prints [REDACTED] for every fmt verb, json.Marshal, MarshalText and slog; Reveal is called only to build the request body. APIError.Fields (errors.go) is read in apiErrorFromResponse (control.go) from the problem's fields or an object detail, strings only. chat_apps_test.go serves every route from a loopback httptest server and checks method, path, query, body and If-Match, parsing with missing optionals and unknown enum values, code/fields/plan/auth/retry-after on refusals, and that no secret reaches an error, a printed value, JSON or a log line.",
@@ -77,7 +77,7 @@
     "connection-admission": {
       "implementation": {
         "connections.go": "44e521e58188d7bc5b05348bd6db1f92eacdc7d328bce992826ecd2c2e55ced3",
-        "control.go": "c882eccf34342cd0f877f606f1001fb921590f935c3a11659d9090ff8051071a",
+        "control.go": "270fa2044c252581fecf48fe8f1ddfaa0e95190a5a8f31a4e5dd741ec48d8884",
         "errors.go": "a99bbd4aef0802da98679fec8a6bf0d3f7b0cd00d6aedad8976bbaba79dd14f5"
       },
       "reason": "WaitForAdmission in connections.go follows the Operation a create returned (BootstrapIdentityResult.Operation): ready is admitted; failed and timed_out are *AdmissionFailedError with the operation's code; no operation and 404 are admitted at once; a 5xx is ridden out; a 429 waits APIError.RetryAfter (the body's retry_after_seconds, then Retry-After, then RateLimit-Reset, read in control.go) or the poll interval when longer, and is a timeout at once when that is more than the time left; a 401/403 is the API's own *APIError (errors.Is ErrAuth), never a failed admission; any other refusal is *AdmissionFailedError whose Err keeps status, code and detail and whose ErrorCode stays empty; an unreachable API (ErrAPIUnreachable, from control.go) is returned as it is; each read is bounded by the deadline; the timeout is *AdmissionTimeoutError, errors.Is ErrConnection and ErrTimeout, ending 'it may still admit it later.'; a links.self on another origin (scheme, host, port, default ports spelled out) is refused unfetched. Run against the shared connection-admission vectors over a loopback httptest server that sends each case's headers, with {api_host}/{api_port} filled in and a closed port for an unreachable API.",
@@ -95,7 +95,7 @@
     "connection-kinds": {
       "implementation": {
         "connections.go": "44e521e58188d7bc5b05348bd6db1f92eacdc7d328bce992826ecd2c2e55ced3",
-        "control.go": "c882eccf34342cd0f877f606f1001fb921590f935c3a11659d9090ff8051071a",
+        "control.go": "270fa2044c252581fecf48fe8f1ddfaa0e95190a5a8f31a4e5dd741ec48d8884",
         "errors.go": "a99bbd4aef0802da98679fec8a6bf0d3f7b0cd00d6aedad8976bbaba79dd14f5"
       },
       "reason": "BootstrapIdentityOptions.ConnectionType sends spec.connection_type; CreateClientIdentity checks the kind comes back and, when it does not, deletes the client with its etag and returns *UnsupportedConnectionTypeError, as it does for a 422 whose detail or code, or a validation error's loc or msg (under errors, or under detail when that is a list), names the field -- never an echoed input. The other refusals stay the *APIError every call already returned and are told apart with errors.Is: APIError.Is answers ErrAuth, ErrPlan and ErrAlreadyLinked from the status, code and detail, and LinkedClientID names the client that holds the link, so no existing caller sees a different error type. GetClient and DeleteClient (connections.go): read the etag when none is given, retry once on 412, and count 404 as deleted. Run against the shared connection-kinds vectors over a loopback httptest server, with the requests the server saw recorded beside each outcome.",
@@ -112,7 +112,7 @@
     },
     "control": {
       "implementation": {
-        "control.go": "c882eccf34342cd0f877f606f1001fb921590f935c3a11659d9090ff8051071a",
+        "control.go": "270fa2044c252581fecf48fe8f1ddfaa0e95190a5a8f31a4e5dd741ec48d8884",
         "hub_skills.go": "fedcdfea962817ada46bc8281e4c70458187e2cf80b1081203e33fdd4048fa20",
         "hubs.go": "52433966442f363e691a12d973dfb3df9fdffd75fc8c3772f8fb91b937293a34",
         "native_auth.go": "9d6b0af21bfa1614aa36c28c48dc932c69b41a0e670f4a286d983f84f18bf228"
@@ -143,7 +143,7 @@
     },
     "device-login": {
       "implementation": {
-        "control.go": "c882eccf34342cd0f877f606f1001fb921590f935c3a11659d9090ff8051071a",
+        "control.go": "270fa2044c252581fecf48fe8f1ddfaa0e95190a5a8f31a4e5dd741ec48d8884",
         "device_login.go": "824d0a073e74245bcb7722c201d657714f99eaf7886f7aa0e39a9d5bf031474b",
         "errors.go": "a99bbd4aef0802da98679fec8a6bf0d3f7b0cd00d6aedad8976bbaba79dd14f5",
         "native_auth.go": "9d6b0af21bfa1614aa36c28c48dc932c69b41a0e670f4a286d983f84f18bf228"

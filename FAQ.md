@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Answer the common browser sign-in questions for 0.15.0.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Answer the common browser sign-in questions for 0.15.0, with when the URL is printed.
 
 # FAQ
 
@@ -19,8 +19,10 @@ error.
 
 ## The browser did not open. What now?
 
-The URL is always printed as well (`Opening your browser to sign in to Thalovant. If it does not open,
-visit:`); open it in a browser on the same machine. A browser on another machine cannot reach
+Unless you passed `BrowserLoginOptions.Prompt`, the URL is printed to stdout as well (`Opening your
+browser to sign in to Thalovant. If it does not open, visit:`); open it in a browser on the same
+machine. With `Prompt`, nothing is printed and the URL goes to your function instead, so show it
+there. A browser on another machine cannot reach
 `127.0.0.1` here, which is the point: a link sent to somebody else delivers nothing to the sender.
 
 ## A stray tab hit the callback. Did it end the sign-in?
@@ -30,8 +32,10 @@ is a 404. Only the first callback with the right state is accepted.
 
 ## How do I show the URL myself, or open it with my own launcher?
 
-`BrowserLoginOptions.Prompt` receives the URL instead of the printed message, and `Opener` replaces the
-platform browser (it is called on its own goroutine, so a console browser can hold it). Set
+`BrowserLoginOptions.Prompt` receives the URL instead of the printed message (nothing is printed then),
+and `Opener` replaces the platform browser (it is called on its own goroutine, so a console browser can
+hold it). `Prompt` is called on the calling goroutine and the timeout counts from its return, so return
+once the URL is shown. Set
 `OpenBrowser` to a false pointer to only show the URL.
 
 ## Which errors can a browser sign-in return?

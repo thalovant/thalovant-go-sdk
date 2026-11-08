@@ -57,6 +57,13 @@ const (
 	loopbackCloseGrace = time.Second
 	// loopbackWriteTimeout bounds writing one answer.
 	loopbackWriteTimeout = 5 * time.Second
+	// loopbackMaxConnections bounds the connections handled at once. A
+	// browser opens a handful; a local process opening them faster than
+	// the read timeout closes them would otherwise hold a file descriptor
+	// and a goroutine for each, in this process. Past the bound the listener
+	// stops accepting until one closes, and the kernel's backlog holds the
+	// rest.
+	loopbackMaxConnections = 64
 )
 
 // loopbackAnswerTimeout is how long an accepted tab waits for its page while
@@ -355,6 +362,12 @@ type loopbackListener struct {
 	signedIn   bool
 	// goroutines counts the accept loop and every connection's handler.
 	goroutines sync.WaitGroup
+	// slots holds one token for each connection being handled, at most
+	// loopbackMaxConnections.
+	slots chan struct{}
+	// stopped is closed by close, so that an accept loop waiting for a slot
+	// returns.
+	stopped chan struct{}
 
 	mu    sync.Mutex
 	conns map[net.Conn]struct{}
@@ -371,6 +384,8 @@ func newLoopbackListener(state string) *loopbackListener {
 		accepted: make(chan *loopbackCallback, 1),
 		answer:   make(chan struct{}),
 		conns:    map[net.Conn]struct{}{},
+		slots:    make(chan struct{}, loopbackMaxConnections),
+		stopped:  make(chan struct{}),
 	}
 }
 
@@ -394,12 +409,20 @@ func (l *loopbackListener) start() (int, error) {
 	return address.Port, nil
 }
 
-// serve accepts connections until the listener is closed.
+// serve accepts connections until the listener is closed, at most
+// loopbackMaxConnections handled at once: it takes a slot before each
+// accept, and the connection's handler gives it back.
 func (l *loopbackListener) serve() {
 	defer l.goroutines.Done()
 	for {
+		select {
+		case l.slots <- struct{}{}:
+		case <-l.stopped:
+			return
+		}
 		conn, err := l.listener.Accept()
 		if err != nil {
+			<-l.slots
 			if errors.Is(err, net.ErrClosed) || l.isClosing() {
 				return
 			}
@@ -441,6 +464,8 @@ func (l *loopbackListener) untrack(conn net.Conn) {
 // to wait. One connection's failure is that connection's alone.
 func (l *loopbackListener) handle(conn net.Conn) {
 	defer l.goroutines.Done()
+	// Given back once the connection is closed (untrack runs before this).
+	defer func() { <-l.slots }()
 	if !l.track(conn) {
 		_ = conn.Close()
 		return
@@ -573,6 +598,9 @@ func (l *loopbackListener) finish(signedIn bool) {
 func (l *loopbackListener) close() {
 	l.finish(false)
 	l.mu.Lock()
+	if !l.closing {
+		close(l.stopped)
+	}
 	l.closing = true
 	done := l.acceptedDone
 	l.mu.Unlock()

@@ -1,8 +1,11 @@
 package thalovant
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -82,7 +85,13 @@ type BrowserLoginOptions struct {
 	// the URL is shown; DefaultBrowserLoginTimeout when zero or negative.
 	Timeout time.Duration
 	// Prompt, when set, receives the authorization URL in place of the
-	// message printed to stdout. It does not stop the browser from opening.
+	// message printed to stdout: nothing is printed, so show the URL there.
+	// It does not stop the browser from opening. It is called on the calling
+	// goroutine, as the printed message is written (and as the Python
+	// reference calls its prompt), so a panic in it reaches the caller. The
+	// listener already accepts callbacks while it runs; the timeout counts
+	// from when it returns, so it should return once the URL is shown. A ctx
+	// done by then ends the sign-in before the browser is opened.
 	Prompt func(url string)
 	// Opener opens the URL in place of the platform's browser (open on
 	// macOS, url.dll's FileProtocolHandler on Windows, xdg-open elsewhere). It
@@ -224,14 +233,23 @@ func (e *browserExpiredError) Unwrap() error { return e.expired }
 //     access_token is an ErrAPI error with no status;
 //   - an API without browser sign-in answers the configuration 404, an
 //     *APIError; InteractiveLogin falls back to a device login for it;
-//   - ctx done while waiting: ctx.Err().
+//   - ctx done while waiting, or by the time Prompt returns (the browser is
+//     then not opened): ctx.Err().
 //
 // The API URL must be https, or http on a loopback address while developing:
 // a code and its verifier never cross the network in cleartext, so anything
 // else is refused before anything is asked or opened. Neither the code, the
-// verifier, the state nor the token appears in an error. Every goroutine the
-// sign-in runs has ended, and the port is closed, when BrowserLogin returns;
-// only opts.Opener's own call may still be running.
+// verifier, the state nor a token appears in an error. The exchange is sent
+// at most once: its body is never replayed by the HTTP transport, since a
+// code presented twice revokes the token the first exchange minted.
+//
+// When BrowserLogin returns, the port is closed and every goroutine the
+// loopback listener ran (its accept loop and one per connection) has
+// returned. Two may still be running, neither of them the listener's: a
+// caller's own Opener call, which runs on its own goroutine and is not
+// waited for, and, with no Opener, the platform launcher's wait for the
+// process it started (open, xdg-open or rundll32), which ends when that
+// process exits, as it always has for device login.
 func (c *ControlPlane) BrowserLogin(ctx context.Context, opts BrowserLoginOptions) (map[string]any, error) {
 	// Before anything is asked or opened.
 	if err := requireSecureTokenExchange(c.APIURL); err != nil {
@@ -362,7 +380,9 @@ func (c *ControlPlane) browserLogin(ctx context.Context, config NativeSignInConf
 		Scopes:        opts.Scopes,
 		DeviceName:    deviceName,
 	})
-	presentBrowserLogin(authorizationURL, opts.Prompt, opts.OpenBrowser == nil || *opts.OpenBrowser, opts.Opener)
+	if err := presentBrowserLogin(ctx, authorizationURL, opts.Prompt, opts.OpenBrowser == nil || *opts.OpenBrowser, opts.Opener); err != nil {
+		return nil, err
+	}
 	timeout := opts.Timeout
 	if timeout <= 0 {
 		timeout = DefaultBrowserLoginTimeout
@@ -379,7 +399,9 @@ func (c *ControlPlane) browserLogin(ctx context.Context, config NativeSignInConf
 		return nil, &browserDeniedError{denied: &DeviceLoginDeniedError{}}
 	case callbackFailed:
 		code := ""
-		if problemCodePattern.MatchString(callback.errorParam) {
+		// Never repeated when it carries the state: a page that echoes the
+		// state back must not put it in an error.
+		if problemCodePattern.MatchString(callback.errorParam) && !strings.Contains(callback.errorParam, state) {
 			code = callback.errorParam
 		}
 		return nil, &BrowserLoginFailedError{Code: code}
@@ -400,8 +422,11 @@ func (c *ControlPlane) browserLogin(ctx context.Context, config NativeSignInConf
 var problemCodePattern = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,80}$`)
 
 // presentBrowserLogin shows the URL, since opening a browser can fail
-// without a word, and opens it.
-func presentBrowserLogin(target string, prompt func(string), open bool, opener func(string)) {
+// without a word, and opens it. A ctx done by the time the URL is shown -- a
+// Prompt can take a while, and can cancel the sign-in itself -- ends the
+// sign-in there, so no browser is sent to a consent page whose callback is
+// already closing.
+func presentBrowserLogin(ctx context.Context, target string, prompt func(string), open bool, opener func(string)) error {
 	switch {
 	case prompt != nil:
 		prompt(target)
@@ -410,9 +435,13 @@ func presentBrowserLogin(target string, prompt func(string), open bool, opener f
 	default:
 		fmt.Printf("To sign in to Thalovant, visit:\n%s\n", target)
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if open {
 		openWith(opener, target)
 	}
+	return nil
 }
 
 // nativeSignInConfig reads GET /v1/auth/native/config: where to send the
@@ -447,11 +476,13 @@ func (c *ControlPlane) nativeSignInConfig(ctx context.Context) (NativeSignInConf
 //   - an authorization_endpoint that is not https (or http on localhost,
 //     127.0.0.1 or ::1), has no host, carries credentials, a query (or a bare
 //     ?), a fragment, whitespace or control characters, or a port no browser
-//     can open;
+//     can open (0, or above 65535);
 //   - a token_endpoint that is not a path on the API: one leading /, not //,
-//     and no ?, #, \ or whitespace;
+//     no ?, #, \ or whitespace, and no malformed percent escape (a request
+//     to it could not be built after the person approved);
 //   - an sdk_client_id that is not 1-64 of A-Z a-z 0-9 . _ -;
-//   - code_challenge_methods_supported that is not a list holding "S256".
+//   - code_challenge_methods_supported that is not a list holding "S256"
+//     ([]any as decoded from JSON, or []string from a caller).
 //
 // A nil payload is not an object. Other members are ignored, and
 // loopback_redirect_uri is never used: the redirect is LoopbackRedirectURI.
@@ -475,11 +506,11 @@ func ParseNativeSignInConfig(payload map[string]any) (NativeSignInConfig, error)
 		return unusable("no usable sdk_client_id")
 	}
 	offersS256 := false
-	if methods, ok := payload["code_challenge_methods_supported"].([]any); ok {
-		for _, method := range methods {
-			if method == "S256" {
-				offersS256 = true
-			}
+	// anySlice reads a decoded []any and a caller's []string alike; anything
+	// that is not a list, "S256" on its own included, reads as none.
+	for _, method := range anySlice(payload["code_challenge_methods_supported"]) {
+		if method == "S256" {
+			offersS256 = true
 		}
 	}
 	if !offersS256 {
@@ -503,7 +534,7 @@ func unsafeInURL(r rune) bool {
 
 // usableAuthorizationEndpoint: https, or http on a loopback host while
 // developing; a host; no credentials, query, fragment, whitespace or control
-// characters; a port from 0 to 65535 when one is given.
+// characters; a port from 1 to 65535 when one is given.
 func usableAuthorizationEndpoint(value string) bool {
 	if value == "" || strings.IndexFunc(value, unsafeInURL) >= 0 || strings.ContainsAny(value, "?#") {
 		return false
@@ -525,7 +556,10 @@ func usableAuthorizationEndpoint(value string) bool {
 	return false
 }
 
-// validPort is "" or a decimal port from 0 to 65535.
+// validPort is "" or a decimal port from 1 to 65535. Port 0 is not one a
+// browser can open, so an API naming it has no usable dashboard and
+// LoginMethodAuto signs in with a device login instead of waiting out a
+// consent page that never loads.
 func validPort(port string) bool {
 	if port == "" {
 		return true
@@ -540,16 +574,23 @@ func validPort(port string) bool {
 		}
 		number = number*10 + int(digit-'0')
 	}
-	return number <= 65535
+	return number >= 1 && number <= 65535
 }
 
 // usableTokenEndpoint: a path on the API, with one leading slash and no
-// query, fragment, backslash, whitespace or control character.
+// query, fragment, backslash, whitespace or control character, that a
+// request can be built for: a malformed percent escape ("/v1/%zz") would
+// otherwise only fail once the person had approved, too late for
+// LoginMethodAuto to sign in with a device login instead.
 func usableTokenEndpoint(value string) bool {
 	if !strings.HasPrefix(value, "/") || strings.HasPrefix(value, "//") {
 		return false
 	}
-	return strings.IndexFunc(value, func(r rune) bool { return strings.ContainsRune(`?#\`, r) || unsafeInURL(r) }) < 0
+	if strings.IndexFunc(value, func(r rune) bool { return strings.ContainsRune(`?#\`, r) || unsafeInURL(r) }) >= 0 {
+		return false
+	}
+	_, err := url.ParseRequestURI(value)
+	return err == nil
 }
 
 // NewState returns an OAuth state: 24 random bytes (192 bits) from the
@@ -694,13 +735,14 @@ func CanOpenBrowser(env map[string]string, platform string) bool {
 }
 
 // exchangeBrowserCode sends POST {token_endpoint} with exactly code,
-// code_verifier, client_id and redirect_uri, and keeps the token.
+// code_verifier, client_id and redirect_uri, once, and keeps the token.
 //
 // Read as a device-login token answer is: a 2xx whose body is not a JSON
 // object with an access_token is an error with no status -- the API did not
 // refuse, its answer could not be used -- and any other failure carries the
 // api-errors fields (invalid_grant for every way an exchange fails), with
-// the code, the verifier and the state taken out.
+// the code, the verifier, the state and any token the answer carried taken
+// out.
 func (c *ControlPlane) exchangeBrowserCode(ctx context.Context, config NativeSignInConfig, code, verifier, redirectURI, state string) (map[string]any, error) {
 	if err := requireSecureTokenExchange(c.APIURL); err != nil {
 		return nil, err
@@ -711,15 +753,17 @@ func (c *ControlPlane) exchangeBrowserCode(ctx context.Context, config NativeSig
 		"client_id":     config.SDKClientID,
 		"redirect_uri":  redirectURI,
 	}
-	status, raw, header, err := c.send(ctx, http.MethodPost, config.TokenEndpoint, payload, nil, false)
+	// At most once: a code presented twice revokes the token the first
+	// exchange minted (RFC 9700), so the transport may not replay this body.
+	status, raw, header, err := c.sendNoReplay(ctx, http.MethodPost, config.TokenEndpoint, payload)
 	if err != nil {
 		// send never keeps the transport's own error, which could name the
 		// request.
 		return nil, err
 	}
-	hidden := []string{code, verifier, state}
 	if status < 200 || status > 299 {
-		return nil, withoutSecrets(apiErrorFromResponse(status, redactAll(raw, hidden), header), hidden)
+		clean, hidden := redactExchangeAnswer(raw, []string{code, verifier, state})
+		return nil, withoutSecrets(apiErrorFromResponse(status, clean, header), hidden)
 	}
 	token, decodeErr := decodeControlJSON(raw)
 	if decodeErr != nil {
@@ -734,16 +778,93 @@ func (c *ControlPlane) exchangeBrowserCode(ctx context.Context, config NativeSig
 // redactedSecret replaces a secret an API echoed back.
 const redactedSecret = "[redacted]"
 
-// redactAll takes every value in hidden out of a body before it is read, so
-// a display line cut short cannot keep half of one.
+// answerTokenKeys name the members whose values are credentials wherever an
+// error answer carries them.
+var answerTokenKeys = map[string]bool{"access_token": true, "refresh_token": true, "id_token": true}
+
+// redactExchangeAnswer takes the secrets out of a refused exchange's body
+// before the error is built from it, and answers the secrets it found.
+//
+// A JSON body is decoded first, so that a secret it spells with escapes
+// ("\u0061...") is matched as the text it decodes to, and is redacted before
+// the display line is joined and cut at its limit, where half a secret would
+// no longer match. Every value under access_token, refresh_token or id_token
+// is a secret too, wherever it sits: an answer that refuses the exchange has
+// no business carrying one. Numbers keep their exact spelling. A body that
+// is not JSON is redacted as text; it never reaches the display line.
+func redactExchangeAnswer(raw []byte, hidden []string) ([]byte, []string) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var body any
+	if err := decoder.Decode(&body); err != nil {
+		return redactAll(raw, hidden), hidden
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		// Trailing data: not one JSON value, so not a problem body either.
+		return redactAll(raw, hidden), hidden
+	}
+	found := append([]string{}, hidden...)
+	var collect func(any)
+	collect = func(item any) {
+		switch typed := item.(type) {
+		case map[string]any:
+			for key, member := range typed {
+				if text, ok := member.(string); ok && answerTokenKeys[key] && text != "" {
+					found = append(found, text)
+				}
+				collect(member)
+			}
+		case []any:
+			for _, member := range typed {
+				collect(member)
+			}
+		}
+	}
+	collect(body)
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(scrubSecrets(body, found)); err != nil {
+		return redactAll(raw, found), found
+	}
+	return bytes.TrimRight(out.Bytes(), "\n"), found
+}
+
+// redactAll takes every value in hidden out of a body as text.
 func redactAll(raw []byte, hidden []string) []byte {
-	text := string(raw)
+	return []byte(scrubText(string(raw), hidden))
+}
+
+// scrubText replaces every value in hidden within text.
+func scrubText(text string, hidden []string) string {
 	for _, value := range hidden {
 		if value != "" {
 			text = strings.ReplaceAll(text, value, redactedSecret)
 		}
 	}
-	return []byte(text)
+	return text
+}
+
+// scrubSecrets is item with every value in hidden taken out of every string
+// in it, the keys of its objects included.
+func scrubSecrets(item any, hidden []string) any {
+	switch typed := item.(type) {
+	case string:
+		return scrubText(typed, hidden)
+	case map[string]any:
+		clean := make(map[string]any, len(typed))
+		for key, member := range typed {
+			clean[scrubText(key, hidden)] = scrubSecrets(member, hidden)
+		}
+		return clean
+	case []any:
+		clean := make([]any, len(typed))
+		for index, member := range typed {
+			clean[index] = scrubSecrets(member, hidden)
+		}
+		return clean
+	}
+	return item
 }
 
 // withoutSecrets is apiErr with every value in hidden taken out of every
@@ -752,45 +873,17 @@ func redactAll(raw []byte, hidden []string) []byte {
 // verifier to whoever logs the error. The returned copy is the only error
 // that leaves; nothing keeps the original.
 func withoutSecrets(apiErr *APIError, hidden []string) *APIError {
-	scrubText := func(text string) string {
-		for _, value := range hidden {
-			if value != "" {
-				text = strings.ReplaceAll(text, value, redactedSecret)
-			}
-		}
-		return text
-	}
-	var scrub func(any) any
-	scrub = func(item any) any {
-		switch typed := item.(type) {
-		case string:
-			return scrubText(typed)
-		case map[string]any:
-			clean := make(map[string]any, len(typed))
-			for key, member := range typed {
-				clean[scrubText(key)] = scrub(member)
-			}
-			return clean
-		case []any:
-			clean := make([]any, len(typed))
-			for index, member := range typed {
-				clean[index] = scrub(member)
-			}
-			return clean
-		}
-		return item
-	}
 	clean := *apiErr
-	clean.Detail = scrubText(apiErr.Detail)
-	clean.Code = scrubText(apiErr.Code)
-	clean.ProblemDetail = scrubText(apiErr.ProblemDetail)
+	clean.Detail = scrubText(apiErr.Detail, hidden)
+	clean.Code = scrubText(apiErr.Code, hidden)
+	clean.ProblemDetail = scrubText(apiErr.ProblemDetail, hidden)
 	if apiErr.Problem != nil {
-		clean.Problem, _ = scrub(apiErr.Problem).(map[string]any)
+		clean.Problem, _ = scrubSecrets(apiErr.Problem, hidden).(map[string]any)
 	}
 	if apiErr.Fields != nil {
 		clean.Fields = make([]string, len(apiErr.Fields))
 		for index, field := range apiErr.Fields {
-			clean.Fields[index] = scrubText(field)
+			clean.Fields[index] = scrubText(field, hidden)
 		}
 	}
 	return &clean

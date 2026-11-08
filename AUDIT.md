@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Audit browser sign-in (BrowserLogin, InteractiveLogin, the loopback listener) for 0.15.0.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Audit browser sign-in for 0.15.0, with the fixes from CodeRabbit's review of #90.
 
 ## 2026-11-06 — CVE-2026-78661 in golang.org/x/net
 
@@ -8,7 +8,7 @@ HIGH, found by the dependency scan in infra-manifests' `contracts` gate at v0.61
 
 Known issues, technical debt and their status, from test runs and code reading. Each entry names the code it concerns.
 
-Evidence: `go test -race -count=1 -timeout=5m ./...` on 2026-11-08 (Go 1.26.10, linux/amd64): 426
+Evidence: `go test -race -count=1 -timeout=5m ./...` on 2026-11-08 (Go 1.26.10, linux/amd64): 433
 top-level tests pass, 0 fail, 1 skipped (`TestNoiseInteropAgainstLiveHub`, which needs a live hub).
 `gofmt -l .` is empty and `go vet ./...` is clean for linux, windows and darwin. The parity check
 (`check-sdk-parity.py --consumer thalovant-go-sdk`) verifies the acceptance record against the
@@ -41,6 +41,38 @@ reference's.
 - Device login is unchanged: `LoginWithBrowser` delegates to `loginWithDevice` (`control.go`), and
   `device-login-vectors.json` and the existing `TestControlPlaneLoginWithBrowser*` tests pass
   unchanged; every other recorded vector result is identical to the committed record.
+
+## Fixed from the review of #90 (CodeRabbit, 2026-11-08)
+
+Each with a test that fails without the fix (checked by reverting the fix and re-running it):
+
+- **The exchange could be replayed by the HTTP transport.** HTTP/2 replays a written body on a
+  stream the server reset with `PROTOCOL_ERROR` (golang/go#47635), and a code presented twice
+  revokes the first token. The exchange now goes through `sendNoReplay` (`control.go`), with no
+  `GetBody` (`TestTheExchangeIsNeverReplayedByTheTransport`).
+- **A refused exchange could keep a token, or half an escaped secret.** `redactExchangeAnswer`
+  (`browser_login.go`) decodes the body, redacts the code, the verifier, the state and every
+  `access_token`/`refresh_token`/`id_token` value, and only then is the display line built and cut
+  (`TestARefusedExchangeKeepsNoTokenAndNoHalfSecret`).
+- **A consent-page `error` carrying the state was repeated in `BrowserLoginFailedError.Code`**
+  (`browserLogin`; `TestAnErrorThatCarriesTheStateIsNotRepeated`). The Python reference repeats it
+  too (`_browser_login` in `control.py`).
+- **A `Prompt` that cancelled the sign-in still opened the browser** (`presentBrowserLogin`;
+  `TestAPromptThatCancelsTheSignInOpensNothing`).
+- **Unbounded connections.** The listener handles at most `loopbackMaxConnections` (64) at once
+  (`loopback.go`, `serve`; `TestTheListenerHandlesABoundedNumberOfConnections`).
+- **Configurations no request can use were usable:** an authorization endpoint on port 0, a token
+  endpoint with a malformed escape (`/v1/%zz`), and a `[]string` method list was refused
+  (`validPort`, `usableTokenEndpoint`, `ParseNativeSignInConfig`; `TestEndpointsNoRequestCanUseAreUnusable`,
+  `TestTheConfigurationParserReadsATypedMethodList`). The Python reference accepts port 0 and the
+  malformed escape.
+- **Documentation:** the goroutine guarantee now names the platform launcher's wait, the CHANGELOG
+  says a connection closing before a whole head is closed without an answer, and the README and
+  FAQ say the URL is not printed when `Prompt` is set.
+
+Not changed, with the reason on the thread: the accepted tab's 60-second wait for its page (the
+porting brief bounds it), and `Prompt` running on the calling goroutine (the reference calls its
+prompt synchronously, as the print it replaces).
 
 ## Verified in 0.14.0 (chat apps)
 

@@ -934,3 +934,244 @@ func TestNoGoroutineOutlivesTheSignInOnAnyPath(t *testing.T) {
 		assertNoLoopbackGoroutines(t)
 	})
 }
+
+// -- review follow-ups (#90) ------------------------------------------------------------
+
+func TestAPromptThatCancelsTheSignInOpensNothing(t *testing.T) {
+	api := newUnitBrowserAPI(t, nil)
+	plane := NewControlPlane(api.server.URL, "")
+	swapOpenBrowser(t, func(string) error { t.Error("the platform browser was opened"); return nil })
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var port int
+	_, err := plane.BrowserLogin(ctx, BrowserLoginOptions{
+		Prompt: func(target string) {
+			port, _, _ = urlParts(t, target)
+			cancel()
+		},
+		Opener: func(string) { t.Error("the opener was called after the sign-in was cancelled") },
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("err = %v, want the cancellation", err)
+	}
+	if port == 0 || !refusedPort(port) {
+		t.Error("the port still listens")
+	}
+	if sent := api.sent(); strings.Join(sent, ",") != "GET /v1/auth/native/config" {
+		t.Errorf("requests = %v", sent)
+	}
+	assertNoLoopbackGoroutines(t)
+}
+
+func TestAnErrorThatCarriesTheStateIsNotRepeated(t *testing.T) {
+	for name, errorParam := range map[string]func(state string) string{
+		"the state itself":      func(state string) string { return state },
+		"the state inside one":  func(state string) string { return "x:" + state + ":y" },
+		"a well-formed one too": func(string) string { return "server_error" },
+	} {
+		t.Run(name, func(t *testing.T) {
+			api := newUnitBrowserAPI(t, nil)
+			plane := NewControlPlane(api.server.URL, "")
+			open := false
+			opened, done := startSignIn(context.Background(), plane, BrowserLoginOptions{OpenBrowser: &open})
+			port, state, _ := urlParts(t, receive(t, opened, "the URL"))
+			value := errorParam(state)
+			browserTab(t, port, "GET", "/callback?error="+url.QueryEscape(value)+"&state="+state, nil)
+			err := receive(t, done, "the sign-in").err
+			var failed *BrowserLoginFailedError
+			if !errors.As(err, &failed) {
+				t.Fatalf("err = %v", err)
+			}
+			for form, text := range displayForms(err) {
+				if strings.Contains(text, state) {
+					t.Errorf("%s carries the state", form)
+				}
+			}
+			if strings.Contains(value, state) {
+				if failed.Code != "" {
+					t.Errorf("Code = %q, want none", failed.Code)
+				}
+			} else if failed.Code != value {
+				t.Errorf("Code = %q, want %q", failed.Code, value)
+			}
+		})
+	}
+}
+
+func TestTheConfigurationParserReadsATypedMethodList(t *testing.T) {
+	withMethods := func(methods any) map[string]any {
+		payload := map[string]any{}
+		for key, value := range unitNativeConfig {
+			payload[key] = value
+		}
+		payload["code_challenge_methods_supported"] = methods
+		return payload
+	}
+	if _, err := ParseNativeSignInConfig(withMethods([]string{"plain", "S256"})); err != nil {
+		t.Errorf("[]string{plain, S256} is unusable: %v", err)
+	}
+	for _, methods := range []any{[]string{"plain"}, "S256", []any{"s256"}, nil} {
+		if _, err := ParseNativeSignInConfig(withMethods(methods)); !errors.Is(err, ErrAPI) {
+			t.Errorf("%#v is usable", methods)
+		}
+	}
+}
+
+func TestEndpointsNoRequestCanUseAreUnusable(t *testing.T) {
+	configWith := func(key, value string) map[string]any {
+		payload := map[string]any{}
+		for name, member := range unitNativeConfig {
+			payload[name] = member
+		}
+		payload[key] = value
+		return payload
+	}
+	for key, values := range map[string][]string{
+		"authorization_endpoint": {"https://dash.thalovant.com:0/authorize", "https://dash.thalovant.com:00/authorize"},
+		"token_endpoint":         {"/v1/%zz", "/v1/auth/native/token%", "/v1/%G0"},
+	} {
+		for _, value := range values {
+			if _, err := ParseNativeSignInConfig(configWith(key, value)); !errors.Is(err, ErrAPI) {
+				t.Errorf("%s %q is usable", key, value)
+			}
+		}
+	}
+	for key, value := range map[string]string{
+		"authorization_endpoint": "https://dash.thalovant.com:1/authorize",
+		"token_endpoint":         "/v1/auth/native%2Ftoken",
+	} {
+		if _, err := ParseNativeSignInConfig(configWith(key, value)); err != nil {
+			t.Errorf("%s %q is unusable: %v", key, value, err)
+		}
+	}
+}
+
+// replayRecorder notes, for each request, whether the transport could send
+// its body a second time.
+type replayRecorder struct {
+	mu        sync.Mutex
+	rewinds   map[string]bool
+	transport http.RoundTripper
+}
+
+func (r *replayRecorder) RoundTrip(request *http.Request) (*http.Response, error) {
+	r.mu.Lock()
+	r.rewinds[request.Method+" "+request.URL.Path] = request.GetBody != nil
+	r.mu.Unlock()
+	return r.transport.RoundTrip(request)
+}
+
+func TestTheExchangeIsNeverReplayedByTheTransport(t *testing.T) {
+	api := newUnitBrowserAPI(t, nil)
+	plane := NewControlPlane(api.server.URL, "")
+	recorder := &replayRecorder{rewinds: map[string]bool{}, transport: http.DefaultTransport}
+	plane.HTTPClient = &http.Client{Transport: recorder}
+	open := false
+	opened, done := startSignIn(context.Background(), plane, BrowserLoginOptions{OpenBrowser: &open})
+	port, state, _ := urlParts(t, receive(t, opened, "the URL"))
+	browserTab(t, port, "GET", "/callback?code=c&state="+state, nil)
+	if outcome := receive(t, done, "the sign-in"); outcome.err != nil {
+		t.Fatal(outcome.err)
+	}
+	// Any other request with a body keeps its GetBody, so the transport's
+	// usual retries are unchanged there.
+	_, _ = plane.BeginDeviceLogin(context.Background(), []string{"hubs:read"}, "unit")
+	recorder.mu.Lock()
+	defer recorder.mu.Unlock()
+	if rewind, sent := recorder.rewinds["POST /v1/auth/native/token"]; !sent || rewind {
+		t.Errorf("the exchange was sent %v with a rewindable body %v, want sent once without", sent, rewind)
+	}
+	if !recorder.rewinds["POST /v1/auth/device/authorize"] {
+		t.Error("another POST lost its rewindable body")
+	}
+}
+
+func TestARefusedExchangeKeepsNoTokenAndNoHalfSecret(t *testing.T) {
+	const code = "secret-code-value-abcdefghijklmnop"
+	escaped := func(text string) string {
+		var out strings.Builder
+		for _, r := range text {
+			fmt.Fprintf(&out, `\u%04x`, r)
+		}
+		return out.String()
+	}
+	for name, answer := range map[string]string{
+		// A token in a refusal, at the top, nested, and in the sentence.
+		"a token in the answer": `{"detail":"invalid_grant","access_token":"tvpat_leaked_in_a_refusal","error_description":"was tvpat_leaked_in_a_refusal","nested":{"refresh_token":"rt_leaked","items":["rt_leaked"]}}`,
+		// The code spelled with escapes, placed across the display limit.
+		"an escaped code across the limit": `{"detail":"` + strings.Repeat("x", 240) + " " + escaped(code) + `"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Path == "/v1/auth/native/config" {
+					_ = json.NewEncoder(w).Encode(unitNativeConfig)
+					return
+				}
+				w.WriteHeader(400)
+				_, _ = io.WriteString(w, answer)
+			}))
+			defer server.Close()
+			plane := NewControlPlane(server.URL, "")
+			open := false
+			opened, done := startSignIn(context.Background(), plane, BrowserLoginOptions{OpenBrowser: &open})
+			port, state, _ := urlParts(t, receive(t, opened, "the URL"))
+			browserTab(t, port, "GET", "/callback?code="+code+"&state="+state, nil)
+			err := receive(t, done, "the sign-in").err
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != 400 {
+				t.Fatalf("err = %v", err)
+			}
+			problem, _ := json.Marshal(apiErr.Problem)
+			shown := displayForms(err)
+			shown["%#v"] = fmt.Sprintf("%#v", err)
+			shown["Problem"] = string(problem)
+			shown["ProblemDetail"] = apiErr.ProblemDetail
+			for form, text := range shown {
+				for _, secret := range []string{"tvpat_leaked_in_a_refusal", "rt_leaked", code[:8], state} {
+					if strings.Contains(text, secret) {
+						t.Errorf("%s carries %q", form, secret)
+					}
+				}
+			}
+			if plane.AccessToken != "" {
+				t.Error("a refused exchange kept a token")
+			}
+		})
+	}
+}
+
+func TestTheListenerHandlesABoundedNumberOfConnections(t *testing.T) {
+	listener := newLoopbackListener("the-state")
+	port, err := listener.start()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// More connections than the bound, none of them sending anything.
+	var idle []net.Conn
+	for range loopbackMaxConnections + 6 {
+		conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			t.Fatal(err)
+		}
+		idle = append(idle, conn)
+	}
+	waitForConnections(t, listener, loopbackMaxConnections)
+	time.Sleep(100 * time.Millisecond)
+	listener.mu.Lock()
+	held := len(listener.conns)
+	listener.mu.Unlock()
+	if held != loopbackMaxConnections {
+		t.Fatalf("the listener handles %d connections, want at most %d", held, loopbackMaxConnections)
+	}
+	// Each one that closes makes room for one that waited.
+	for _, conn := range idle {
+		_ = conn.Close()
+	}
+	answer := browserTab(t, port, "GET", "/callback?code=c&state=the-state", func() { listener.finish(true) })
+	if answer.status != 200 || !strings.Contains(answer.body, loopbackSignedInText) {
+		t.Errorf("the tab got %d %q once the idle connections closed", answer.status, answer.body)
+	}
+	listener.close()
+	assertNoLoopbackGoroutines(t)
+}
