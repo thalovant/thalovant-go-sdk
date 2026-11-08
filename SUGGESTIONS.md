@@ -1,6 +1,34 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Propose shared usual-form vectors after fixing UsualForm's drift from the reference.
+Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Propose follow-ups to browser sign-in (0.15.0), against the final reference digest.
 
 # Suggestions
+
+## A typed result for the sign-ins
+
+- **Problem:** `BrowserLogin`, `InteractiveLogin` and `LoginWithBrowser` answer the raw token map
+  (`map[string]any`), as the porting brief asks for this round, so a caller re-reads
+  `access_token`, `scopes`, `expires_at` and `ai_disclosure` by hand. `PollDeviceLogin` already
+  answers an `*APIToken`.
+- **Proposal:** once the reference adds `ai_disclosure` to its token type, add
+  `BrowserLoginToken`-style typed variants (or an `APIToken.AIDisclosure`) beside the map ones,
+  without changing the existing signatures.
+- **Impact:** low effort; fewer field-name mistakes in CLIs.
+
+## Retire the older reference digest after the Python merge
+
+- **Problem:** `contracts/sdk-parity.json` accepts both `57c7e71f6456…` and `6dfb3bb31ac7…` during
+  the browser-login rollout.
+- **Proposal:** once thalovant-python-sdk#113 is on `main`, drop the older digest in a small
+  follow-up and re-run the parity check.
+- **Impact:** trivial; keeps the acceptance record honest about what it reviewed.
+
+## Document browser sign-in on docs.thalovant.com
+
+- **Problem:** the README's "Signing in through the browser" section is the only prose for
+  `InteractiveLogin` and `BrowserLogin`; the Go page on docs.thalovant.com still describes device
+  login as the way to sign in without a password.
+- **Proposal:** add the chooser, the browser rule, the options and the errors to the Go SDK page in
+  the same release train (AGENTS.md asks for it).
+- **Impact:** low effort; owner or docs-repository step.
 
 ## Bound control-plane response bodies
 

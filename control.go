@@ -313,6 +313,14 @@ type DeviceLoginOptions struct {
 // *DeviceLoginExpiredError), and ErrTimeout respectively. BeginDeviceLogin and
 // PollDeviceLogin are the same flow one step at a time.
 func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOptions) (map[string]any, error) {
+	return c.loginWithDevice(ctx, opts, nil)
+}
+
+// loginWithDevice is LoginWithBrowser opening the verification page with
+// opener, or with the platform's browser when opener is nil (openWith).
+// InteractiveLogin passes its Opener here when it falls back to a device
+// login.
+func (c *ControlPlane) loginWithDevice(ctx context.Context, opts DeviceLoginOptions, opener func(string)) (map[string]any, error) {
 	grant, err := c.request(ctx, http.MethodPost, "/v1/auth/device/authorize", deviceAuthorizePayload(opts), nil, false)
 	if err != nil {
 		return nil, err
@@ -330,7 +338,7 @@ func (c *ControlPlane) LoginWithBrowser(ctx context.Context, opts DeviceLoginOpt
 	if opts.OpenBrowser == nil || *opts.OpenBrowser {
 		if completeURI := authorization.VerificationURIComplete; completeURI != "" {
 			// Browser availability is best-effort; a headless host is fine.
-			_ = openBrowser(completeURI)
+			openWith(opener, completeURI)
 		}
 	}
 
@@ -394,6 +402,18 @@ var openBrowser = func(target string) error {
 	}
 	go func() { _ = cmd.Wait() }()
 	return nil
+}
+
+// openWith opens target with the caller's opener, on a goroutine of its own
+// since a console browser can hold the call until it exits, or with the
+// platform's browser (openBrowser), which only starts the process and
+// returns. A failure changes nothing: the URL was already shown.
+func openWith(opener func(string), target string) {
+	if opener != nil {
+		go opener(target)
+		return
+	}
+	_ = openBrowser(target)
 }
 
 // validateBrowserURL rejects option-like targets, local files, executable URI
@@ -1219,6 +1239,24 @@ func (c *ControlPlane) send(ctx context.Context, method string, path string, pay
 // sendWithin is send with the response body capped at limit bytes (0 for no
 // cap). A body over the cap is an *APIError, never silently shortened.
 func (c *ControlPlane) sendWithin(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool, limit int64) (int, []byte, http.Header, error) {
+	return c.sendRequest(ctx, method, path, payload, headers, auth, limit, true)
+}
+
+// sendNoReplay is send, unauthenticated, for a request the API must receive
+// at most once: the browser sign-in's code exchange, whose code is
+// single-use. Its body cannot be rewound (no GetBody), so the HTTP transport
+// never sends it twice. HTTP/2 otherwise replays a body it has written on a
+// stream the server reset with PROTOCOL_ERROR (golang/go#47635), which the
+// API may have processed. A request that fails before any of its body was
+// read is still retried on a new connection; one that fails after is an
+// error, and the person signs in again.
+func (c *ControlPlane) sendNoReplay(ctx context.Context, method string, path string, payload map[string]any) (int, []byte, http.Header, error) {
+	return c.sendRequest(ctx, method, path, payload, nil, false, 0, false)
+}
+
+// sendRequest is sendWithin; replayable false leaves the request without
+// GetBody (sendNoReplay).
+func (c *ControlPlane) sendRequest(ctx context.Context, method string, path string, payload map[string]any, headers map[string]string, auth bool, limit int64, replayable bool) (int, []byte, http.Header, error) {
 	var body io.Reader
 	if payload != nil {
 		raw, err := json.Marshal(payload)
@@ -1230,6 +1268,16 @@ func (c *ControlPlane) sendWithin(ctx context.Context, method string, path strin
 	req, err := http.NewRequestWithContext(ctx, method, c.APIURL+strings.TrimLeft(path, "/"), body)
 	if err != nil {
 		return 0, nil, nil, fmt.Errorf("%w: invalid control request", ErrAPI)
+	}
+	// No request leaves the API's origin. The path is appended to APIURL, so a
+	// ControlPlane built by hand with no trailing slash on APIURL would read
+	// "https://api.thalovant.com" + ".elsewhere.example/x" as another host,
+	// and the bearer token, or a sign-in's code and verifier, would go there.
+	if api, parseErr := url.Parse(c.APIURL); parseErr != nil || urlOrigin(req.URL) != urlOrigin(api) {
+		return 0, nil, nil, fmt.Errorf("%w: refusing a request off the Thalovant API's origin", ErrAPI)
+	}
+	if !replayable {
+		req.GetBody = nil
 	}
 	req.Header.Set("accept", "application/json")
 	req.Header.Set("user-agent", c.UserAgent)

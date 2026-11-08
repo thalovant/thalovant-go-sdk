@@ -11,6 +11,7 @@ Rules:
 - Do not create a release for internal platform changes with no Go SDK impact; record `no SDK impact` in the coordinated change instead.
 - Validate a clean module consumer before declaring a tagged release complete.
 - Update affected `docs.thalovant.com` SDK pages in the same release train.
+- Sign-in: keep device login (`LoginWithBrowser`, `BeginDeviceLogin`, `PollDeviceLogin`, `RevokeAPIToken`) unchanged; `InteractiveLogin` prefers browser sign-in and falls back to device login only before the browser is opened. The loopback listener binds `127.0.0.1` only, logs nothing, and leaves no goroutine behind. Never log or return the authorization code, the PKCE verifier, the state or a token. `testdata/browser-login-vectors.json` is the shared contract, vendored byte-identical from the Python SDK (`docs/browser-login-porting.md` there).
 
 Validate with `test -z "$(gofmt -l .)"`, `go vet ./...`, and `go test ./...`. A published release also requires a clean module to resolve `github.com/thalovant/thalovant-go-sdk@<version>` and compile a basic import.
 
