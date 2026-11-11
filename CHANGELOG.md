@@ -1,6 +1,16 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Record browser sign-in (BrowserLogin, InteractiveLogin) as 0.15.0, against the final reference (39e31d8).
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): Announce, speakers and settings on the control plane.
 
 # Changelog
+
+## 0.16.0 — Unreleased
+
+Intercom. Every addition is new API. Ports thalovant-python-sdk 0.12.0 (reference digest `690784dbb9af`; its `docs/intercom-porting.md` is the brief).
+
+- **Announce-only text spoken aloud on a hub's speakers**, through the routes under `/v1/hubs/{hub_id}/intercom`: `ControlPlane.Announce(ctx, hubID, AnnounceOptions)`, `GetAnnouncement`, `ListAnnouncements(ctx, hubID, AnnouncementListOptions)`, `ListIntercomSpeakers`, `UpdateIntercomSpeaker` (only what is set is sent; `ClearRoom` sends `room: null`), `GetIntercomSettings` and `SetIntercomSettings`. Scopes: `intercom:read`, `intercom:send`, `hubs:write` for settings and speakers. **Not a certified safety system**; the platform never stores the text. Named `Announce` and `*Intercom*` because the mesh already has an `intercom` frame.
+- Models in `intercom.go` (`IntercomSettings`, `IntercomSpeaker`, `IntercomPolicy`, `Announcement`, `IntercomDelivery`, `AnnouncementList`, `IntercomTargets` with `AllSpeakers`, `SpeakerTargets`, `RoomTargets` and `GroupTargets`, `IntercomRepeat`); every status is an open string type. The text (1-280 characters counted as runes, trimmed, no control characters), the targets (exactly one of all, speakers (at most 50), rooms, groups) and the repeat (urgent only, 1-10 times, 5-120 seconds) are checked before anything is sent and refused as `ErrAPI`. `Wait` polls a `sending` announcement and returns the latest answer on timeout; the context ends the wait.
+- `errors.Is` reaches three new kinds of `*APIError`: `ErrIntercomDisabled` (`intercom_disabled`), `ErrHubUnreachable` (502 `hub_unreachable`) and `ErrRateLimited` (any 429).
+- The `intercom` parity capability is recorded (required), and the other capabilities' evidence hash for `errors.go` is refreshed: it changed only by this addition. `VERSION` and `version.go` to 0.16.0.
+
 
 ## 0.15.0 — 2026-11-08
 

@@ -1,6 +1,12 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Propose follow-ups to browser sign-in (0.15.0), against the final reference digest.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): Announce, speakers and settings on the control plane.
 
 # Suggestions
+
+## Shared intercom vectors
+
+- **Problem:** `intercom` has no conformance vectors; text rules (control characters, trimming, rune count) are proved by each SDK's own tests.
+- **Proposal:** an `intercom-vectors.json` in the Python reference (validation and error-kind cases), claimed by the capability.
+- **Impact:** low effort; one more file for every consumer.
 
 ## A typed result for the sign-ins
 

@@ -1,11 +1,11 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Add browser sign-in (0.15.0) against the final reference (39e31d8): entry points, constants, errors and the parity capability.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): Announce, speakers and settings on the control plane.
 
 # Quick Facts
 
 | Item | Value |
 | :--- | :--- |
 | Module | `github.com/thalovant/thalovant-go-sdk` (package `thalovant`) |
-| Version | 0.15.0 (`VERSION` and `const Version` in `version.go`, kept equal by `TestVersionMatchesVersionFile`; the Auto Release workflow bumps both for a patch release) |
+| Version | 0.16.0 (`VERSION` and `const Version` in `version.go`, kept equal by `TestVersionMatchesVersionFile`; the Auto Release workflow bumps both for a patch release) |
 | Go | 1.26.9 or newer (`go.mod`) |
 | Data-plane entry points | `NewClient`, `NewClientFromConfig`, `Client.Ask`, `Client.Intents`, `HubSession` |
 | Control-plane entry points | `NewControlPlane`, `NewDefaultControlPlane`, methods on `*ControlPlane` (`control.go`, `hub_skills.go`, `chat_apps.go`, `browser_login.go`) |
@@ -29,6 +29,22 @@ Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Add browser sign-in (0.15.0) a
 | Errors | denied: `ErrDeviceAccessDenied` / `*DeviceLoginDeniedError`; timeout: `ErrDeviceCodeExpired` / `*DeviceLoginExpiredError` (both with nil `APIError`); no code: `*BrowserLoginFailedError` (`Code`); exchange refused: `*APIError` 400 `invalid_grant` |
 | Parity capability | `browser-login`; vectors `testdata/browser-login-vectors.json` (119 cases, sha256 `b0c73f808c4f…`, Python 39e31d8) |
 | Tests | `browser_login_vectors_test.go` (every vector case, plus the 24 callbacks through a real listener), `browser_login_test.go` (prints, opener goroutine, listener edges, goroutine accounting, secrets) |
+
+## Intercom (`intercom.go`; 0.16.0; scopes `intercom:read`, `intercom:send`, `hubs:write`)
+
+Announce-only text spoken aloud on a hub's speakers. Not a certified safety system; the platform never stores the text. Named `Announce` / `*Intercom*`: the mesh already has an `intercom` frame.
+
+| Call | Endpoint | Returns |
+| :--- | :--- | :--- |
+| `GetIntercomSettings(ctx, hubID)` | `GET /v1/hubs/{id}/intercom/settings` | `IntercomSettings` |
+| `SetIntercomSettings(ctx, hubID, enabled)` | `PUT /v1/hubs/{id}/intercom/settings` | `IntercomSettings` |
+| `ListIntercomSpeakers(ctx, hubID)` | `GET /v1/hubs/{id}/intercom/speakers` | `[]IntercomSpeaker` |
+| `UpdateIntercomSpeaker(ctx, hubID, clientID, IntercomSpeakerUpdate)` | `PATCH /v1/hubs/{id}/intercom/speakers/{client_id}` | `IntercomSpeaker` |
+| `Announce(ctx, hubID, AnnounceOptions)` | `POST /v1/hubs/{id}/intercom/announce` | `Announcement` |
+| `GetAnnouncement(ctx, hubID, id)` | `GET /v1/hubs/{id}/intercom/announcements/{id}` | `Announcement` |
+| `ListAnnouncements(ctx, hubID, AnnouncementListOptions)` | `GET /v1/hubs/{id}/intercom/announcements` | `AnnouncementList` |
+
+- Errors (`errors.go`): `ErrIntercomDisabled`, `ErrHubUnreachable`, `ErrRateLimited`, matched with `errors.Is` on the `*APIError`.
 
 ## Chat apps (`chat_apps.go`)
 

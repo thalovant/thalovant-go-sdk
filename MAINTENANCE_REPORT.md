@@ -1,4 +1,10 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Address CodeRabbit's second review of #90 (9 threads) against the final contract.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): Announce, speakers and settings on the control plane.
+
+## 2026-11-11 — intercom (0.16.0)
+
+Ported the `intercom` capability from thalovant-python-sdk 0.12.0 (digest `690784dbb9af`): `intercom.go`, seven `ControlPlane` methods, three error kinds in `errors.go`, `intercom_test.go` (loopback fake API), `VERSION`/`version.go` to 0.16.0, the parity record, README, QUICK_FACTS, FAQ, AUDIT and CHANGELOG. The `errors.go` evidence hash of the other capabilities was refreshed after `go test ./...` passed: the change is additive.
+
+Transparency Report: AI model Claude Sonnet 5.5; actions: wrote the module, methods, tests, docs and parity record from the contract and the Python reference; oversight: none yet, review pending.
 
 ## 2026-11-08 — second review of #90 (final-contract commit 291b49b)
 

@@ -1,4 +1,8 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Audit browser sign-in for 0.15.0 against the final reference (39e31d8), with the fixes from CodeRabbit's review of #90.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): Announce, speakers and settings on the control plane.
+
+## 2026-11-11 — Intercom (0.16.0): the text is in the request body
+
+`announceBody` (`intercom.go`) builds the body that holds the text and `ControlPlane.Announce` sends it; nothing logs or returns it, and `Announcement` never carries it (`intercom_test.go`, `TestIntercomAnnounceSendsTheContractBody`). It is not redacted from an `*APIError` the API echoes it in (`APIError.Problem` keeps the body, `Error()` never prints it); the contract says the API never echoes it. The announcement listing shape (`items`, `next_cursor`) is taken from the contract; `data` and `cursor` are read too. Not exercised against a live API.
 
 ## 2026-11-06 — CVE-2026-78661 in golang.org/x/net
 

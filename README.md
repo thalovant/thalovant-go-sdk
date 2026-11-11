@@ -1,4 +1,4 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Document browser sign-in (InteractiveLogin, BrowserLogin) for 0.15.0, final reference wording.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): Announce, speakers and settings on the control plane.
 
 <p align="center">
   <picture>
@@ -271,6 +271,32 @@ is about, never their values. `errors.Is(err, thalovant.ErrPlan)` covers 402 and
 | 412 | `ETag mismatch`: read the bridge again and retry with its `ETag` |
 | 429 | `bridge_rate_limited`, `bridge_network_rate_limited` |
 | 502, 503, 504 | `bridge_network_unavailable`, `bridge_secret_store_failed`, `bridge_network_not_offered`, `bridge_secret_store_unavailable`, `bridge_network_timeout` |
+
+## Intercom
+
+Say a short text aloud on a hub's speakers. Off by default at every level, announce-only,
+and **not a certified safety system**: it does not replace smoke or CO alarms, medical
+alert devices or emergency services. The platform never stores the text. (The names are
+`Announce` and `*Intercom*`: the HiveMind mesh already has an `intercom` frame.) Scopes:
+`intercom:read`, `intercom:send`, and `hubs:write` for settings and speakers.
+
+```go
+_, _ = api.SetIntercomSettings(ctx, hubID, true) // hubs:write
+yes := true
+_, _ = api.UpdateIntercomSpeaker(ctx, hubID, "kitchen", thalovant.IntercomSpeakerUpdate{Receive: &yes})
+
+said, err := api.Announce(ctx, hubID, thalovant.AnnounceOptions{
+	Text: "Dinner is ready", Targets: thalovant.RoomTargets("kitchen"),
+})
+urgent, err := api.Announce(ctx, hubID, thalovant.AnnounceOptions{
+	Text: "Please answer", Targets: thalovant.AllSpeakers(), Priority: thalovant.IntercomPriorityUrgent,
+	Repeat: &thalovant.IntercomRepeat{Times: 3, IntervalSeconds: 20}, Wait: true, // polls while "sending"
+})
+```
+
+Refusals are `*APIError`s: `errors.Is` reaches `ErrIntercomDisabled` (switch off, kid or
+public hub), `ErrHubUnreachable` (nothing was spoken), `ErrRateLimited` (`RetryAfter`),
+`ErrPlan` and `ErrAuth`.
 
 ## Development
 

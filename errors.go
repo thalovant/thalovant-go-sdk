@@ -42,6 +42,16 @@ var (
 	// one link of its kind: HTTP 409 with code "home_assistant_already_linked".
 	// LinkedClientID names the connection that holds it.
 	ErrAlreadyLinked = errors.New("thalovant hub already linked")
+	// ErrIntercomDisabled matches an *APIError with code "intercom_disabled":
+	// intercom is off for the hub, or the hub is a kid or public hub.
+	ErrIntercomDisabled = errors.New("thalovant intercom disabled")
+	// ErrHubUnreachable matches an *APIError that is HTTP 502 with code
+	// "hub_unreachable": the API could not reach the hub, and nothing was
+	// spoken. Trying again is safe.
+	ErrHubUnreachable = errors.New("thalovant hub unreachable")
+	// ErrRateLimited matches an *APIError that is HTTP 429. RetryAfter says
+	// how long to wait.
+	ErrRateLimited = errors.New("thalovant rate limited")
 	// ErrUnsupportedConnectionType matches an *UnsupportedConnectionTypeError:
 	// the API could not make a connection of the kind asked for.
 	ErrUnsupportedConnectionType = errors.New("thalovant unsupported connection type")
@@ -394,7 +404,8 @@ func (e *APIError) GoString() string {
 }
 
 // Is reports whether the refusal is one a caller can branch on: ErrAuth,
-// ErrPlan or ErrAlreadyLinked. They are read from the status and the body, so
+// ErrPlan, ErrAlreadyLinked, ErrIntercomDisabled, ErrHubUnreachable or
+// ErrRateLimited. They are read from the status and the body, so
 // every control-plane call answers them the same way, and the error stays an
 // *APIError with every field it carried:
 //
@@ -415,6 +426,12 @@ func (e *APIError) Is(target error) bool {
 		return e.refusal() == ErrPlan
 	case ErrAlreadyLinked:
 		return e.refusal() == ErrAlreadyLinked
+	case ErrIntercomDisabled:
+		return e.refusal() == ErrIntercomDisabled
+	case ErrHubUnreachable:
+		return e.refusal() == ErrHubUnreachable
+	case ErrRateLimited:
+		return e.refusal() == ErrRateLimited
 	}
 	return false
 }
@@ -435,6 +452,12 @@ func (e *APIError) refusal() error {
 		return ErrPlan
 	case e.StatusCode == 409 && code == "home_assistant_already_linked":
 		return ErrAlreadyLinked
+	case code == "intercom_disabled":
+		return ErrIntercomDisabled
+	case e.StatusCode == 502 && code == "hub_unreachable":
+		return ErrHubUnreachable
+	case e.StatusCode == 429:
+		return ErrRateLimited
 	}
 	return nil
 }
