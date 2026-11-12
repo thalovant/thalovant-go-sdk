@@ -1,4 +1,4 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): Announce, speakers and settings on the control plane.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): wait scope after the PR 92 review.
 
 # Quick Facts
 
@@ -44,7 +44,9 @@ Announce-only text spoken aloud on a hub's speakers. Not a certified safety syst
 | `GetAnnouncement(ctx, hubID, id)` | `GET /v1/hubs/{id}/intercom/announcements/{id}` | `Announcement` |
 | `ListAnnouncements(ctx, hubID, AnnouncementListOptions)` | `GET /v1/hubs/{id}/intercom/announcements` | `AnnouncementList` |
 
-- Errors (`errors.go`): `ErrIntercomDisabled`, `ErrHubUnreachable`, `ErrRateLimited`, matched with `errors.Is` on the `*APIError`.
+- Errors (`errors.go`): `ErrIntercomDisabled`, `ErrHubUnreachable` (502; the text may or may not have been spoken: retry with the same `IdempotencyKey`), `ErrRateLimited`, matched with `errors.Is` on the `*APIError`; the plan error `ErrPlan` is HTTP 402 or 403 `plan_limit`.
+- `Announce` with `Wait` also needs `intercom:read` (it polls `GetAnnouncement`); a failed poll returns the accepted `Announcement` with the error.
+- `IntercomDNDUpdate.Enabled` is a required `*bool` (the API replaces the whole DND setting).
 
 ## Chat apps (`chat_apps.go`)
 

@@ -204,18 +204,25 @@ type AnnounceOptions struct {
 	Lang string
 	// IdempotencyKey is sent as Idempotency-Key when set; it is never generated.
 	IdempotencyKey string
-	// Wait polls a "sending" announcement with GetAnnouncement until it completes.
+	// Wait polls a "sending" announcement with GetAnnouncement until it
+	// completes. The polls need intercom:read as well as intercom:send.
 	Wait bool
-	// WaitTimeout is the longest wait: Times*Interval+15s when zero. On timeout
-	// the latest answer is returned, still "sending".
+	// WaitTimeout is the longest wait: Times*Interval+15s when zero; it must
+	// not be negative. The deadline bounds each poll, not only the sleep
+	// between polls. On timeout the latest answer is returned, still "sending".
 	WaitTimeout time.Duration
-	// PollInterval is the time between polls: 2s when zero.
+	// PollInterval is the time between polls: 2s when zero; it must not be
+	// negative.
 	PollInterval time.Duration
 }
 
-// IntercomDNDUpdate is a do-not-disturb change.
+// IntercomDNDUpdate is a do-not-disturb change. The API replaces the whole
+// do-not-disturb setting with it and stores a missing enabled as false, so
+// Enabled is required (nil is refused) rather than left to default to off:
+// an update that only carries QuietHours must still say whether DND is on.
+// A nil QuietHours stores the default quiet hours (22:00-07:00, UTC).
 type IntercomDNDUpdate struct {
-	Enabled    bool
+	Enabled    *bool
 	QuietHours *IntercomQuietHours
 }
 
@@ -363,7 +370,10 @@ func speakerUpdateBody(update IntercomSpeakerUpdate) (map[string]any, error) {
 		body["groups"] = append([]string{}, update.Groups...)
 	}
 	if update.DND != nil {
-		dnd := map[string]any{"enabled": update.DND.Enabled}
+		if update.DND.Enabled == nil {
+			return nil, intercomErr("dnd.Enabled is required: true or false (the API replaces the whole do-not-disturb setting, so a missing value would switch it off)")
+		}
+		dnd := map[string]any{"enabled": *update.DND.Enabled}
 		if hours := update.DND.QuietHours; hours != nil {
 			if !intercomClock.MatchString(hours.Start) || !intercomClock.MatchString(hours.End) {
 				return nil, intercomErr("quiet_hours start and end must be HH:MM")
@@ -473,9 +483,20 @@ func (c *ControlPlane) UpdateIntercomSpeaker(ctx context.Context, hubID, clientI
 // returns the latest answer, still "sending"). Set IdempotencyKey, and keep
 // it, to retry after an uncertain outcome without speaking twice.
 //
+// Wait needs intercom:read as well as intercom:send: the polls are
+// GetAnnouncement. A poll can fail after the announcement was accepted (a
+// token with only intercom:send is refused at the first poll; a 429; the
+// network). Announce then returns the last accepted announcement, whose ID
+// lets the caller poll it later, together with the poll's error: a non-nil
+// error with a non-empty Announcement.ID means the announcement exists and a
+// retry without the same IdempotencyKey may speak it again. WaitTimeout and
+// PollInterval are checked before anything is sent, and WaitTimeout bounds
+// each poll, so a stalled read cannot carry the wait past it.
+//
 // Requires intercom:send. Intercom off is ErrIntercomDisabled, an unreachable
-// hub ErrHubUnreachable (nothing was spoken), a rate limit ErrRateLimited
-// (RetryAfter says how long), a plan without intercom ErrPlan.
+// hub ErrHubUnreachable (the text may or may not have been spoken: retry with
+// the same IdempotencyKey), a rate limit ErrRateLimited (RetryAfter says how
+// long), a plan without intercom ErrPlan (HTTP 402, or 403 plan_limit).
 func (c *ControlPlane) Announce(ctx context.Context, hubID string, opts AnnounceOptions) (Announcement, error) {
 	body, err := announceBody(opts)
 	if err != nil {
@@ -487,6 +508,9 @@ func (c *ControlPlane) Announce(ctx context.Context, hubID string, opts Announce
 	}
 	if opts.PollInterval < 0 {
 		return Announcement{}, intercomErr("PollInterval must not be negative")
+	}
+	if opts.WaitTimeout < 0 {
+		return Announcement{}, intercomErr("WaitTimeout must not be negative")
 	}
 	var headers map[string]string
 	if opts.IdempotencyKey != "" {
@@ -517,10 +541,13 @@ func (c *ControlPlane) Announce(ctx context.Context, hubID string, opts Announce
 		poll = 2 * time.Second
 	}
 	deadline := time.Now().Add(timeout)
-	for announcement.Sending() && time.Now().Before(deadline) {
-		wait := poll
-		if left := time.Until(deadline); left < wait {
-			wait = left
+	for announcement.Sending() {
+		wait := time.Until(deadline)
+		if wait <= 0 {
+			break
+		}
+		if wait > poll {
+			wait = poll
 		}
 		timer := time.NewTimer(wait)
 		select {
@@ -529,9 +556,24 @@ func (c *ControlPlane) Announce(ctx context.Context, hubID string, opts Announce
 			return announcement, ctx.Err()
 		case <-timer.C:
 		}
-		if announcement, err = c.GetAnnouncement(ctx, hubID, announcement.ID); err != nil {
-			return Announcement{}, err
+		// With nothing left after the sleep, no read starts at all.
+		if time.Until(deadline) <= 0 {
+			break
 		}
+		// Each read is bounded by what is left of the wait: a read the API is
+		// slow to answer must not carry the wait past its deadline.
+		readCtx, cancel := context.WithDeadline(ctx, deadline)
+		latest, err := c.GetAnnouncement(readCtx, hubID, announcement.ID)
+		ranOut := readCtx.Err() != nil && ctx.Err() == nil
+		cancel()
+		if err != nil {
+			if ranOut {
+				break // the latest answer, still "sending"
+			}
+			// The accepted announcement is kept: its ID is the caller's way back.
+			return announcement, err
+		}
+		announcement = latest
 	}
 	return announcement, nil
 }

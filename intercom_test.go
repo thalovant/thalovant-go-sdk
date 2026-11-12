@@ -36,11 +36,12 @@ type icFake struct {
 	mu      sync.Mutex
 	seen    []icSeen
 	replies map[string][]icReply
+	delays  map[string]time.Duration
 }
 
 func newIntercomAPI(t *testing.T) (*ControlPlane, *icFake) {
 	t.Helper()
-	fake := &icFake{replies: map[string][]icReply{}}
+	fake := &icFake{replies: map[string][]icReply{}, delays: map[string]time.Duration{}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		var body map[string]any
@@ -60,7 +61,15 @@ func newIntercomAPI(t *testing.T) (*ControlPlane, *icFake) {
 		} else if len(queue) == 1 {
 			reply = queue[0]
 		}
+		delay := fake.delays[key]
 		fake.mu.Unlock()
+		if delay > 0 {
+			select {
+			case <-time.After(delay):
+			case <-r.Context().Done():
+				return
+			}
+		}
 		w.Header().Set("Content-Type", "application/json")
 		for k, v := range reply.Headers {
 			w.Header().Set(k, v)
@@ -76,6 +85,23 @@ func (f *icFake) reply(method, path string, replies ...icReply) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.replies[method+" "+path] = replies
+}
+
+// delay holds a route's answer back, until the client gives up on it.
+func (f *icFake) delay(method, path string, d time.Duration) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.delays[method+" "+path] = d
+}
+
+func (f *icFake) methods() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, len(f.seen))
+	for i, seen := range f.seen {
+		out[i] = seen.Method
+	}
+	return out
 }
 
 func (f *icFake) last() icSeen {
@@ -189,6 +215,91 @@ func TestIntercomWaitStopsWhenTheContextEnds(t *testing.T) {
 	}
 }
 
+func icUrgent(opts AnnounceOptions) AnnounceOptions {
+	opts.Text, opts.Targets, opts.Priority, opts.Wait = "x", AllSpeakers(), IntercomPriorityUrgent, true
+	opts.Repeat = &IntercomRepeat{Times: 1, IntervalSeconds: 5}
+	return opts
+}
+
+func TestIntercomWaitDeadlineBoundsAStalledRead(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("POST", icBase+"/announce", icReply{Status: 202, Body: icAnnouncement("sending", nil)})
+	fake.reply("GET", icBase+"/announcements/"+icAnn, icReply{Status: 200, Body: icAnnouncement("completed", nil)})
+	fake.delay("GET", icBase+"/announcements/"+icAnn, 5*time.Second) // a read that never answers in time
+	started := time.Now()
+	// context.Background() has no deadline of its own: only WaitTimeout can end the read.
+	got, err := api.Announce(context.Background(), icHub, icUrgent(AnnounceOptions{WaitTimeout: 300 * time.Millisecond, PollInterval: 10 * time.Millisecond}))
+	if err != nil || !got.Sending() || got.ID != icAnn {
+		t.Fatalf("got %+v, %v", got, err) // the latest answer: not an error, not a hang
+	}
+	if took := time.Since(started); took > 3*time.Second {
+		t.Fatalf("the wait took %v", took)
+	}
+}
+
+func TestIntercomNoReadStartsOnceTheDeadlinePassedDuringTheSleep(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("POST", icBase+"/announce", icReply{Status: 202, Body: icAnnouncement("sending", nil)})
+	fake.reply("GET", icBase+"/announcements/"+icAnn, icReply{Status: 200, Body: icAnnouncement("completed", nil)})
+	got, err := api.Announce(context.Background(), icHub, icUrgent(AnnounceOptions{WaitTimeout: 40 * time.Millisecond, PollInterval: time.Hour}))
+	if err != nil || !got.Sending() {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+	if methods := fake.methods(); len(methods) != 1 || methods[0] != "POST" {
+		t.Fatalf("requests = %v", methods) // the sleep was cut to the deadline, and no read followed
+	}
+}
+
+func TestIntercomAFailedPollKeepsTheAcceptedAnnouncement(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("POST", icBase+"/announce", icReply{Status: 202, Body: icAnnouncement("sending", nil)})
+	fake.reply("GET", icBase+"/announcements/"+icAnn, icReply{Status: 403, Body: map[string]any{"detail": "Insufficient scopes"}})
+	got, err := api.Announce(context.Background(), icHub, icUrgent(AnnounceOptions{IdempotencyKey: "k-1", PollInterval: 5 * time.Millisecond}))
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || apiErr.StatusCode != 403 || !errors.Is(err, ErrAuth) {
+		t.Fatalf("err = %v", err)
+	}
+	// The announcement exists: its ID and status come back with the poll's error.
+	if got.ID != icAnn || !got.Sending() {
+		t.Fatalf("the accepted announcement was lost: %+v", got)
+	}
+	if methods := fake.methods(); len(methods) != 2 || methods[0] != "POST" || methods[1] != "GET" {
+		t.Fatalf("requests = %v", methods)
+	}
+}
+
+func TestIntercomAZeroWaitTimeoutMeansTheDefault(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("POST", icBase+"/announce", icReply{Status: 202, Body: icAnnouncement("sending", nil)})
+	fake.reply("GET", icBase+"/announcements/"+icAnn, icReply{Status: 200, Body: icAnnouncement("completed", nil)})
+	got, err := api.Announce(context.Background(), icHub, icUrgent(AnnounceOptions{PollInterval: 5 * time.Millisecond}))
+	if err != nil || got.Status != AnnouncementCompleted {
+		t.Fatalf("got %+v, %v", got, err)
+	}
+}
+
+func TestIntercomDNDNeedsAnExplicitEnabled(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	speaker := map[string]any{"client_id": "c1", "slug": "k", "name": "K", "online": true, "intercom": map[string]any{}}
+	fake.reply("PATCH", icBase+"/speakers/c1", icReply{Status: 200, Body: speaker})
+	hours := &IntercomQuietHours{Start: "21:00", End: "06:30"}
+	if _, err := api.UpdateIntercomSpeaker(context.Background(), icHub, "c1", IntercomSpeakerUpdate{DND: &IntercomDNDUpdate{QuietHours: hours}}); !errors.Is(err, ErrAPI) {
+		t.Fatalf("a DND update without Enabled was accepted: %v", err)
+	}
+	if fake.count() != 0 {
+		t.Fatal("something was sent")
+	}
+	for _, enabled := range []bool{true, false} {
+		e := enabled
+		if _, err := api.UpdateIntercomSpeaker(context.Background(), icHub, "c1", IntercomSpeakerUpdate{DND: &IntercomDNDUpdate{Enabled: &e, QuietHours: hours}}); err != nil {
+			t.Fatal(err)
+		}
+		if got := fake.last().Body["dnd"].(map[string]any)["enabled"]; got != enabled {
+			t.Fatalf("enabled = %v, want %v", got, enabled)
+		}
+	}
+}
+
 func TestIntercomGetAndListAnnouncements(t *testing.T) {
 	api, fake := newIntercomAPI(t)
 	fake.reply("GET", icBase+"/announcements/"+icAnn, icReply{Status: 200, Body: icAnnouncement("completed", nil)})
@@ -237,7 +348,7 @@ func TestIntercomSpeakersAndPatchSendOnlyWhatIsSet(t *testing.T) {
 	}
 	zone := "Europe/Paris"
 	if _, err := api.UpdateIntercomSpeaker(context.Background(), icHub, "c/1", IntercomSpeakerUpdate{
-		DND: &IntercomDNDUpdate{Enabled: true, QuietHours: &IntercomQuietHours{Start: "22:00", End: "07:00", Timezone: &zone}},
+		DND: &IntercomDNDUpdate{Enabled: &yes, QuietHours: &IntercomQuietHours{Start: "22:00", End: "07:00", Timezone: &zone}},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -287,6 +398,7 @@ func TestIntercomErrorsAreTyped(t *testing.T) {
 		{502, map[string]any{"code": "hub_unreachable", "detail": "no hub"}, nil, ErrHubUnreachable},
 		{429, map[string]any{"code": "rate_limited", "detail": "slow"}, map[string]string{"Retry-After": "30"}, ErrRateLimited},
 		{403, map[string]any{"code": "plan_limit", "detail": "plan"}, nil, ErrPlan},
+		{402, map[string]any{"detail": "API access requires a paid plan."}, nil, ErrPlan},
 		{403, map[string]any{"detail": "Insufficient scopes"}, nil, ErrAuth},
 		{422, map[string]any{"code": "validation", "detail": "bad"}, nil, nil},
 	}
@@ -325,6 +437,8 @@ func TestIntercomNothingIsSentForInvalidInput(t *testing.T) {
 		{Text: "hi", Targets: all, Repeat: &IntercomRepeat{Times: 2, IntervalSeconds: 10}},
 		{Text: "hi", Targets: all, Priority: "loud"},
 		{Text: "hi", Targets: all, IdempotencyKey: "  "},
+		{Text: "hi", Targets: all, Wait: true, WaitTimeout: -time.Second},
+		{Text: "hi", Targets: all, Wait: true, PollInterval: -time.Second},
 	}
 	for _, repeat := range []IntercomRepeat{{0, 10}, {11, 10}, {2, 4}, {2, 121}} {
 		r := repeat
@@ -346,7 +460,9 @@ func TestIntercomNothingIsSentForInvalidInput(t *testing.T) {
 	for _, update := range []IntercomSpeakerUpdate{
 		{}, {Receive: &yes, Room: &room, ClearRoom: true}, {Room: &long}, {Groups: make([]string, 9)},
 		{Groups: []string{""}},
-		{DND: &IntercomDNDUpdate{Enabled: true, QuietHours: &IntercomQuietHours{Start: "25:00", End: "07:00"}}},
+		{DND: &IntercomDNDUpdate{Enabled: &yes, QuietHours: &IntercomQuietHours{Start: "25:00", End: "07:00"}}},
+		{DND: &IntercomDNDUpdate{}},
+		{DND: &IntercomDNDUpdate{QuietHours: &IntercomQuietHours{Start: "21:00", End: "06:00"}}}, // enabled missing: never stored as false
 	} {
 		if _, err := api.UpdateIntercomSpeaker(ctx, icHub, "c1", update); err == nil {
 			t.Fatalf("accepted %+v", update)

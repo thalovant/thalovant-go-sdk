@@ -1,4 +1,8 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): Announce, speakers and settings on the control plane.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: CodeRabbit review of PR 92: a poll that fails after an accepted announcement now returns it; DND enabled is explicit.
+
+## 2026-11-11 — Intercom (0.16.0): a poll that fails after the POST
+
+`ControlPlane.Announce` with `Wait` (`intercom.go`) sends the POST, then polls `GetAnnouncement`, which needs `intercom:read`. A token with only `intercom:send`, a 429 or a network error fails a poll after the announcement was accepted. `Announce` now returns the last accepted `Announcement` with the error, so its ID is not lost (`intercom_test.go`, `TestIntercomAFailedPollKeepsTheAcceptedAnnouncement`); a retry still needs the same `IdempotencyKey` to avoid speaking it again.
 
 ## 2026-11-11 — Intercom (0.16.0): the text is in the request body
 

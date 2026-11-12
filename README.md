@@ -282,21 +282,37 @@ alert devices or emergency services. The platform never stores the text. (The na
 
 ```go
 _, _ = api.SetIntercomSettings(ctx, hubID, true) // hubs:write
-yes := true
-_, _ = api.UpdateIntercomSpeaker(ctx, hubID, "kitchen", thalovant.IntercomSpeakerUpdate{Receive: &yes})
+speakers, _ := api.ListIntercomSpeakers(ctx, hubID) // intercom:read; a speaker is addressed by its ClientID
+speaker := speakers[0]
+yes, kitchen := true, "kitchen"
+_, _ = api.UpdateIntercomSpeaker(ctx, hubID, speaker.ClientID, thalovant.IntercomSpeakerUpdate{Receive: &yes, Room: &kitchen})
 
 said, err := api.Announce(ctx, hubID, thalovant.AnnounceOptions{
-	Text: "Dinner is ready", Targets: thalovant.RoomTargets("kitchen"),
+	Text: "Dinner is ready", Targets: thalovant.SpeakerTargets(speaker.ClientID), // or RoomTargets("kitchen")
 })
 urgent, err := api.Announce(ctx, hubID, thalovant.AnnounceOptions{
 	Text: "Please answer", Targets: thalovant.AllSpeakers(), Priority: thalovant.IntercomPriorityUrgent,
-	Repeat: &thalovant.IntercomRepeat{Times: 3, IntervalSeconds: 20}, Wait: true, // polls while "sending"
+	Repeat: &thalovant.IntercomRepeat{Times: 3, IntervalSeconds: 20}, IdempotencyKey: "please-answer-1",
+	Wait: true, // polls while "sending"; needs intercom:read as well
 })
 ```
 
+`Wait` needs **`intercom:read` as well as `intercom:send`** (the polls are `GetAnnouncement`).
+`WaitTimeout` and `PollInterval` must not be negative (zero is the default); they are checked
+before anything is sent, and `WaitTimeout` bounds each poll, not only the sleep between polls.
+A poll can fail after the announcement was accepted (a token with only `intercom:send` is
+refused at the first poll; a 429; the network): `Announce` then returns the accepted
+announcement (its `ID` is set) together with the error. Always set an `IdempotencyKey` with
+`Wait` and reuse it to retry, so a retry is not announced a second time.
+
+A speaker's `IntercomDNDUpdate.Enabled` is a `*bool` and required: the API replaces the whole
+do-not-disturb setting and stores a missing `enabled` as `false`, so an update that only
+carries `QuietHours` must still say whether DND is on.
+
 Refusals are `*APIError`s: `errors.Is` reaches `ErrIntercomDisabled` (switch off, kid or
-public hub), `ErrHubUnreachable` (nothing was spoken), `ErrRateLimited` (`RetryAfter`),
-`ErrPlan` and `ErrAuth`.
+public hub), `ErrHubUnreachable` (502: the text may or may not have been spoken; retry with the
+same `IdempotencyKey`), `ErrRateLimited` (`RetryAfter`), `ErrPlan` (HTTP 402, or 403 with
+`plan_limit`) and `ErrAuth`.
 
 ## Development
 

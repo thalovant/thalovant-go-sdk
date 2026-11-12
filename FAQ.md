@@ -1,9 +1,12 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): Announce, speakers and settings on the control plane.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): wait scope and retry questions after the PR 92 review.
 
 # FAQ
 
 ## Is intercom a safety system, and why is there no `Intercom()` method?
 It is announce-only text spoken by each speaker's own text-to-speech, and **not a certified safety system**: it does not replace smoke or CO alarms, medical alert devices or emergency services. The mesh already has an `intercom` frame, so the HTTP calls are `Announce`, `GetAnnouncement`, `ListAnnouncements` and `*Intercom*`. The platform never stores the text.
+
+## Why did `Announce` with `Wait` return an error after the announcement was accepted?
+`Wait` polls `GetAnnouncement`, which needs `intercom:read` as well as `intercom:send`; a poll can also fail on a 429 or the network. `Announce` returns the accepted `Announcement` (its `ID` is set) with the error. Set an `IdempotencyKey` and reuse it to retry, so the text is not said twice.
 
 ## Why was nobody spoken to?
 A speaker is skipped unless its `Receive` is true (`skipped_not_receiving`, even for urgent); a normal announcement is skipped inside quiet hours (`skipped_dnd`; urgent bypasses them); an offline speaker is `offline`. `errors.Is(err, ErrIntercomDisabled)` means the hub's switch is off or it is a kid or public hub.

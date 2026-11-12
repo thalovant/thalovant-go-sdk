@@ -46,8 +46,10 @@ var (
 	// intercom is off for the hub, or the hub is a kid or public hub.
 	ErrIntercomDisabled = errors.New("thalovant intercom disabled")
 	// ErrHubUnreachable matches an *APIError that is HTTP 502 with code
-	// "hub_unreachable": the API could not reach the hub, and nothing was
-	// spoken. Trying again is safe.
+	// "hub_unreachable": the API could not reach the hub. Whether the text
+	// was spoken is not guaranteed either way (the hub may have spoken it and
+	// lost the answer); the API records the attempt. To retry, reuse the same
+	// IdempotencyKey, so a retry is not said a second time.
 	ErrHubUnreachable = errors.New("thalovant hub unreachable")
 	// ErrRateLimited matches an *APIError that is HTTP 429. RetryAfter says
 	// how long to wait.

@@ -1,8 +1,14 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): Announce, speakers and settings on the control plane.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: CodeRabbit review of PR 92: wait validation and deadline, accepted announcement kept on a poll error, explicit DND enabled; digest 66bfb1ac5879.
+
+## 2026-11-11 — intercom review fixes (CodeRabbit, PR 92; Python digest `66bfb1ac5879`)
+
+`Announce` rejects a negative `WaitTimeout` or `PollInterval` before the POST (zero stays "the default"); each poll runs under a context bounded by the time left (`context.WithDeadline`), no read starts once the sleep used the deadline, a read cut by the deadline returns the latest `sending` answer, and a poll that fails for another reason returns the last accepted `Announcement` with the error instead of an empty one. `IntercomDNDUpdate.Enabled` is a required `*bool`: the API replaces the whole DND object and stores a missing `enabled` as false (`app/schemas/intercom.py`, `Dnd`), so making it optional would not preserve the stored value; a nil is refused. README: the example lists the speakers, addresses the speaker by its `ClientID` and sets its room before targeting it. Docs: `Wait` needs `intercom:read` too, a poll can fail after the POST (reuse the idempotency key), `ErrPlan` is 402 and 403 `plan_limit`, and `ErrHubUnreachable` no longer says a retry is safe. Verification: `gofmt`, `go vet ./...`, `go test -race -count=1 ./...`, parity check against the Python reference.
+
+Transparency Report: AI model Claude Sonnet 5.5; actions: fixed the review findings, added tests, refreshed the parity record; oversight: none yet, review pending.
 
 ## 2026-11-11 — intercom (0.16.0)
 
-Ported the `intercom` capability from thalovant-python-sdk 0.12.0 (digest `690784dbb9af`): `intercom.go`, seven `ControlPlane` methods, three error kinds in `errors.go`, `intercom_test.go` (loopback fake API), `VERSION`/`version.go` to 0.16.0, the parity record, README, QUICK_FACTS, FAQ, AUDIT and CHANGELOG. The `errors.go` evidence hash of the other capabilities was refreshed after `go test ./...` passed: the change is additive.
+Ported the `intercom` capability from thalovant-python-sdk 0.12.0 (digest `690784dbb9af`, since moved to `66bfb1ac5879`): `intercom.go`, seven `ControlPlane` methods, three error kinds in `errors.go`, `intercom_test.go` (loopback fake API), `VERSION`/`version.go` to 0.16.0, the parity record, README, QUICK_FACTS, FAQ, AUDIT and CHANGELOG. The `errors.go` evidence hash of the other capabilities was refreshed after `go test ./...` passed: the change is additive.
 
 Transparency Report: AI model Claude Sonnet 5.5; actions: wrote the module, methods, tests, docs and parity record from the contract and the Python reference; oversight: none yet, review pending.
 
