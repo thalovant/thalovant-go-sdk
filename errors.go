@@ -48,9 +48,16 @@ var (
 	// ErrHubUnreachable matches an *APIError that is HTTP 502 with code
 	// "hub_unreachable": the API could not reach the hub. Whether the text
 	// was spoken is not guaranteed either way (the hub may have spoken it and
-	// lost the answer); the API records the attempt. To retry, reuse the same
-	// IdempotencyKey, so a retry is not said a second time.
+	// lost the answer). The API records the attempt as a "failed"
+	// announcement and names it in APIError.AnnouncementID. Do not resend
+	// blindly: read that announcement first. Reusing the same IdempotencyKey
+	// does not retry, it replays the stored failed record and never sends
+	// again; to send the text again on purpose, use a new key.
 	ErrHubUnreachable = errors.New("thalovant hub unreachable")
+	// ErrNotCancellable matches an *APIError that is HTTP 409 with code
+	// "not_cancellable": CancelAnnouncement on an announcement that is not
+	// "sending" (it completed, failed or was cancelled already).
+	ErrNotCancellable = errors.New("thalovant announcement not cancellable")
 	// ErrRateLimited matches an *APIError that is HTTP 429. RetryAfter says
 	// how long to wait.
 	ErrRateLimited = errors.New("thalovant rate limited")
@@ -406,8 +413,8 @@ func (e *APIError) GoString() string {
 }
 
 // Is reports whether the refusal is one a caller can branch on: ErrAuth,
-// ErrPlan, ErrAlreadyLinked, ErrIntercomDisabled, ErrHubUnreachable or
-// ErrRateLimited. They are read from the status and the body, so
+// ErrPlan, ErrAlreadyLinked, ErrIntercomDisabled, ErrHubUnreachable,
+// ErrNotCancellable or ErrRateLimited. They are read from the status and the body, so
 // every control-plane call answers them the same way, and the error stays an
 // *APIError with every field it carried:
 //
@@ -432,6 +439,8 @@ func (e *APIError) Is(target error) bool {
 		return e.refusal() == ErrIntercomDisabled
 	case ErrHubUnreachable:
 		return e.refusal() == ErrHubUnreachable
+	case ErrNotCancellable:
+		return e.refusal() == ErrNotCancellable
 	case ErrRateLimited:
 		return e.refusal() == ErrRateLimited
 	}
@@ -458,6 +467,8 @@ func (e *APIError) refusal() error {
 		return ErrIntercomDisabled
 	case e.StatusCode == 502 && code == "hub_unreachable":
 		return ErrHubUnreachable
+	case e.StatusCode == 409 && code == "not_cancellable":
+		return ErrNotCancellable
 	case e.StatusCode == 429:
 		return ErrRateLimited
 	}
@@ -478,6 +489,23 @@ func (e *APIError) LinkedClientID() string {
 			if text, ok := source[key].(string); ok && text != "" {
 				return text
 			}
+		}
+	}
+	return ""
+}
+
+// AnnouncementID is the announcement the API recorded for an ErrHubUnreachable
+// refusal (502 hub_unreachable): read it with GetAnnouncement before sending
+// again. "" when the answer names none. It is read from the body's
+// announcement_id, at the top or inside a detail that is itself an object.
+func (e *APIError) AnnouncementID() string {
+	if e.Problem == nil {
+		return ""
+	}
+	nested, _ := e.Problem["detail"].(map[string]any)
+	for _, source := range []map[string]any{e.Problem, nested} {
+		if text, ok := source["announcement_id"].(string); ok && text != "" {
+			return text
 		}
 	}
 	return ""

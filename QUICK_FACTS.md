@@ -1,4 +1,4 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): wait scope after the PR 92 review.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom amendment 2: CancelAnnouncement, key replay, ids, redacted options.
 
 # Quick Facts
 
@@ -32,7 +32,7 @@ Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): wait scop
 
 ## Intercom (`intercom.go`; 0.16.0; scopes `intercom:read`, `intercom:send`, `hubs:write`)
 
-Announce-only text spoken aloud on a hub's speakers. Not a certified safety system; the platform never stores the text. Named `Announce` / `*Intercom*`: the mesh already has an `intercom` frame.
+Announce-only text spoken aloud on a hub's speakers. Not a certified safety system; the API does not store the text (keyed hash and length only). Named `Announce` / `*Intercom*`: the mesh already has an `intercom` frame.
 
 | Call | Endpoint | Returns |
 | :--- | :--- | :--- |
@@ -42,11 +42,13 @@ Announce-only text spoken aloud on a hub's speakers. Not a certified safety syst
 | `UpdateIntercomSpeaker(ctx, hubID, clientID, IntercomSpeakerUpdate)` | `PATCH /v1/hubs/{id}/intercom/speakers/{client_id}` | `IntercomSpeaker` |
 | `Announce(ctx, hubID, AnnounceOptions)` | `POST /v1/hubs/{id}/intercom/announce` | `Announcement` |
 | `GetAnnouncement(ctx, hubID, id)` | `GET /v1/hubs/{id}/intercom/announcements/{id}` | `Announcement` |
+| `CancelAnnouncement(ctx, hubID, id)` | `POST /v1/hubs/{id}/intercom/announcements/{id}/cancel` (`intercom:send`; 409 `not_cancellable`) | `Announcement` (`Status` `cancelled`, optional `HubConfirmed *bool`) |
 | `ListAnnouncements(ctx, hubID, AnnouncementListOptions)` | `GET /v1/hubs/{id}/intercom/announcements` | `AnnouncementList` |
 
-- Errors (`errors.go`): `ErrIntercomDisabled`, `ErrHubUnreachable` (502; the text may or may not have been spoken: retry with the same `IdempotencyKey`), `ErrRateLimited`, matched with `errors.Is` on the `*APIError`; the plan error `ErrPlan` is HTTP 402 or 403 `plan_limit`.
+- Errors (`errors.go`): `ErrIntercomDisabled`, `ErrHubUnreachable` (502; the text may or may not have been spoken; `APIError.AnnouncementID()` names the `failed` record: read it before sending again, and use a new key), `ErrNotCancellable` (409), `ErrRateLimited`, matched with `errors.Is` on the `*APIError`; the plan error `ErrPlan` is HTTP 402 or 403 `plan_limit`.
 - `Announce` with `Wait` also needs `intercom:read` (it polls `GetAnnouncement`); a failed poll returns the accepted `Announcement` with the error.
 - `IntercomDNDUpdate.Enabled` is a required `*bool` (the API replaces the whole DND setting).
+- Idempotency: one fresh key per announcement (`thalovant.NewRequestID()` or a UUID); the same key replays the stored result (`Idempotency-Replayed: true`) and never re-sends (a replayed `failed` stays `failed`). Ids (hub, client, announcement) that are `.`, `..`, empty or hold `/ ? #`, a backslash or a control character are refused before any request (`validIntercomID`, `intercom.go`). `AnnounceOptions` redacts its text under every `fmt` verb and `log/slog`. No request timeout is set by the SDK.
 
 ## Chat apps (`chat_apps.go`)
 

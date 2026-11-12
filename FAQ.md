@@ -1,12 +1,27 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): wait scope and retry questions after the PR 92 review.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom amendment 2: cancel, key replay, ids, wording.
 
 # FAQ
 
 ## Is intercom a safety system, and why is there no `Intercom()` method?
-It is announce-only text spoken by each speaker's own text-to-speech, and **not a certified safety system**: it does not replace smoke or CO alarms, medical alert devices or emergency services. The mesh already has an `intercom` frame, so the HTTP calls are `Announce`, `GetAnnouncement`, `ListAnnouncements` and `*Intercom*`. The platform never stores the text.
+It is announce-only text spoken by each speaker's own text-to-speech, and **not a certified safety system**: it does not replace smoke or CO alarms, medical alert devices or emergency services. The mesh already has an `intercom` frame, so the HTTP calls are `Announce`, `GetAnnouncement`, `ListAnnouncements` and `*Intercom*`. The API does not store the text (a keyed hash and the length only), and intercom does not record or store speech; while an alert sounds it only checks whether a reply is an acknowledgement.
 
 ## Why did `Announce` with `Wait` return an error after the announcement was accepted?
-`Wait` polls `GetAnnouncement`, which needs `intercom:read` as well as `intercom:send`; a poll can also fail on a 429 or the network. `Announce` returns the accepted `Announcement` (its `ID` is set) with the error. Set an `IdempotencyKey` and reuse it to retry, so the text is not said twice.
+`Wait` polls `GetAnnouncement`, which needs `intercom:read` as well as `intercom:send`; a poll can also fail on a 429 or the network. `Announce` returns the accepted `Announcement` (its `ID` is set) with the error. Set a fresh `IdempotencyKey` (`thalovant.NewRequestID()`) and call again with that same key: the API replays the stored announcement, with its `ID`, and does not say it twice.
+
+## Why did my second announcement say nothing, and the result is the first one?
+The same `IdempotencyKey` replays the stored announcement (`Idempotency-Replayed: true`) for 24 hours and never sends again, whatever its status. You reused a key (or a constant like `"dinner"`). Use a fresh `thalovant.NewRequestID()` per announcement you mean to send; to send the same text again on purpose, use a new key.
+
+## `Announce` returned `ErrHubUnreachable`. Can I send again with the same key?
+Not to send again: a replayed `failed` announcement stays `failed`. The hub may have spoken it. Read `GetAnnouncement(ctx, hubID, apiErr.AnnouncementID())`, and only if nothing was spoken use a new key.
+
+## How do I stop an urgent announcement that is repeating?
+`CancelAnnouncement(ctx, hubID, announcementID)` (`intercom:send`): status `cancelled`, `HubConfirmed` false when the hub could not confirm. Only while `sending`, else `ErrNotCancellable` (409). Other controls: the hub's switch, the platform kill switch, a speaker's `Receive`, and somebody acknowledging by voice.
+
+## Why is `GetAnnouncement(ctx, hubID, "..")` refused?
+An id that is `.`, `..`, empty, or holds `/`, `?`, `#`, a backslash or a control character is refused before any request: a dot segment would change the route.
+
+## Does printing `AnnounceOptions` show the text?
+No. `AnnounceOptions` redacts the text (`<N chars>`) under every `fmt` verb and in `log/slog`; the request still carries it.
 
 ## Why was nobody spoken to?
 A speaker is skipped unless its `Receive` is true (`skipped_not_receiving`, even for urgent); a normal announcement is skipped inside quiet hours (`skipped_dnd`; urgent bypasses them); an offline speaker is `offline`. `errors.Is(err, ErrIntercomDisabled)` means the hub's switch is off or it is a kid or public hub.

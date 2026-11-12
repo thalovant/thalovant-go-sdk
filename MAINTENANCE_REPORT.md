@@ -1,4 +1,10 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: CodeRabbit review of PR 92: wait validation and deadline, accepted announcement kept on a poll error, explicit DND enabled; digest 66bfb1ac5879.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom amendment 2 (contract section J): cancel, key replay docs, id validation, redacted options, wording; new Python digest.
+
+## 2026-11-11 — Intercom amendment 2 (client-side security review, contract section J)
+
+Added `ControlPlane.CancelAnnouncement` (`POST .../announcements/{id}/cancel`), `Announcement.HubConfirmed` (`*bool`, tolerant decoding through `UnmarshalJSON`), `AnnouncementCancelled`, `ErrNotCancellable` (409 `not_cancellable`) and `APIError.AnnouncementID()` for the 502 (`errors.go`). `validIntercomID` (`intercom.go`) refuses `.`, `..`, empty ids and ids holding `/`, `?`, `#`, a backslash or a control character before any request, for hub, client and announcement ids (review L1). `AnnounceOptions` now implements `String`, `GoString`, `Format` and `slog.LogValuer` so the text never prints (review L4). The SDK sets no request timeout, so the announce timeout item needs no code; the docs say to give `Announce` at least 20 s (review M2). Docs: every example uses a fresh `thalovant.NewRequestID()` key; README, FAQ and QUICK_FACTS say that the same key replays the stored result and never re-sends, that a replayed `failed` stays `failed`, that a deliberate second send needs a new key, and to read the announcement after a 502 (review H3); the wording no longer says "nothing listens" or "stops every announcement at once" (J7). Tests (`intercom_test.go`): cancel route/body/scope/409, `HubConfirmed`, `AnnouncementID`, unsafe ids on every call, a replayed failed announcement, redaction under every verb and slog, and a docs guard. Verification: `gofmt`, `go vet`, `go test ./...`, `scripts/check-sdk-parity.py --consumer thalovant-go-sdk`. Not done (not in section J): L5, L6, a `Replayed` field (`SUGGESTIONS.md`, `AUDIT.md`).
+
+Transparency Report: AI model Claude Sonnet 5.5; actions: implemented contract section J for the Go SDK (code, tests, docs, parity record); oversight: none yet, review pending.
 
 ## 2026-11-11 — intercom review fixes (CodeRabbit, PR 92; Python digest `66bfb1ac5879`)
 

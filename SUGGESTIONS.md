@@ -1,6 +1,18 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): Announce, speakers and settings on the control plane.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom amendment 2: a replayed flag, problem scrubbing, caps.
 
 # Suggestions
+
+## A `Replayed` field on `Announcement`
+
+- **Problem:** the API answers a reused `Idempotency-Key` with the stored announcement and `Idempotency-Replayed: true`; `Announcement` does not carry it, so a caller cannot tell a replay from a first send (security review H3).
+- **Proposal:** read the header in `controlInto` for the intercom routes and expose `Announcement.Replayed`; the same on every SDK, with the header in the loopback tests.
+- **Impact:** low effort; touches the reference digest and every consumer.
+
+## Scrub `input` and `ctx` from `Problem`, and cap lists and keys, on intercom calls
+
+- **Problem:** `APIError.Problem` keeps the whole API body; a regression in the API's error middleware would put the announcement text there (review L5). Rooms, groups and the key length are unchecked client-side (L6).
+- **Proposal:** in `Announce`, drop `input` and `ctx` from `Problem`; check `IdempotencyKey` (128) and rooms/groups (50).
+- **Impact:** low; defence in depth.
 
 ## Shared intercom vectors
 

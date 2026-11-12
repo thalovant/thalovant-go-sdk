@@ -1,4 +1,16 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: CodeRabbit review of PR 92: a poll that fails after an accepted announcement now returns it; DND enabled is explicit.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom amendment 2: AnnounceOptions redacted; open items (JSON of the options, problem body, replayed flag).
+
+## 2026-11-11 — Intercom (0.16.0): `AnnounceOptions` printed the text (security review L4), now redacted
+
+`AnnounceOptions` (`intercom.go`) is a plain struct, so `%v`, `%+v`, `%#v`, `%d` or a `log/slog` handler printed `Text`. It now implements `String`, `GoString`, `Format` and `slog.LogValuer`, which print `<N chars>` (`intercom_test.go`, `TestIntercomAnnounceOptionsNeverPrintTheText`). Still open: `json.Marshal(options)` prints the field, because a `MarshalJSON` that hid it would make a caller who stores the options lose the text silently; nothing in the SDK marshals the struct (`announceBody` builds a map).
+
+## 2026-11-11 — Intercom (0.16.0): `APIError.Problem` keeps the whole API body (review L5); rooms, groups and key length are unchecked (L6)
+
+The API strips `input` and `ctx` from `/intercom/` errors, so the text does not reach `Problem` today; a regression would. `Announce` does not cap rooms and groups (the API caps them at 50) or check `IdempotencyKey` against 128 characters (the API answers 422). Not in contract section J; proposed in `SUGGESTIONS.md`.
+
+## 2026-11-11 — Intercom (0.16.0): a replayed announcement is not marked as replayed
+
+The API answers a replay with `Idempotency-Replayed: true`; `Announcement` does not carry it. The docs say what replay means (`README.md`, "Idempotency keys"). Proposed in `SUGGESTIONS.md`.
 
 ## 2026-11-11 — Intercom (0.16.0): a poll that fails after the POST
 

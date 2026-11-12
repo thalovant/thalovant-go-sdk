@@ -3,28 +3,41 @@ package thalovant
 // Intercom: say a short text aloud on a household hub's speakers.
 //
 // An announcement is a text of at most 280 characters, spoken by each chosen
-// speaker's own text-to-speech. It is announce-only: no two-way audio, and
-// nothing listens. It is NOT a certified safety system and does not replace
-// smoke or CO alarms, medical alert devices or emergency services.
+// speaker's own text-to-speech. It is announce-only: no two-way audio.
+// Intercom does not record or store speech; while an urgent alert sounds, the
+// hub only checks whether a reply is an acknowledgement. It is NOT a certified
+// safety system and does not replace smoke or CO alarms, medical alert devices
+// or emergency services.
 //
-// The platform never stores the text: the API keeps its SHA-256 and length,
-// the targets, each speaker's result and the actor. These are the routes under
-// /v1/hubs/{hub_id}/intercom on ControlPlane (Announce, GetAnnouncement,
-// ListAnnouncements, ListIntercomSpeakers, UpdateIntercomSpeaker,
-// GetIntercomSettings, SetIntercomSettings). The names say Announce and
-// Intercom, never a bare Intercom for the HTTP calls: the HiveMind mesh
-// already has an intercom frame, which is a different thing.
+// The API does not store the text: it keeps a keyed hash of it (HMAC-SHA256,
+// server-side secret) and its length, the targets, each speaker's result and
+// the actor. (The hub's own message bus and each speaker's text-to-speech are
+// outside the platform's control.) These are the routes under
+// /v1/hubs/{hub_id}/intercom on ControlPlane (Announce, CancelAnnouncement,
+// GetAnnouncement, ListAnnouncements, ListIntercomSpeakers,
+// UpdateIntercomSpeaker, GetIntercomSettings, SetIntercomSettings). The names
+// say Announce and Intercom, never a bare Intercom for the HTTP calls: the
+// HiveMind mesh already has an intercom frame, which is a different thing.
 //
-// Scopes: intercom:read for the reads, intercom:send for Announce, and
-// hubs:write (owner or admin of the hub) for settings and speakers. A refusal
-// is an *APIError; errors.Is reaches ErrIntercomDisabled, ErrHubUnreachable,
-// ErrRateLimited, ErrPlan and ErrAuth.
+// Scopes: intercom:read for the reads, intercom:send for Announce and
+// CancelAnnouncement, and hubs:write (owner or admin of the hub) for settings
+// and speakers. A refusal is an *APIError; errors.Is reaches
+// ErrIntercomDisabled, ErrHubUnreachable, ErrNotCancellable, ErrRateLimited,
+// ErrPlan and ErrAuth.
+//
+// Idempotency: set a fresh unique IdempotencyKey (a UUID) for each
+// announcement you mean to send. The same key replays the stored answer
+// (Idempotency-Replayed: true) and never sends again, whatever its status; a
+// replayed "failed" announcement stays "failed". To send the same text again
+// on purpose, use a new key.
 //
 // Every status is open: a value the SDK does not know is kept as sent.
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -63,7 +76,8 @@ const (
 )
 
 // AnnouncementStatus is where an announcement is. "sending" while an urgent
-// one is still repeating. Open: a value the API adds later is kept as sent.
+// one is still repeating; "cancelled" after CancelAnnouncement. Open: a value
+// the API adds later is kept as sent.
 type AnnouncementStatus string
 
 const (
@@ -71,6 +85,7 @@ const (
 	AnnouncementPartial   AnnouncementStatus = "partial"
 	AnnouncementFailed    AnnouncementStatus = "failed"
 	AnnouncementSending   AnnouncementStatus = "sending"
+	AnnouncementCancelled AnnouncementStatus = "cancelled"
 )
 
 // DeliveryStatus is what happened for one speaker. Open.
@@ -149,6 +164,35 @@ type Announcement struct {
 	Deliveries []IntercomDelivery `json:"deliveries"`
 	// AckedBy names the speaker that acknowledged an urgent announcement; nil when none did.
 	AckedBy *string `json:"acked_by"`
+	// HubConfirmed is set only on the answer to CancelAnnouncement: false means
+	// the hub could not confirm the cancel (the record is "cancelled" anyway),
+	// so speech already queued on the hub may still play. nil on every other
+	// answer, and when the API sent something that is not a boolean.
+	HubConfirmed *bool `json:"hub_confirmed,omitempty"`
+}
+
+// UnmarshalJSON reads an announcement and keeps HubConfirmed only when the API
+// sent a real boolean: any other value leaves it nil rather than failing the
+// whole answer.
+func (a *Announcement) UnmarshalJSON(data []byte) error {
+	type plain Announcement // no methods: no recursion
+	aux := struct {
+		*plain
+		HubConfirmed json.RawMessage `json:"hub_confirmed"`
+	}{plain: (*plain)(a)}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	a.HubConfirmed = nil
+	switch strings.TrimSpace(string(aux.HubConfirmed)) {
+	case "true":
+		confirmed := true
+		a.HubConfirmed = &confirmed
+	case "false":
+		confirmed := false
+		a.HubConfirmed = &confirmed
+	}
+	return nil
 }
 
 // Sending reports whether an urgent announcement is still repeating.
@@ -202,7 +246,11 @@ type AnnounceOptions struct {
 	Repeat *IntercomRepeat
 	// Lang is a language tag such as "en-US"; "" leaves it to the hub.
 	Lang string
-	// IdempotencyKey is sent as Idempotency-Key when set; it is never generated.
+	// IdempotencyKey is sent as Idempotency-Key when set; it is never
+	// generated. Use a fresh unique key (a UUID) per announcement you mean to
+	// send: the same key replays the stored result for 24 hours and never
+	// sends again, a replayed "failed" announcement stays "failed", and to send
+	// again on purpose you need a new key.
 	IdempotencyKey string
 	// Wait polls a "sending" announcement with GetAnnouncement until it
 	// completes. The polls need intercom:read as well as intercom:send.
@@ -214,6 +262,40 @@ type AnnounceOptions struct {
 	// PollInterval is the time between polls: 2s when zero; it must not be
 	// negative.
 	PollInterval time.Duration
+}
+
+// String redacts the text: it prints how many characters it has, never the
+// characters, so a %v, %+v or %s in a log line does not carry what is spoken
+// aloud in a home. Every other field is shown.
+func (o AnnounceOptions) String() string {
+	return fmt.Sprintf(
+		"AnnounceOptions{Text:<%d chars> Targets:%+v Priority:%q Repeat:%s Lang:%q IdempotencyKey:%q Wait:%t WaitTimeout:%s PollInterval:%s}",
+		utf8.RuneCountInString(o.Text), o.Targets, o.Priority, redactedRepeat(o.Repeat), o.Lang, o.IdempotencyKey,
+		o.Wait, o.WaitTimeout, o.PollInterval,
+	)
+}
+
+// GoString keeps %#v from printing the text, as String does.
+func (o AnnounceOptions) GoString() string { return "thalovant." + o.String() }
+
+// Format redacts the text under every verb, including %d, %x and %q, which
+// would otherwise print the struct's fields themselves.
+func (o AnnounceOptions) Format(f fmt.State, verb rune) {
+	if verb == 'v' && f.Flag('#') {
+		_, _ = fmt.Fprint(f, o.GoString())
+		return
+	}
+	_, _ = fmt.Fprint(f, o.String())
+}
+
+// LogValue keeps log/slog handlers, including the JSON one, from printing the text.
+func (o AnnounceOptions) LogValue() slog.Value { return slog.StringValue(o.String()) }
+
+func redactedRepeat(r *IntercomRepeat) string {
+	if r == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("{Times:%d IntervalSeconds:%d}", r.Times, r.IntervalSeconds)
 }
 
 // IntercomDNDUpdate is a do-not-disturb change. The API replaces the whole
@@ -388,18 +470,34 @@ func speakerUpdateBody(update IntercomSpeakerUpdate) (map[string]any, error) {
 	return body, nil
 }
 
-// intercomPath is the escaped path under a hub's intercom routes; a blank id
-// is refused before anything is sent.
+// validIntercomID refuses, before any request, an id (hub, client or
+// announcement) that cannot be one path segment: an empty or blank one, "."
+// or ".." (dot segments, which a URL resolver collapses into another path),
+// and any id holding "/", "?", "#", a backslash or a control character.
+func validIntercomID(value, name string) error {
+	if strings.TrimSpace(value) == "" {
+		return intercomErr("%s is required", name)
+	}
+	if value == "." || value == ".." || strings.ContainsFunc(value, func(r rune) bool {
+		return r == '/' || r == '?' || r == '#' || r == '\\' || unicode.IsControl(r)
+	}) {
+		return intercomErr("%s is not a valid id: it is a dot segment or holds '/', '?', '#', a backslash or a control character", name)
+	}
+	return nil
+}
+
+// intercomPath is the escaped path under a hub's intercom routes; an invalid
+// id is refused before anything is sent.
 func intercomPath(hubID string, rest ...string) (string, error) {
-	if strings.TrimSpace(hubID) == "" {
-		return "", intercomErr("a hub id is required")
+	if err := validIntercomID(hubID, "a hub id"); err != nil {
+		return "", err
 	}
 	return strings.Join(append([]string{"/v1/hubs/" + url.PathEscape(hubID) + "/intercom"}, rest...), "/"), nil
 }
 
 func intercomSegment(value, name string) (string, error) {
-	if strings.TrimSpace(value) == "" {
-		return "", intercomErr("%s is required", name)
+	if err := validIntercomID(value, name); err != nil {
+		return "", err
 	}
 	return url.PathEscape(value), nil
 }
@@ -474,29 +572,48 @@ func (c *ControlPlane) UpdateIntercomSpeaker(ctx context.Context, hubID, clientI
 	return speaker, nil
 }
 
-// Announce says opts.Text aloud on a hub's speakers. The platform keeps only
-// the text's hash and length. Not a certified safety system.
+// Announce says opts.Text aloud on a hub's speakers. The API keeps only a
+// keyed hash of the text and its length. Not a certified safety system.
 //
 // A normal announcement waits up to ten seconds for the hub and returns its
 // result. An urgent one with Repeat returns at once as "sending"; set Wait to
 // poll GetAnnouncement until it completes (or WaitTimeout passes, which
-// returns the latest answer, still "sending"). Set IdempotencyKey, and keep
-// it, to retry after an uncertain outcome without speaking twice.
+// returns the latest answer, still "sending").
+//
+// Idempotency. Set IdempotencyKey to a fresh unique key (a UUID) for each
+// announcement you mean to send, and reuse it only to repeat the same attempt
+// after a network drop or timeout. The key is scoped to the hub and lasts 24
+// hours: the same key replays the stored announcement (the response header
+// Idempotency-Replayed: true) and never sends again, whatever its status; a
+// replayed "failed" announcement stays "failed". To send the same text again
+// on purpose, use a new key. After ErrHubUnreachable (502 hub_unreachable)
+// read the announcement first (APIError.AnnouncementID, then GetAnnouncement)
+// before sending again: the hub may have spoken it. A constant key such as
+// "dinner" would silence every later announcement for 24 hours.
+//
+// Timeout. The API waits up to ten seconds for the hub. This SDK sets no
+// request timeout of its own (the HTTPClient's, if any, applies): a context
+// or HTTPClient.Timeout shorter than twenty seconds can report a spoken
+// announcement as failed, so give Announce at least 20 s. If it returns an
+// error with no announcement, the outcome is unknown: call again with the same
+// key to find out.
 //
 // Wait needs intercom:read as well as intercom:send: the polls are
 // GetAnnouncement. A poll can fail after the announcement was accepted (a
 // token with only intercom:send is refused at the first poll; a 429; the
 // network). Announce then returns the last accepted announcement, whose ID
 // lets the caller poll it later, together with the poll's error: a non-nil
-// error with a non-empty Announcement.ID means the announcement exists and a
-// retry without the same IdempotencyKey may speak it again. WaitTimeout and
+// error with a non-empty Announcement.ID means the announcement exists; calling
+// Announce again with the same IdempotencyKey replays it instead of speaking it
+// again, and one without a key may speak it twice. WaitTimeout and
 // PollInterval are checked before anything is sent, and WaitTimeout bounds
 // each poll, so a stalled read cannot carry the wait past it.
 //
 // Requires intercom:send. Intercom off is ErrIntercomDisabled, an unreachable
-// hub ErrHubUnreachable (the text may or may not have been spoken: retry with
-// the same IdempotencyKey), a rate limit ErrRateLimited (RetryAfter says how
-// long), a plan without intercom ErrPlan (HTTP 402, or 403 plan_limit).
+// hub ErrHubUnreachable (the text may or may not have been spoken; the same
+// IdempotencyKey replays the stored failed record and does not retry), a rate
+// limit ErrRateLimited (RetryAfter says how long), a plan without intercom
+// ErrPlan (HTTP 402, or 403 plan_limit).
 func (c *ControlPlane) Announce(ctx context.Context, hubID string, opts AnnounceOptions) (Announcement, error) {
 	body, err := announceBody(opts)
 	if err != nil {
@@ -591,6 +708,35 @@ func (c *ControlPlane) GetAnnouncement(ctx context.Context, hubID, announcementI
 	}
 	var announcement Announcement
 	if err := c.controlInto(ctx, http.MethodGet, path, nil, nil, &announcement); err != nil {
+		return Announcement{}, err
+	}
+	if announcement.ID == "" || announcement.Status == "" {
+		return Announcement{}, &APIError{Detail: "unexpected announcement shape"}
+	}
+	return announcement, nil
+}
+
+// CancelAnnouncement stops an urgent announcement that is still repeating
+// (POST .../announcements/{id}/cancel) and returns it with status "cancelled".
+// Only while it is "sending": one that already completed, failed or was
+// cancelled is ErrNotCancellable (409 not_cancellable). The API asks the hub
+// to stop repeating; a hub that cannot confirm still leaves the record
+// "cancelled" and the answer has HubConfirmed false: then speech already
+// queued on the hub may still play, and the hub's own stop paths (the hub
+// switch, the platform kill switch, somebody acknowledging) remain. Requires
+// intercom:send (owner or admin of the hub); a hub-scoped token is honoured.
+// Not a certified safety system.
+func (c *ControlPlane) CancelAnnouncement(ctx context.Context, hubID, announcementID string) (Announcement, error) {
+	segment, err := intercomSegment(announcementID, "an announcement id")
+	if err != nil {
+		return Announcement{}, err
+	}
+	path, err := intercomPath(hubID, "announcements", segment, "cancel")
+	if err != nil {
+		return Announcement{}, err
+	}
+	var announcement Announcement
+	if err := c.controlInto(ctx, http.MethodPost, path, nil, nil, &announcement); err != nil {
 		return Announcement{}, err
 	}
 	if announcement.ID == "" || announcement.Status == "" {

@@ -1,4 +1,4 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0): Announce, speakers and settings on the control plane.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom (0.16.0), amendment 2: CancelAnnouncement, fresh idempotency keys, safe ids, redacted options, wording.
 
 <p align="center">
   <picture>
@@ -276,9 +276,11 @@ is about, never their values. `errors.Is(err, thalovant.ErrPlan)` covers 402 and
 
 Say a short text aloud on a hub's speakers. Off by default at every level, announce-only,
 and **not a certified safety system**: it does not replace smoke or CO alarms, medical
-alert devices or emergency services. The platform never stores the text. (The names are
-`Announce` and `*Intercom*`: the HiveMind mesh already has an `intercom` frame.) Scopes:
-`intercom:read`, `intercom:send`, and `hubs:write` for settings and speakers.
+alert devices or emergency services. The API does not store the text (it keeps a keyed hash
+and the length), and intercom does not record or store speech: while an alert sounds, the hub
+only checks whether a reply is an acknowledgement. (The names are `Announce` and `*Intercom*`:
+the HiveMind mesh already has an `intercom` frame.) Scopes: `intercom:read`, `intercom:send`
+(announce and cancel; plus `intercom:read` with `Wait`), and `hubs:write` for settings and speakers.
 
 ```go
 _, _ = api.SetIntercomSettings(ctx, hubID, true) // hubs:write
@@ -287,31 +289,106 @@ speaker := speakers[0]
 yes, kitchen := true, "kitchen"
 _, _ = api.UpdateIntercomSpeaker(ctx, hubID, speaker.ClientID, thalovant.IntercomSpeakerUpdate{Receive: &yes, Room: &kitchen})
 
+// A fresh unique key for each announcement you mean to send (see "Idempotency keys" below):
+// NewRequestID is 128 random bits; a UUID (github.com/google/uuid) works as well.
 said, err := api.Announce(ctx, hubID, thalovant.AnnounceOptions{
 	Text: "Dinner is ready", Targets: thalovant.SpeakerTargets(speaker.ClientID), // or RoomTargets("kitchen")
+	IdempotencyKey: thalovant.NewRequestID(),
 })
 urgent, err := api.Announce(ctx, hubID, thalovant.AnnounceOptions{
 	Text: "Please answer", Targets: thalovant.AllSpeakers(), Priority: thalovant.IntercomPriorityUrgent,
-	Repeat: &thalovant.IntercomRepeat{Times: 3, IntervalSeconds: 20}, IdempotencyKey: "please-answer-1",
+	Repeat: &thalovant.IntercomRepeat{Times: 3, IntervalSeconds: 20}, IdempotencyKey: thalovant.NewRequestID(),
 	Wait: true, // polls while "sending"; needs intercom:read as well
 })
+
+// Changed your mind, or sent it to the wrong room? Stop it while it is still repeating.
+sent, _ := api.Announce(ctx, hubID, thalovant.AnnounceOptions{
+	Text: "Wake up", Targets: thalovant.AllSpeakers(), Priority: thalovant.IntercomPriorityUrgent,
+	Repeat: &thalovant.IntercomRepeat{Times: 10, IntervalSeconds: 60}, IdempotencyKey: thalovant.NewRequestID(),
+})
+stopped, err := api.CancelAnnouncement(ctx, hubID, sent.ID) // intercom:send
+// stopped.Status == "cancelled"; stopped.HubConfirmed is a *bool: false when the hub could not confirm
 ```
+
+### Idempotency keys: one fresh key per announcement
+
+Set `IdempotencyKey` to a fresh unique key (a UUID) for every announcement you mean to send.
+The API scopes a key to `(hub, key)` and remembers it for 24 hours:
+
+- **The same key replays the stored announcement** (the response header is
+  `Idempotency-Replayed: true`) and **never sends again**, whatever its status. A replayed
+  `failed` announcement stays `failed`; it is not retried.
+- **A constant key silences you.** A literal key such as `"dinner"` sends once; every later
+  announcement with that key, for 24 hours, returns the first one's answer and nothing is
+  spoken. Never copy a literal key into real code, and never derive it from the text or the date.
+- **Reuse a key only for the same attempt**, after a network drop or a timeout: the call then
+  returns what the first attempt did (and its id) instead of speaking twice.
+- **To send the same text again on purpose, use a new key.**
+- **After a 502 `hub_unreachable`** (`errors.Is(err, ErrHubUnreachable)`) the hub may or may not
+  have spoken. The API recorded the attempt as a `failed` announcement and puts its id in the
+  problem body: `apiErr.AnnouncementID()`. Read it with `GetAnnouncement` and look at the
+  deliveries before you send again. Resending with the **same** key will not retry (it replays
+  the `failed` record); a deliberate second send needs a **new** key.
+
+```go
+key := thalovant.NewRequestID()
+_, err := api.Announce(ctx, hubID, thalovant.AnnounceOptions{Text: "Dinner is ready", Targets: thalovant.RoomTargets("kitchen"), IdempotencyKey: key})
+var apiErr *thalovant.APIError
+if errors.Is(err, thalovant.ErrHubUnreachable) && errors.As(err, &apiErr) && apiErr.AnnouncementID() != "" {
+	recorded, _ := api.GetAnnouncement(ctx, hubID, apiErr.AnnouncementID()) // what did the hub do?
+	fmt.Println(recorded.Status, recorded.Deliveries)
+}
+```
+
+### Stopping an announcement
+
+An urgent announcement that repeats can be stopped. These are the real controls:
+
+- **`CancelAnnouncement(ctx, hubID, announcementID)`** (`intercom:send`, owner or admin of the
+  hub) asks the hub to stop repeating and returns the announcement as `cancelled`. It works only
+  while the status is `sending`; for one that already completed, failed or was cancelled the API
+  answers 409 `not_cancellable` (`errors.Is(err, ErrNotCancellable)`). If the hub cannot confirm
+  the cancel, the record is still `cancelled` and `HubConfirmed` points to `false`: speech already
+  queued on the hub may still play.
+- **The hub's Intercom switch** (`SetIntercomSettings(ctx, hubID, false)`, `hubs:write`) takes
+  effect when the hub's runtime updates, which can take as long as a rollout; the hub's repeat
+  loop also stops by itself when it sees the switch off.
+- **The platform kill switch** (operator side) and a speaker whose `Receive` is turned off also
+  stop the repeats.
+- **Somebody answering at a speaker.** An urgent announcement stops being repeated once it is
+  acknowledged by voice ("I'm okay", "got it", "stop").
+
+Nothing here is instant for sound that is already playing, and none of it makes intercom a
+safety system.
+
+### Ids, timeouts and printing options
+
+The hub id, a speaker's client id and an announcement id are each one path segment. The SDK
+refuses (an error that matches `ErrAPI`) and sends nothing when an id is empty or blank, is `.`
+or `..` (dot segments), or holds `/`, `?`, `#`, a backslash or a control character. The API waits
+up to ten seconds for the hub, and this SDK sets no request timeout of its own: a context or an
+`HTTPClient.Timeout` shorter than 20 seconds can report a spoken announcement as failed, so give
+`Announce` at least 20 seconds. `AnnounceOptions` redacts its text under every `fmt` verb and in
+`log/slog` (`<N chars>`), so printing or logging the options never prints what is spoken aloud.
 
 `Wait` needs **`intercom:read` as well as `intercom:send`** (the polls are `GetAnnouncement`).
 `WaitTimeout` and `PollInterval` must not be negative (zero is the default); they are checked
 before anything is sent, and `WaitTimeout` bounds each poll, not only the sleep between polls.
 A poll can fail after the announcement was accepted (a token with only `intercom:send` is
 refused at the first poll; a 429; the network): `Announce` then returns the accepted
-announcement (its `ID` is set) together with the error. Always set an `IdempotencyKey` with
-`Wait` and reuse it to retry, so a retry is not announced a second time.
+announcement (its `ID` is set) together with the error. Always set a fresh `IdempotencyKey` with
+`Wait`: calling `Announce` again with that same key replays the stored announcement (with its
+`ID`) and does not announce a second time.
 
 A speaker's `IntercomDNDUpdate.Enabled` is a `*bool` and required: the API replaces the whole
 do-not-disturb setting and stores a missing `enabled` as `false`, so an update that only
 carries `QuietHours` must still say whether DND is on.
 
 Refusals are `*APIError`s: `errors.Is` reaches `ErrIntercomDisabled` (switch off, kid or
-public hub), `ErrHubUnreachable` (502: the text may or may not have been spoken; retry with the
-same `IdempotencyKey`), `ErrRateLimited` (`RetryAfter`), `ErrPlan` (HTTP 402, or 403 with
+public hub), `ErrHubUnreachable` (502: the text may or may not have been spoken;
+`APIError.AnnouncementID()` names the recorded `failed` announcement: read it before sending
+again, and use a new key, because the same key replays the failed record), `ErrNotCancellable`
+(409 `not_cancellable`), `ErrRateLimited` (`RetryAfter`), `ErrPlan` (HTTP 402, or 403 with
 `plan_limit`) and `ErrAuth`.
 
 ## Development
