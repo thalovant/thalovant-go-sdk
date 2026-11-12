@@ -514,6 +514,31 @@ func TestIntercomMalformedAnswersAreAPIErrors(t *testing.T) {
 	}
 }
 
+func TestIntercomAnAnswerWithAnIDButNoStatusKeepsTheID(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("POST", icBase+"/announce", icReply{Status: 202, Body: map[string]any{"id": icAnn}, Headers: map[string]string{"Idempotency-Replayed": "true"}})
+	got, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "hi", Targets: AllSpeakers()})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatalf("an answer without a status was accepted: %v", err)
+	}
+	if got.ID != icAnn || !got.Replayed {
+		t.Fatalf("the accepted announcement's handle was dropped: %+v", got)
+	}
+}
+
+func TestIntercomTheUrgentScopeCodeBeatsTheGenericInsufficientScopesRefusal(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("POST", icBase+"/announce", icReply{Status: 403, Body: map[string]any{"code": "urgent_scope_required", "detail": "Insufficient scopes"}})
+	_, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "hi", Targets: AllSpeakers(), Priority: IntercomPriorityUrgent})
+	if !errors.Is(err, ErrUrgentScopeRequired) || !errors.Is(err, ErrAuth) {
+		t.Fatalf("err = %v: want ErrUrgentScopeRequired and ErrAuth", err)
+	}
+	if errors.Is(err, ErrIntercomDisabled) || errors.Is(err, ErrPlan) {
+		t.Fatalf("err = %v matches an unrelated refusal", err)
+	}
+}
+
 // --- Amendment 2: cancel, replay, ids, redaction, the 502 announcement id, doc rules -------------------------
 
 var icUnsafeIDs = []string{".", "..", "", "   ", "a/b", "/", "a?b", "a#b", `a\b`, "a\x00b", "a\nb", "a\tb", "a\x7fb", "a\u0085b", "../x", "x/.."}

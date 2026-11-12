@@ -436,7 +436,7 @@ type AnnounceOptions struct {
 	// purpose you need a new key.
 	IdempotencyKey string
 	// Wait polls a "sending" announcement with GetAnnouncement until it
-	// completes. The polls need intercom:read as well as intercom:send.
+	// completes. The polls need intercom:read, which intercom:send implies.
 	Wait bool
 	// WaitTimeout is the longest wait: Times*Interval+15s when zero; it must
 	// not be negative. The deadline bounds each poll, not only the sleep
@@ -909,16 +909,22 @@ func (c *ControlPlane) UpdateIntercomSpeaker(ctx context.Context, hubID, clientI
 // or HTTPClient.Timeout shorter than twenty seconds can report a spoken
 // announcement as failed, so give Announce at least 20 s. If it returns an
 // error with no announcement, the outcome is unknown: call again with the same
-// key to find out.
+// key to find out. An answer that names no status is an *APIError ("unexpected
+// announcement shape") returned with whatever was decoded: when that carries
+// an ID the announcement exists, so read it with GetAnnouncement before
+// sending again.
 //
-// Wait needs intercom:read as well as intercom:send: the polls are
-// GetAnnouncement. A poll can fail after the announcement was accepted (a
-// token with only intercom:send is refused at the first poll; a 429; the
-// network). Announce then returns the last accepted announcement, whose ID
-// lets the caller poll it later, together with the poll's error: a non-nil
-// error with a non-empty Announcement.ID means the announcement exists; calling
-// Announce again with the same IdempotencyKey replays it instead of speaking it
-// again, and one without a key may speak it twice. WaitTimeout and
+// Wait polls with GetAnnouncement (intercom:read, which intercom:send implies,
+// so no further scope is needed). A poll can fail after the announcement was
+// accepted (a 429; the network). Announce then returns the last accepted
+// announcement, whose ID lets the caller poll it later, together with the
+// poll's error: a non-nil error with a non-empty Announcement.ID means the
+// announcement exists. Create the IdempotencyKey before the first call and
+// keep it: calling Announce again with that same key (and Wait false) replays
+// the stored announcement, with its ID, from the POST alone and does not speak
+// it again; with Wait true the repeat call polls again and can fail the same
+// way. A new key is a different attempt and can speak twice, and a call
+// without a key may speak it twice. WaitTimeout and
 // PollInterval are checked before anything is sent, and WaitTimeout bounds
 // each poll, so a stalled read cannot carry the wait past it.
 //
@@ -960,10 +966,14 @@ func (c *ControlPlane) Announce(ctx context.Context, hubID string, opts Announce
 	if err != nil {
 		return Announcement{}, err
 	}
-	if announcement.ID == "" || announcement.Status == "" {
-		return Announcement{}, &APIError{Detail: "unexpected announcement shape"}
-	}
 	announcement.Replayed = strings.EqualFold(strings.TrimSpace(responseHeader.Get("Idempotency-Replayed")), "true")
+	if announcement.ID == "" || announcement.Status == "" {
+		// The POST was answered, so the announcement may exist: whatever was
+		// decoded (its ID, when the answer named one) goes back with the error,
+		// so that the caller can read it with GetAnnouncement instead of
+		// sending again.
+		return announcement, &APIError{Detail: "unexpected announcement shape"}
+	}
 	replayed := announcement.Replayed
 	if !opts.Wait || !announcement.Sending() {
 		return announcement, nil
@@ -1063,7 +1073,8 @@ func (c *ControlPlane) GetAnnouncement(ctx context.Context, hubID, announcementI
 // "cancelled" and the answer has HubConfirmed false: then speech already
 // queued on the hub may still play, and the hub's own stop paths (the hub
 // switch, the platform kill switch, somebody acknowledging) remain. Requires
-// intercom:send (owner or admin of the hub); a hub-scoped token is honoured.
+// intercom:send (the hub's owner, a manager, a plain member of the tenant or an
+// administrator); a hub-scoped token is honoured.
 // Stopping speech is never refused: it works while the platform switch is off,
 // while the hub's switch is off, on a plan that lost intercom, and in an
 // impersonated session (the answer then has HubConfirmed false when no hub was

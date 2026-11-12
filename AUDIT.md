@@ -1,4 +1,4 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom final API: L6 and the replayed flag are fixed; new open items (no NFC, timezone database, Unicode version, ListIntercomSpeakers return type, detail vs message).
+Last Edit: Claude Sonnet 5.5 - 2026-11-12 - Motive: Intercom review round 2 (CodeRabbit PR 92): urgent-scope precedence, the accepted announcement kept on a malformed POST answer, docs aligned with the API.
 
 ## 2026-11-11 — Intercom (0.16.0): `AnnounceOptions` printed the text (security review L4), now redacted
 
@@ -34,9 +34,15 @@ The final intercom problems carry their sentence in `message`; `problemFields` (
 - **Quiet hours** that are on need a real IANA zone and `Start != End` (`TestIntercomAnUnusableDoNotDisturbIsRefusedBeforeAnythingIsSent`).
 - **`hub_unreachable` and `not_cancellable` decide by code**, whatever the status, as in the reference (`TestIntercomTheCodesDecideWhateverTheStatus`); the 13 new codes have typed refusals (`TestIntercomEachNewProblemCodeIsItsOwnTypedRefusal`).
 
+## 2026-11-12 — Intercom (0.16.0): fixed in review round 2 (CodeRabbit PR 92)
+
+- **A 403 with `urgent_scope_required` and the generic "Insufficient scopes" sentence was only an `ErrAuth`** (`errors.go`, `APIError.refusal`): the intercom code now wins (`intercom_test.go`, `TestIntercomTheUrgentScopeCodeBeatsTheGenericInsufficientScopesRefusal`).
+- **A POST answer with an `id` but no `status` dropped the announcement** (`intercom.go`, `Announce`): the partly decoded announcement now comes back with the error (`TestIntercomAnAnswerWithAnIDButNoStatusKeepsTheID`).
+- **Docs said `Wait` needs `intercom:read` as well, and that cancel is owner/admin only**: both were wrong against the API (`thalovant-api` `app/auth/utils.py:232`, `app/routes/intercom.py` `cancel_announcement`); corrected.
+
 ## 2026-11-11 — Intercom (0.16.0): a poll that fails after the POST
 
-`ControlPlane.Announce` with `Wait` (`intercom.go`) sends the POST, then polls `GetAnnouncement`, which needs `intercom:read`. A token with only `intercom:send`, a 429 or a network error fails a poll after the announcement was accepted. `Announce` now returns the last accepted `Announcement` with the error, so its ID is not lost (`intercom_test.go`, `TestIntercomAFailedPollKeepsTheAcceptedAnnouncement`); a retry still needs the same `IdempotencyKey` to avoid speaking it again.
+`ControlPlane.Announce` with `Wait` (`intercom.go`) sends the POST, then polls `GetAnnouncement` (`intercom:read`, which `intercom:send` implies: `thalovant-api` `app/auth/utils.py` `expand_granted_scopes`). A 429 or a network error fails a poll after the announcement was accepted. `Announce` now returns the last accepted `Announcement` with the error, so its ID is not lost (`intercom_test.go`, `TestIntercomAFailedPollKeepsTheAcceptedAnnouncement`); a retry still needs the same `IdempotencyKey` to avoid speaking it again.
 
 ## 2026-11-11 — Intercom (0.16.0): the text is in the request body
 

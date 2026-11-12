@@ -98,7 +98,8 @@ var (
 	ErrImpersonationNotAllowed = errors.New("thalovant impersonated session not allowed")
 	// ErrTooManyTargets matches an *APIError with code "too_many_targets"
 	// (HTTP 422): all, a room or a group resolved to more than 50 speakers;
-	// APIError.Matched says how many. Name a room or a group.
+	// APIError.Matched says how many. Naming that same room or group resolves
+	// to the same speakers: choose a narrower target or name at most 50.
 	ErrTooManyTargets = errors.New("thalovant too many announcement targets")
 	// ErrManagedClient matches an *APIError with code "managed_client" (HTTP
 	// 403): the platform's own Intercom client cannot be managed, given
@@ -529,18 +530,21 @@ func (e *APIError) refusal() error {
 	// apiErrorFromResponse does.
 	bodyCode, bodyDetail := problemFields(e.Problem)
 	code, detail := firstNonEmpty(e.Code, bodyCode), firstNonEmpty(e.ProblemDetail, bodyDetail)
+	intercom := intercomRefusals[code]
 	switch {
-	case e.StatusCode == 401 || e.StatusCode == 423 || (e.StatusCode == 403 && detail == "Insufficient scopes"):
+	case e.StatusCode == 401 || e.StatusCode == 423 || (e.StatusCode == 403 && detail == "Insufficient scopes" && intercom == nil):
 		// A token that is unknown, expired or revoked; a locked account; or a
-		// token without the scope: signing in again is the way out of each.
+		// token without the scope: signing in again is the way out of each. A
+		// 403 that names an intercom code (ErrUrgentScopeRequired is the one
+		// that is a refusal of scope) is that code's own refusal instead.
 		return ErrAuth
 	case e.StatusCode == 402 || (e.StatusCode == 403 && code == "plan_limit"):
 		return ErrPlan
 	case e.StatusCode == 409 && code == "home_assistant_already_linked":
 		return ErrAlreadyLinked
-	case intercomRefusals[code] != nil:
+	case intercom != nil:
 		// The intercom codes decide by code, whatever the status.
-		return intercomRefusals[code]
+		return intercom
 	case e.StatusCode == 429:
 		return ErrRateLimited
 	}

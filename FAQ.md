@@ -6,16 +6,16 @@ Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom final API: urgent s
 It is announce-only text spoken by each speaker's own text-to-speech, and **not a certified safety system**: it does not replace smoke or CO alarms, medical alert devices or emergency services. The mesh already has an `intercom` frame, so the HTTP calls are `Announce`, `GetAnnouncement`, `ListAnnouncements` and `*Intercom*`. The API does not store the text (a keyed hash and the length only), and intercom does not record or store speech; while an alert sounds it only checks whether a reply is an acknowledgement.
 
 ## Why did `Announce` with `Wait` return an error after the announcement was accepted?
-`Wait` polls `GetAnnouncement`, which needs `intercom:read` as well as `intercom:send`; a poll can also fail on a 429 or the network. `Announce` returns the accepted `Announcement` (its `ID` is set) with the error. Set a fresh `IdempotencyKey` (`thalovant.NewRequestID()`) and call again with that same key: the API replays the stored announcement, with its `ID`, and does not say it twice.
+`Wait` polls `GetAnnouncement` (`intercom:read`, which `intercom:send` implies); a poll can still fail on a 429 or the network. `Announce` returns the accepted `Announcement` (its `ID` is set) with the error. Create a fresh `IdempotencyKey` (`thalovant.NewRequestID()`) **before** the first call and keep that exact key (a new key is a different attempt and can announce twice), then call again with it and `Wait` false: the POST replays the stored announcement, with its `ID`, makes no status read and does not say it twice (with `Wait` true the repeat call polls again and can fail the same way). If the first call had no key, nothing can replay it: find the announcement with `ListAnnouncements` (newest first) before sending again.
 
 ## Why did my second announcement say nothing, and the result is the first one?
 The same `IdempotencyKey` replays the stored announcement (`Idempotency-Replayed: true`) for 24 hours and never sends again, whatever its status. You reused a key (or a constant like `"dinner"`). Use a fresh `thalovant.NewRequestID()` per announcement you mean to send; to send the same text again on purpose, use a new key.
 
 ## `Announce` returned `ErrHubUnreachable`. Can I send again with the same key?
-Not to send again: a replayed `failed` announcement stays `failed`. The hub may have spoken it. Read `GetAnnouncement(ctx, hubID, apiErr.AnnouncementID())`, and only if nothing was spoken use a new key.
+Not to send again: a replayed `failed` announcement stays `failed`. The hub may have spoken it, and a `failed` record is not proof that it did not. Read `GetAnnouncement(ctx, hubID, apiErr.AnnouncementID())`, weigh the risk of saying it twice, and use a new key only when you choose to send a second attempt.
 
 ## How do I stop an urgent announcement that is repeating?
-`CancelAnnouncement(ctx, hubID, announcementID)` (`intercom:send`): status `cancelled`, `HubConfirmed` false when the hub could not confirm. Only while `sending`, else `ErrNotCancellable` (409). Other controls: the hub's switch, the platform kill switch, a speaker's `Receive`, and somebody acknowledging by voice.
+`CancelAnnouncement(ctx, hubID, announcementID)` (`intercom:send`; the owner, a manager, a plain member or an administrator, an impersonated session too): status `cancelled`, `HubConfirmed` false when the hub could not confirm. Only while `sending`, else `ErrNotCancellable` (409). Other controls: the hub's switch, the platform kill switch, a speaker's `Receive`, and somebody acknowledging by voice.
 
 ## Why is `GetAnnouncement(ctx, hubID, "..")` refused?
 An id that is `.`, `..`, empty, or holds `/`, `?`, `#`, a backslash or a control character is refused before any request: a dot segment would change the route.
@@ -39,7 +39,7 @@ Intercom ships dark: until the platform operator turns it on, `GetIntercomSettin
 The standard library has no normaliser and `golang.org/x/text` is not a dependency, so the 280 characters are counted as sent. A text in decomposed form (`e` + U+0301) counts two; the API composes it before counting. Compose the text first (or use `golang.org/x/text/unicode/norm` in your own code) if you are near the limit.
 
 ## Why was nobody spoken to?
-A speaker is skipped unless its `Receive` is true (`skipped_not_receiving`, even for urgent); a normal announcement is skipped inside quiet hours (`skipped_dnd`; urgent bypasses them); an offline speaker is `offline`. `errors.Is(err, ErrIntercomDisabled)` means the hub's switch is off (`ErrIntercomUnavailable`, a kind of it, a kid or public hub). `DeliveryDelivered` is not "heard": there is no playback receipt.
+A speaker is skipped unless its `Receive` is true (`skipped_not_receiving`, even for urgent); a normal announcement is skipped inside quiet hours (`skipped_dnd`; urgent bypasses them); an offline speaker is `offline`. `errors.Is(err, ErrIntercomDisabled)` also matches `ErrIntercomPlatformDisabled` (the platform's switch) and `ErrIntercomUnavailable` (a kid or public hub), so check those two first: only when neither matches is it the hub's own switch, and only then is changing the hub's setting the fix. `DeliveryDelivered` is not "heard": there is no playback receipt.
 
 ## How do I sign a person in from a CLI or a desktop tool?
 
