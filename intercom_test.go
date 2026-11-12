@@ -11,11 +11,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"reflect"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -287,7 +290,8 @@ func TestIntercomDNDNeedsAnExplicitEnabled(t *testing.T) {
 	api, fake := newIntercomAPI(t)
 	speaker := map[string]any{"client_id": "c1", "slug": "k", "name": "K", "online": true, "intercom": map[string]any{}}
 	fake.reply("PATCH", icBase+"/speakers/c1", icReply{Status: 200, Body: speaker})
-	hours := &IntercomQuietHours{Start: "21:00", End: "06:30"}
+	zone := "Europe/Paris"
+	hours := &IntercomQuietHours{Start: "21:00", End: "06:30", Timezone: &zone}
 	if _, err := api.UpdateIntercomSpeaker(context.Background(), icHub, "c1", IntercomSpeakerUpdate{DND: &IntercomDNDUpdate{QuietHours: hours}}); !errors.Is(err, ErrAPI) {
 		t.Fatalf("a DND update without Enabled was accepted: %v", err)
 	}
@@ -336,7 +340,7 @@ func TestIntercomSpeakersAndPatchSendOnlyWhatIsSet(t *testing.T) {
 	fake.reply("GET", icBase+"/speakers", icReply{Status: 200, Body: map[string]any{"items": []any{speaker}}})
 	fake.reply("PATCH", icBase+"/speakers/c-1", icReply{Status: 200, Body: speaker})
 	listed, err := api.ListIntercomSpeakers(context.Background(), icHub)
-	if err != nil || len(listed) != 1 || !listed[0].Online || listed[0].Intercom.DND.QuietHours.Start != "22:00" || *listed[0].Intercom.Room != "kitchen" {
+	if err != nil || len(listed.Items) != 1 || !listed.Items[0].Online || listed.Items[0].Intercom.DND.QuietHours.Start != "22:00" || *listed.Items[0].Intercom.Room != "kitchen" {
 		t.Fatalf("%+v %v", listed, err)
 	}
 	yes := true
@@ -417,7 +421,9 @@ func TestIntercomErrorsAreTyped(t *testing.T) {
 		if !errors.As(err, &apiErr) || apiErr.StatusCode != tc.status {
 			t.Fatalf("%d: err = %v", tc.status, err)
 		}
-		for _, other := range []error{ErrIntercomDisabled, ErrHubUnreachable, ErrNotCancellable, ErrRateLimited, ErrPlan, ErrAuth} {
+		for _, other := range []error{ErrIntercomDisabled, ErrHubUnreachable, ErrNotCancellable, ErrRateLimited, ErrPlan, ErrAuth,
+			ErrIntercomUnavailable, ErrIntercomPlatformDisabled, ErrIntercomNotConfigured, ErrUrgentScopeRequired, ErrUrgentBusy,
+			ErrSkillNotInstalled, ErrNotASpeaker, ErrReservedName, ErrHubLocked, ErrImpersonationNotAllowed, ErrTooManyTargets, ErrManagedClient} {
 			if want := other == tc.target; errors.Is(err, other) != want {
 				t.Fatalf("%d %v: errors.Is(%v) = %v", tc.status, tc.body, other, !want)
 			}
@@ -438,7 +444,7 @@ func TestIntercomNothingIsSentForInvalidInput(t *testing.T) {
 	}
 	bad := []AnnounceOptions{
 		{Text: "", Targets: all}, {Text: "   ", Targets: all}, {Text: strings.Repeat("x", 281), Targets: all},
-		{Text: "a\x07b", Targets: all}, {Text: "a b", Targets: all},
+		{Text: "a\x07b", Targets: all}, {Text: "a" + string(rune(0x2028)) + "b", Targets: all},
 		{Text: "hi"}, {Text: "hi", Targets: IntercomTargets{All: true, Rooms: []string{"a"}}},
 		{Text: "hi", Targets: SpeakerTargets(many...)}, {Text: "hi", Targets: RoomTargets(" ")},
 		{Text: "hi", Targets: all, Repeat: &IntercomRepeat{Times: 2, IntervalSeconds: 10}},
@@ -484,7 +490,7 @@ func TestIntercomNothingIsSentForInvalidInput(t *testing.T) {
 }
 
 func TestIntercomAnnouncementTextCountsCharacters(t *testing.T) {
-	if _, err := AnnouncementText(strings.Repeat("\U0001F600", 280)); err != nil {
+	if _, err := AnnouncementText(strings.Repeat(string(rune(0x1F600)), 280)); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := AnnouncementText("  hi \n"); got != "hi" {
@@ -742,6 +748,660 @@ func TestIntercomDocsDoNotUseAConstantKeyOrOverPromise(t *testing.T) {
 	for _, word := range []string{"uuid", "idempotency-replayed", "cancelannouncement", "new key", "announcementid"} {
 		if !strings.Contains(readme, word) {
 			t.Errorf("README.md does not mention %q", word)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// The final API (platform security review): scope, speaker model, problem
+// codes, one validation rule.
+// ---------------------------------------------------------------------------
+
+var icSpeakerDND = map[string]any{"enabled": false, "quiet_hours": map[string]any{"start": "22:00", "end": "07:00", "timezone": nil}}
+
+func icSpeakerRow(extra map[string]any) map[string]any {
+	row := map[string]any{
+		"client_id": "d8d4", "slug": "kitchen-speaker", "name": "Kitchen Speaker", "kind": "voice_satellite",
+		"can_play": true, "online": false, "last_seen_at": nil,
+		"intercom": map[string]any{"receive": true, "room": "kitchen", "groups": []any{}, "dnd": icSpeakerDND},
+	}
+	for k, v := range extra {
+		row[k] = v
+	}
+	return row
+}
+
+func TestIntercomSpeakerListReadsKindCanPlayAndPolicySynced(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	link := icSpeakerRow(map[string]any{"client_id": "996f", "slug": "home-link", "name": "Home link", "kind": "home_assistant", "can_play": false})
+	fake.reply("GET", icBase+"/speakers", icReply{Status: 200, Body: map[string]any{
+		"items": []any{icSpeakerRow(nil), link}, "unavailable_reason": nil, "policy_synced": false}})
+	listed, err := api.ListIntercomSpeakers(context.Background(), icHub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listed.PolicySynced == nil || *listed.PolicySynced || listed.UnavailableReason != "" || len(listed.Items) != 2 {
+		t.Fatalf("list: %+v", listed)
+	}
+	kitchen, home := listed.Items[0], listed.Items[1]
+	if kitchen.Kind != "voice_satellite" || !kitchen.CanPlay || kitchen.PolicySynced != nil {
+		t.Fatalf("kitchen: %+v", kitchen)
+	}
+	if home.Kind != "home_assistant" || home.CanPlay {
+		t.Fatalf("home link: %+v", home)
+	}
+}
+
+func TestIntercomASpeakerWithoutTheNewFieldsKeepsTheAPIsDefaults(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("GET", icBase+"/speakers", icReply{Status: 200, Body: map[string]any{"items": []any{map[string]any{"client_id": "c1"}}}})
+	only, err := api.ListIntercomSpeakers(context.Background(), icHub)
+	if err != nil || only.Items[0].Kind != "voice_satellite" || !only.Items[0].CanPlay || only.PolicySynced != nil || only.UnavailableReason != "" {
+		t.Fatalf("%+v %v", only, err)
+	}
+	// Garbage is not trusted: only an explicit false says "cannot play".
+	fake.reply("GET", icBase+"/speakers", icReply{Status: 200, Body: map[string]any{"items": []any{
+		map[string]any{"client_id": "c1", "kind": 7, "can_play": "no", "policy_synced": "yes"}}, "policy_synced": "yes"}})
+	odd, err := api.ListIntercomSpeakers(context.Background(), icHub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := odd.Items[0]; got.Kind != "voice_satellite" || !got.CanPlay || got.PolicySynced != nil || odd.PolicySynced != nil {
+		t.Fatalf("%+v %+v", got, odd)
+	}
+}
+
+func TestIntercomTheSpeakerPatchAnswerCarriesItsOwnPolicySynced(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	yes := true
+	for _, synced := range []bool{false, true} {
+		fake.reply("PATCH", icBase+"/speakers/d8d4", icReply{Status: 200, Body: icSpeakerRow(map[string]any{"policy_synced": synced})})
+		got, err := api.UpdateIntercomSpeaker(context.Background(), icHub, "d8d4", IntercomSpeakerUpdate{Receive: &yes})
+		if err != nil || got.PolicySynced == nil || *got.PolicySynced != synced {
+			t.Fatalf("%+v %v", got, err)
+		}
+	}
+}
+
+func TestIntercomThePlatformReasonIsAnUnavailableReason(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("GET", icBase+"/settings", icReply{Status: 200, Body: map[string]any{"enabled": false, "plan_allowed": true, "unavailable_reason": "platform"}})
+	fake.reply("GET", icBase+"/speakers", icReply{Status: 200, Body: map[string]any{"items": []any{}, "unavailable_reason": "platform", "policy_synced": true}})
+	settings, err := api.GetIntercomSettings(context.Background(), icHub)
+	if err != nil || settings.UnavailableReason != IntercomUnavailablePlatform || settings.Enabled {
+		t.Fatalf("%+v %v", settings, err)
+	}
+	listed, err := api.ListIntercomSpeakers(context.Background(), icHub)
+	if err != nil || listed.UnavailableReason != IntercomUnavailablePlatform || listed.PolicySynced == nil || !*listed.PolicySynced {
+		t.Fatalf("%+v %v", listed, err)
+	}
+	if IntercomUnavailablePlan != "plan" || IntercomUnavailableKidHub != "kid_hub" || IntercomUnavailablePublic != "public_hub" {
+		t.Fatal("reason constants")
+	}
+}
+
+func TestIntercomADeliveryKeepsItsDetailCode(t *testing.T) {
+	body := icAnnouncement("failed", map[string]any{"deliveries": []any{
+		map[string]any{"client_id": "c1", "slug": "k", "name": "K", "status": "failed", "detail": "hub_no_response", "at": nil},
+		map[string]any{"client_id": "c2", "slug": "d", "name": "D", "status": "delivered", "detail": nil, "at": nil},
+		map[string]any{"client_id": "c3", "slug": "e", "name": "E", "status": "failed", "detail": "a_code_from_the_future", "at": nil},
+	}})
+	api, fake := newIntercomAPI(t)
+	fake.reply("GET", icBase+"/announcements/"+icAnn, icReply{Status: 200, Body: body})
+	got, err := api.GetAnnouncement(context.Background(), icHub, icAnn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Deliveries[0].Detail != "hub_no_response" || got.Deliveries[1].Detail != "" || got.Deliveries[2].Detail != "a_code_from_the_future" {
+		t.Fatalf("%+v", got.Deliveries)
+	}
+	if !KnownDeliveryDetail("hub_no_response") || KnownDeliveryDetail("a_code_from_the_future") || KnownDeliveryDetail("") {
+		t.Fatal("KnownDeliveryDetail")
+	}
+}
+
+func TestIntercomTheScopeAndProblemCodeNamesAreConstants(t *testing.T) {
+	if IntercomReadScope != "intercom:read" || IntercomSendScope != "intercom:send" || IntercomUrgentScope != "intercom:urgent" {
+		t.Fatal("scope names")
+	}
+	// Every code has a typed refusal, and no refusal is left without a code.
+	want := map[string]error{
+		"intercom_disabled": ErrIntercomDisabled, "intercom_unavailable": ErrIntercomUnavailable,
+		"intercom_disabled_platform": ErrIntercomPlatformDisabled, "intercom_not_configured": ErrIntercomNotConfigured,
+		"urgent_scope_required": ErrUrgentScopeRequired, "intercom_urgent_busy": ErrUrgentBusy,
+		"skill_not_installed": ErrSkillNotInstalled, "not_a_speaker": ErrNotASpeaker, "reserved_name": ErrReservedName,
+		"hub_locked": ErrHubLocked, "impersonation_not_allowed": ErrImpersonationNotAllowed,
+		"too_many_targets": ErrTooManyTargets, "managed_client": ErrManagedClient, "not_cancellable": ErrNotCancellable,
+		"hub_unreachable": ErrHubUnreachable,
+	}
+	got := map[string]error{
+		IntercomCodeDisabled: nil, IntercomCodeUnavailable: nil, IntercomCodeDisabledPlatform: nil, IntercomCodeNotConfigured: nil,
+		IntercomCodeUrgentScopeRequired: nil, IntercomCodeUrgentBusy: nil, IntercomCodeSkillNotInstalled: nil,
+		IntercomCodeNotASpeaker: nil, IntercomCodeReservedName: nil, IntercomCodeHubLocked: nil,
+		IntercomCodeImpersonationNotAllowed: nil, IntercomCodeTooManyTargets: nil, IntercomCodeManagedClient: nil,
+		IntercomCodeNotCancellable: nil, IntercomCodeHubUnreachable: nil,
+	}
+	for code := range got {
+		if want[code] == nil || intercomRefusals[code] != want[code] {
+			t.Errorf("code %q: refusal %v, want %v", code, intercomRefusals[code], want[code])
+		}
+	}
+	if len(got) != len(want) || len(intercomRefusals) != len(want) {
+		t.Fatalf("%d constants, %d refusals, want %d", len(got), len(intercomRefusals), len(want))
+	}
+}
+
+// -- announce: replayed -------------------------------------------------------
+
+func TestIntercomAReplayedAnnouncementSaysSoAndAFirstAnswerDoesNot(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("POST", icBase+"/announce", icReply{Status: 200, Body: icAnnouncement("completed", nil)})
+	first, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "Dinner", Targets: AllSpeakers(), IdempotencyKey: "k-1"})
+	if err != nil || first.Replayed {
+		t.Fatalf("%+v %v", first, err)
+	}
+	fake.reply("POST", icBase+"/announce", icReply{Status: 200, Body: icAnnouncement("completed", nil), Headers: map[string]string{"Idempotency-Replayed": "true"}})
+	again, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "Dinner", Targets: AllSpeakers(), IdempotencyKey: "k-1"})
+	if err != nil || !again.Replayed || again.Status != AnnouncementCompleted {
+		t.Fatalf("%+v %v", again, err)
+	}
+}
+
+func TestIntercomTheReplayedHeaderIsReadInAnyCaseAndOnlyWhenTrue(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	for _, tc := range []struct {
+		value string
+		want  bool
+	}{{"TRUE", true}, {"true", true}, {"false", false}, {"1", false}} {
+		fake.reply("POST", icBase+"/announce", icReply{Status: 200, Body: icAnnouncement("completed", nil), Headers: map[string]string{"Idempotency-Replayed": tc.value}})
+		got, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "Dinner", Targets: AllSpeakers()})
+		if err != nil || got.Replayed != tc.want {
+			t.Fatalf("header %q: %+v %v", tc.value, got, err)
+		}
+	}
+}
+
+func TestIntercomAReplayedSendingAnnouncementStaysReplayedAfterWait(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("POST", icBase+"/announce", icReply{Status: 202, Body: icAnnouncement("sending", map[string]any{"priority": "urgent"}), Headers: map[string]string{"Idempotency-Replayed": "true"}})
+	fake.reply("GET", icBase+"/announcements/"+icAnn, icReply{Status: 200, Body: icAnnouncement("completed", map[string]any{"priority": "urgent"})})
+	got, err := api.Announce(context.Background(), icHub, AnnounceOptions{
+		Text: "Wake up", Targets: AllSpeakers(), Priority: IntercomPriorityUrgent, Repeat: &IntercomRepeat{Times: 2, IntervalSeconds: 5},
+		IdempotencyKey: "k-2", Wait: true, PollInterval: 5 * time.Millisecond,
+	})
+	if err != nil || got.Status != AnnouncementCompleted || !got.Replayed {
+		t.Fatalf("%+v %v", got, err)
+	}
+}
+
+func TestIntercomReadsAndCancelAreNeverReplayed(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("GET", icBase+"/announcements/"+icAnn, icReply{Status: 200, Body: icAnnouncement("completed", nil), Headers: map[string]string{"Idempotency-Replayed": "true"}})
+	got, err := api.GetAnnouncement(context.Background(), icHub, icAnn)
+	if err != nil || got.Replayed {
+		t.Fatalf("%+v %v", got, err)
+	}
+}
+
+func TestIntercomAnIdempotencyKeyIsAtMost128PrintableASCIICharacters(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("POST", icBase+"/announce", icReply{Status: 200, Body: icAnnouncement("completed", nil)})
+	if _, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "hi", Targets: AllSpeakers(), IdempotencyKey: strings.Repeat("k", 128)}); err != nil {
+		t.Fatal(err)
+	}
+	if len(fake.last().IdempotencyKey) != 128 {
+		t.Fatalf("key length %d", len(fake.last().IdempotencyKey))
+	}
+	sent := fake.count()
+	for _, bad := range []string{strings.Repeat("k", 129), "caf" + string(rune(0xe9)), "a\r\nb", "   "} {
+		if _, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "hi", Targets: AllSpeakers(), IdempotencyKey: bad}); !errors.Is(err, ErrAPI) {
+			t.Fatalf("key %q accepted: %v", bad, err)
+		}
+	}
+	if fake.count() != sent {
+		t.Fatal("a bad key sent a request")
+	}
+}
+
+// -- the one text rule --------------------------------------------------------
+
+func icRefusedTexts() []string {
+	r := func(cp rune) string { return string(cp) }
+	return []string{
+		"a<b", "a>b", "<prosody>x</prosody>", "line\nbreak", "tab\there", "nul\x00 x", "bell\x07 x", "c1 " + r(0x85) + " next", "del\x7f x",
+		"bidi " + r(0x202e) + " override", "isolate " + r(0x2066) + " x", "zero width " + r(0x200b) + " space", "bom " + r(0xfeff) + " x",
+		"word joiner " + r(0x2060) + " x", "tag " + r(0xe0041) + " x", "private " + r(0xe000) + " x", "line " + r(0x2028) + " sep",
+		"para " + r(0x2029) + " sep", "bad utf8 \xff\xfe x", "lone surrogate \xed\xa0\x80 x",
+	}
+}
+
+func TestIntercomATextTheAPIWouldRefuseIsRefusedFirstAndNeverEchoed(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	for _, text := range icRefusedTexts() {
+		_, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: text, Targets: AllSpeakers()})
+		if !errors.Is(err, ErrAPI) {
+			t.Fatalf("%q accepted: %v", text, err)
+		}
+		if strings.Contains(err.Error(), strings.TrimSpace(text)) {
+			t.Fatalf("the error echoes the text: %v", err)
+		}
+	}
+	if fake.count() != 0 {
+		t.Fatalf("%d requests were sent", fake.count())
+	}
+}
+
+func TestIntercomATextTheAPIAcceptsIsSent(t *testing.T) {
+	r := func(cp rune) string { return string(cp) }
+	for _, text := range []string{
+		"Dinner is ready", "Caf" + r(0xe9) + " cr" + r(0xe8) + "me", r(0xab) + " bonjour " + r(0xbb),
+		"family " + r(0x1F468) + r(0x200d) + r(0x1F469) + r(0x200d) + r(0x1F467),
+		r(0x645) + r(0x6cc) + r(0x200c) + r(0x62e) + r(0x648) + r(0x627) + r(0x647) + r(0x645),
+		"no" + r(0xa0) + "break space inside", "a & b, c; d: e", strings.Repeat("x", 280),
+	} {
+		api, fake := newIntercomAPI(t)
+		fake.reply("POST", icBase+"/announce", icReply{Status: 200, Body: icAnnouncement("completed", nil)})
+		if _, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: text, Targets: AllSpeakers()}); err != nil {
+			t.Fatalf("%q refused: %v", text, err)
+		}
+		if fake.last().Body["text"] != text {
+			t.Fatalf("sent %q, want %q", fake.last().Body["text"], text)
+		}
+	}
+}
+
+func TestIntercomTheTextIsTrimmedAndCountedAsSentWithoutNormalisation(t *testing.T) {
+	// Deviation from the API and the Python and Node SDKs: no NFC (golang.org/x/text is not a dependency).
+	if got, err := AnnouncementText("  " + string(rune(0xa0)) + " hi " + string(rune(0x3000)) + " "); err != nil || got != "hi" {
+		t.Fatalf("%q %v", got, err)
+	}
+	decomposed := "e" + string(rune(0x301))
+	if got, err := AnnouncementText(decomposed); err != nil || got != decomposed {
+		t.Fatalf("a decomposed text is sent as it is: %q %v", got, err)
+	}
+	composed := strings.Repeat(string(rune(0xe9)), 280)
+	if got, err := AnnouncementText(composed); err != nil || utf8.RuneCountInString(got) != 280 {
+		t.Fatalf("%v", err)
+	}
+	if _, err := AnnouncementText(composed + string(rune(0xe9))); err == nil || !strings.Contains(err.Error(), "at most 280") {
+		t.Fatalf("281 accepted: %v", err)
+	}
+	if _, err := AnnouncementText(" " + string(rune(0xa0)) + " "); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("a blank text: %v", err)
+	}
+}
+
+func TestIntercomLangIsALanguageTag(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("POST", icBase+"/announce", icReply{Status: 200, Body: icAnnouncement("completed", nil)})
+	for _, good := range []string{"en", "en-US", "fr-CA", "zho-Hant"} {
+		if _, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "hi", Targets: AllSpeakers(), Lang: good}); err != nil {
+			t.Fatalf("%q: %v", good, err)
+		}
+	}
+	sent := fake.count()
+	for _, bad := range []string{"e", "en_US", "english", "en-", "en-US-x-private-use-long", " en"} {
+		if _, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "hi", Targets: AllSpeakers(), Lang: bad}); !errors.Is(err, ErrAPI) {
+			t.Fatalf("%q accepted: %v", bad, err)
+		}
+	}
+	if fake.count() != sent {
+		t.Fatal("a bad lang sent a request")
+	}
+}
+
+// -- targets ------------------------------------------------------------------
+
+func TestIntercomATargetListHoldsAtMost50NamesOfAtMost64Characters(t *testing.T) {
+	names := func(n int) []string {
+		out := make([]string, n)
+		for i := range out {
+			out[i] = "n" + strconv.Itoa(i)
+		}
+		return out
+	}
+	for kind, build := range map[string]func([]string) IntercomTargets{
+		"speakers": func(n []string) IntercomTargets { return SpeakerTargets(n...) },
+		"rooms":    func(n []string) IntercomTargets { return RoomTargets(n...) },
+		"groups":   func(n []string) IntercomTargets { return GroupTargets(n...) },
+	} {
+		api, fake := newIntercomAPI(t)
+		fake.reply("POST", icBase+"/announce", icReply{Status: 200, Body: icAnnouncement("completed", nil)})
+		for _, ok := range [][]string{names(50), {strings.Repeat("n", 64)}} {
+			if _, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "hi", Targets: build(ok)}); err != nil {
+				t.Fatalf("%s: %v", kind, err)
+			}
+		}
+		sent := fake.count()
+		if _, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "hi", Targets: build(names(51))}); err == nil || !strings.Contains(err.Error(), "at most 50") {
+			t.Fatalf("%s: 51 names: %v", kind, err)
+		}
+		if _, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "hi", Targets: build([]string{strings.Repeat("n", 65)})}); err == nil || !strings.Contains(err.Error(), "at most 64") {
+			t.Fatalf("%s: a 65-character name: %v", kind, err)
+		}
+		if fake.count() != sent {
+			t.Fatalf("%s: a refused target sent a request", kind)
+		}
+	}
+}
+
+// -- do not disturb -----------------------------------------------------------
+
+func icQuiet(zone *string, start, end string) *IntercomDNDUpdate {
+	yes := true
+	return &IntercomDNDUpdate{Enabled: &yes, QuietHours: &IntercomQuietHours{Start: start, End: end, Timezone: zone}}
+}
+
+func TestIntercomAnUnusableDoNotDisturbIsRefusedBeforeAnythingIsSent(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	str := func(s string) *string { return &s }
+	yes, no := true, false
+	for name, dnd := range map[string]*IntercomDNDUpdate{
+		"no window":                    {Enabled: &yes},
+		"no zone":                      icQuiet(nil, "22:00", "07:00"),
+		"unknown zone":                 icQuiet(str("Mars/Phobos"), "22:00", "07:00"),
+		"padded after":                 icQuiet(str("Europe/Paris "), "22:00", "07:00"),
+		"padded before":                icQuiet(str(" Europe/Paris"), "22:00", "07:00"),
+		"empty zone":                   icQuiet(str(""), "22:00", "07:00"),
+		"Local is not an IANA name":    icQuiet(str("Local"), "22:00", "07:00"),
+		"too long":                     icQuiet(str("Europe/"+strings.Repeat("x", 60)), "22:00", "07:00"),
+		"an empty window":              icQuiet(str("Europe/Paris"), "22:00", "22:00"),
+		"a bad clock":                  icQuiet(str("Europe/Paris"), "25:00", "07:00"),
+		"disabled, but a zone is bad":  {Enabled: &no, QuietHours: &IntercomQuietHours{Start: "22:00", End: "07:00", Timezone: str("Mars/Phobos")}},
+		"disabled, but a clock is bad": {Enabled: &no, QuietHours: &IntercomQuietHours{Start: "99:00", End: "07:00"}},
+	} {
+		if _, err := api.UpdateIntercomSpeaker(context.Background(), icHub, "c1", IntercomSpeakerUpdate{DND: dnd}); !errors.Is(err, ErrAPI) {
+			t.Fatalf("%s accepted: %v", name, err)
+		}
+	}
+	if fake.count() != 0 {
+		t.Fatalf("%d requests were sent", fake.count())
+	}
+}
+
+func TestIntercomAValidDoNotDisturbIsSent(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("PATCH", icBase+"/speakers/c1", icReply{Status: 200, Body: icSpeakerRow(nil)})
+	for _, zone := range []string{"Europe/Paris", "America/Argentina/Buenos_Aires", "UTC"} {
+		z := zone
+		if _, err := api.UpdateIntercomSpeaker(context.Background(), icHub, "c1", IntercomSpeakerUpdate{DND: icQuiet(&z, "22:00", "07:00")}); err != nil {
+			t.Fatalf("%s: %v", zone, err)
+		}
+		if got := fake.last().Body["dnd"].(map[string]any)["quiet_hours"].(map[string]any)["timezone"]; got != zone {
+			t.Fatalf("timezone = %v", got)
+		}
+	}
+	// Switched off, a window and a null zone are fine (the API stores them as they are).
+	no := false
+	if _, err := api.UpdateIntercomSpeaker(context.Background(), icHub, "c1", IntercomSpeakerUpdate{
+		DND: &IntercomDNDUpdate{Enabled: &no, QuietHours: &IntercomQuietHours{Start: "21:00", End: "06:30"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := fake.last().Body["dnd"].(map[string]any)["quiet_hours"].(map[string]any)["timezone"]; got != nil {
+		t.Fatalf("timezone = %v", got)
+	}
+	if _, err := api.UpdateIntercomSpeaker(context.Background(), icHub, "c1", IntercomSpeakerUpdate{DND: &IntercomDNDUpdate{Enabled: &no}}); err != nil {
+		t.Fatal(err)
+	}
+	if body, _ := json.Marshal(fake.last().Body["dnd"]); string(body) != `{"enabled":false}` {
+		t.Fatalf("dnd = %s", body)
+	}
+}
+
+func TestIntercomTheZoneShapeIsTheFallbackOnlyWhereThereIsNoTimezoneDatabase(t *testing.T) {
+	saved := loadLocation
+	defer func() { loadLocation = saved }()
+	loadLocation = func(name string) (*time.Location, error) { return nil, errors.New("unknown time zone " + name) }
+	for _, ok := range []string{"Europe/Paris", "Etc/GMT+5", "UTC"} {
+		if err := validIntercomTimezone(ok, "zone"); err != nil { // unknown to this machine, well formed: the API decides
+			t.Fatalf("%q: %v", ok, err)
+		}
+	}
+	for _, bad := range []string{"Europe Paris", "Europe/Paris/..", "/x", "x/", "", "Local", "Europe/Paris "} {
+		if err := validIntercomTimezone(bad, "zone"); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+	// With a database (a known zone loads), an unknown name is refused.
+	loadLocation = func(name string) (*time.Location, error) {
+		if name == "America/New_York" || name == "Europe/Paris" {
+			return time.UTC, nil
+		}
+		return nil, errors.New("unknown time zone " + name)
+	}
+	if err := validIntercomTimezone("Mars/Phobos", "zone"); err == nil {
+		t.Fatal("an unknown zone was accepted where a database exists")
+	}
+	if err := validIntercomTimezone("Europe/Paris", "zone"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestIntercomTheSpeakerUpdateTakesOnlyTheDocumentedFields(t *testing.T) {
+	got := map[string]bool{}
+	typ := reflect.TypeOf(IntercomSpeakerUpdate{})
+	for i := 0; i < typ.NumField(); i++ {
+		got[typ.Field(i).Name] = true
+	}
+	want := map[string]bool{"Receive": true, "Room": true, "ClearRoom": true, "Groups": true, "DND": true}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("fields %v, want %v", got, want)
+	}
+	dnd := map[string]bool{}
+	typ = reflect.TypeOf(IntercomDNDUpdate{})
+	for i := 0; i < typ.NumField(); i++ {
+		dnd[typ.Field(i).Name] = true
+	}
+	if !reflect.DeepEqual(dnd, map[string]bool{"Enabled": true, "QuietHours": true}) {
+		t.Fatalf("dnd fields %v", dnd)
+	}
+}
+
+// -- the new problem codes ----------------------------------------------------
+
+type icProblemCase struct {
+	status int
+	code   string
+	target error
+	extra  map[string]any
+	check  func(t *testing.T, e *APIError)
+}
+
+func icProblemCases() []icProblemCase {
+	return []icProblemCase{
+		{403, "urgent_scope_required", ErrUrgentScopeRequired, nil, nil},
+		{429, "intercom_urgent_busy", ErrUrgentBusy, map[string]any{"scope": "hub", "retry_after_seconds": 30}, func(t *testing.T, e *APIError) {
+			if e.UrgentScope() != "hub" || e.RetryAfter != 30*time.Second {
+				t.Fatalf("scope %q retry %v", e.UrgentScope(), e.RetryAfter)
+			}
+		}},
+		{409, "skill_not_installed", ErrSkillNotInstalled, nil, nil},
+		{422, "not_a_speaker", ErrNotASpeaker, map[string]any{"kind": "home_assistant"}, func(t *testing.T, e *APIError) {
+			if e.SpeakerKind() != "home_assistant" || len(e.NotSpeakers()) != 0 {
+				t.Fatalf("kind %q not_speakers %v", e.SpeakerKind(), e.NotSpeakers())
+			}
+		}},
+		{422, "not_a_speaker", ErrNotASpeaker, map[string]any{"not_speakers": []any{"home-link", "other", 7, ""}}, func(t *testing.T, e *APIError) {
+			if e.SpeakerKind() != "" || !reflect.DeepEqual(e.NotSpeakers(), []string{"home-link", "other"}) {
+				t.Fatalf("kind %q not_speakers %v", e.SpeakerKind(), e.NotSpeakers())
+			}
+		}},
+		{422, "reserved_name", ErrReservedName, nil, nil},
+		{403, "hub_locked", ErrHubLocked, nil, nil},
+		{403, "impersonation_not_allowed", ErrImpersonationNotAllowed, nil, nil},
+		{422, "too_many_targets", ErrTooManyTargets, map[string]any{"matched": 51}, func(t *testing.T, e *APIError) {
+			if n, ok := e.Matched(); !ok || n != 51 {
+				t.Fatalf("matched %d %v", n, ok)
+			}
+		}},
+		{422, "intercom_unavailable", ErrIntercomUnavailable, map[string]any{"reason": "kid_hub"}, func(t *testing.T, e *APIError) {
+			if e.Reason() != "kid_hub" {
+				t.Fatalf("reason %q", e.Reason())
+			}
+		}},
+		{503, "intercom_disabled_platform", ErrIntercomPlatformDisabled, nil, nil},
+		{503, "intercom_not_configured", ErrIntercomNotConfigured, nil, nil},
+		{403, "managed_client", ErrManagedClient, map[string]any{"refused_client_refs": []any{"client-1"}}, func(t *testing.T, e *APIError) {
+			if !reflect.DeepEqual(e.RefusedClientRefs(), []string{"client-1"}) {
+				t.Fatalf("refs %v", e.RefusedClientRefs())
+			}
+		}},
+		{409, "not_cancellable", ErrNotCancellable, map[string]any{"announcement_status": "cancelled"}, func(t *testing.T, e *APIError) {
+			if e.AnnouncementStatus() != "cancelled" {
+				t.Fatalf("status %q", e.AnnouncementStatus())
+			}
+		}},
+		{502, "hub_unreachable", ErrHubUnreachable, map[string]any{"announcement_id": icAnn}, func(t *testing.T, e *APIError) {
+			if e.AnnouncementID() != icAnn {
+				t.Fatalf("announcement %q", e.AnnouncementID())
+			}
+		}},
+	}
+}
+
+func TestIntercomEachNewProblemCodeIsItsOwnTypedRefusal(t *testing.T) {
+	all := []error{ErrIntercomUnavailable, ErrIntercomPlatformDisabled, ErrIntercomNotConfigured, ErrUrgentScopeRequired, ErrUrgentBusy,
+		ErrSkillNotInstalled, ErrNotASpeaker, ErrReservedName, ErrHubLocked, ErrImpersonationNotAllowed, ErrTooManyTargets,
+		ErrManagedClient, ErrNotCancellable, ErrHubUnreachable}
+	for _, nested := range []bool{false, true} {
+		for _, tc := range icProblemCases() {
+			api, fake := newIntercomAPI(t)
+			body := map[string]any{"status": tc.status, "code": tc.code, "message": "A sentence from the API."}
+			for k, v := range tc.extra {
+				body[k] = v
+			}
+			if nested {
+				body = map[string]any{"detail": body}
+			}
+			fake.reply("POST", icBase+"/announce", icReply{Status: tc.status, Body: body})
+			_, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "Dinner", Targets: AllSpeakers()})
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != tc.status || apiErr.Code != tc.code {
+				t.Fatalf("%s (nested %v): %v", tc.code, nested, err)
+			}
+			if !errors.Is(err, tc.target) {
+				t.Fatalf("%s (nested %v): not %v", tc.code, nested, tc.target)
+			}
+			for _, other := range all {
+				if other != tc.target && errors.Is(err, other) {
+					t.Fatalf("%s matches %v too", tc.code, other)
+				}
+			}
+			if tc.check != nil {
+				tc.check(t, apiErr)
+			}
+		}
+	}
+}
+
+func TestIntercomTheTypedRefusalsKeepTheirPlacesInTheHierarchy(t *testing.T) {
+	kinds := map[string][]error{
+		"urgent_scope_required":      {ErrUrgentScopeRequired, ErrAuth},                  // sign in again with the scope
+		"intercom_urgent_busy":       {ErrUrgentBusy, ErrRateLimited},                    // still "a 429"
+		"intercom_unavailable":       {ErrIntercomUnavailable, ErrIntercomDisabled},      // a kind of disabled
+		"intercom_disabled_platform": {ErrIntercomPlatformDisabled, ErrIntercomDisabled}, // a kind of disabled
+	}
+	for code, targets := range kinds {
+		err := &APIError{StatusCode: 400, Code: code}
+		for _, target := range targets {
+			if !errors.Is(err, target) {
+				t.Errorf("%s is not %v", code, target)
+			}
+		}
+		if !errors.Is(err, ErrAPI) {
+			t.Errorf("%s is not ErrAPI", code)
+		}
+	}
+	// The reverse does not hold: a plain 429, a plain disabled and a plain 403 are not the stronger kinds.
+	if errors.Is(&APIError{StatusCode: 429}, ErrUrgentBusy) || errors.Is(&APIError{StatusCode: 403, Code: "intercom_disabled"}, ErrIntercomPlatformDisabled) ||
+		errors.Is(&APIError{StatusCode: 403, ProblemDetail: "Insufficient scopes"}, ErrUrgentScopeRequired) {
+		t.Fatal("a general refusal matched a stronger one")
+	}
+	for _, kind := range []error{ErrIntercomNotConfigured, ErrHubLocked, ErrManagedClient, ErrNotASpeaker} {
+		if errors.Is(&APIError{StatusCode: 403}, kind) {
+			t.Errorf("a plain 403 matches %v", kind)
+		}
+	}
+	// A plain 403 "Insufficient scopes" is still ErrAuth and not the urgent kind.
+	if !errors.Is(&APIError{StatusCode: 403, ProblemDetail: "Insufficient scopes"}, ErrAuth) {
+		t.Fatal("insufficient scopes is no longer ErrAuth")
+	}
+}
+
+func TestIntercomTheUrgentBusyRefusalCarriesTheRetryAfterHeader(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("POST", icBase+"/announce", icReply{Status: 429, Headers: map[string]string{"Retry-After": "30"},
+		Body: map[string]any{"code": "intercom_urgent_busy", "message": "busy", "scope": "platform", "retry_after_seconds": 30}})
+	_, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "Wake", Targets: AllSpeakers(), Priority: IntercomPriorityUrgent, Repeat: &IntercomRepeat{Times: 5, IntervalSeconds: 30}})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || !errors.Is(err, ErrUrgentBusy) || !errors.Is(err, ErrRateLimited) || apiErr.UrgentScope() != "platform" || apiErr.RetryAfter != 30*time.Second {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestIntercomANotASpeakerRefusalOnThePatch(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("PATCH", icBase+"/speakers/996f", icReply{Status: 422, Body: map[string]any{"status": 422, "code": "not_a_speaker", "message": "cannot play", "kind": "home_assistant"}})
+	yes := true
+	_, err := api.UpdateIntercomSpeaker(context.Background(), icHub, "996f", IntercomSpeakerUpdate{Receive: &yes})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || !errors.Is(err, ErrNotASpeaker) || apiErr.SpeakerKind() != "home_assistant" {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestIntercomAProblemWithoutItsExtraMembersHasNoneOfThem(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("POST", icBase+"/announce", icReply{Status: 422, Body: map[string]any{"code": "too_many_targets", "message": "too many", "matched": "51"}})
+	_, err := api.Announce(context.Background(), icHub, AnnounceOptions{Text: "hi", Targets: AllSpeakers()})
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) {
+		t.Fatal(err)
+	}
+	if n, ok := apiErr.Matched(); ok || n != 0 {
+		t.Fatalf("a string is not a count: %d %v", n, ok)
+	}
+	for _, bad := range []any{-1, 1.5, true, nil} {
+		if _, ok := (&APIError{Problem: map[string]any{"matched": bad}}).Matched(); ok {
+			t.Fatalf("%v read as a count", bad)
+		}
+	}
+	empty := &APIError{}
+	if empty.Reason() != "" || empty.UrgentScope() != "" || empty.SpeakerKind() != "" || empty.AnnouncementStatus() != "" ||
+		empty.NotSpeakers() != nil || empty.RefusedClientRefs() != nil {
+		t.Fatal("an error with no body has members")
+	}
+}
+
+func TestIntercomTheCancel409NamesTheCurrentStatus(t *testing.T) {
+	api, fake := newIntercomAPI(t)
+	fake.reply("POST", icBase+"/announcements/"+icAnn+"/cancel", icReply{Status: 409, Body: map[string]any{
+		"status": 409, "code": "not_cancellable", "message": "Only an announcement that is still sending can be cancelled.", "announcement_status": "completed"}})
+	_, err := api.CancelAnnouncement(context.Background(), icHub, icAnn)
+	var apiErr *APIError
+	if !errors.As(err, &apiErr) || !errors.Is(err, ErrNotCancellable) || apiErr.AnnouncementStatus() != "completed" {
+		t.Fatalf("%v", err)
+	}
+}
+
+func TestIntercomTheCodesDecideWhateverTheStatus(t *testing.T) {
+	// Like the other SDKs: the intercom problem code decides, not the status that carried it.
+	for _, status := range []int{400, 500} {
+		if !errors.Is(&APIError{StatusCode: status, Code: "hub_unreachable"}, ErrHubUnreachable) || !errors.Is(&APIError{StatusCode: status, Code: "not_cancellable"}, ErrNotCancellable) {
+			t.Fatalf("status %d", status)
+		}
+	}
+}
+
+func TestIntercomTheGuidesNameTheUrgentScopeAndTheNewErrors(t *testing.T) {
+	raw, err := os.ReadFile("README.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, needle := range []string{"intercom:urgent", "ErrUrgentScopeRequired", "PolicySynced", "CanPlay", "Replayed", "ErrNotASpeaker",
+		"ErrTooManyTargets", "ErrIntercomPlatformDisabled", "not a certified safety system"} {
+		if !strings.Contains(strings.ToLower(string(raw)), strings.ToLower(needle)) {
+			t.Errorf("README.md does not mention %q", needle)
 		}
 	}
 }

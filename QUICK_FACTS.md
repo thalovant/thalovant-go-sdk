@@ -1,4 +1,4 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom amendment 2: CancelAnnouncement, key replay, ids, redacted options.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom final API: urgent scope, speaker Kind/CanPlay/PolicySynced, typed refusals, one text rule, Replayed.
 
 # Quick Facts
 
@@ -30,7 +30,7 @@ Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom amendment 2: Cancel
 | Parity capability | `browser-login`; vectors `testdata/browser-login-vectors.json` (119 cases, sha256 `b0c73f808c4f…`, Python 39e31d8) |
 | Tests | `browser_login_vectors_test.go` (every vector case, plus the 24 callbacks through a real listener), `browser_login_test.go` (prints, opener goroutine, listener edges, goroutine accounting, secrets) |
 
-## Intercom (`intercom.go`; 0.16.0; scopes `intercom:read`, `intercom:send`, `hubs:write`)
+## Intercom (`intercom.go`; 0.16.0; scopes `intercom:read`, `intercom:send`, `intercom:urgent`, `hubs:write`)
 
 Announce-only text spoken aloud on a hub's speakers. Not a certified safety system; the API does not store the text (keyed hash and length only). Named `Announce` / `*Intercom*`: the mesh already has an `intercom` frame.
 
@@ -38,13 +38,14 @@ Announce-only text spoken aloud on a hub's speakers. Not a certified safety syst
 | :--- | :--- | :--- |
 | `GetIntercomSettings(ctx, hubID)` | `GET /v1/hubs/{id}/intercom/settings` | `IntercomSettings` |
 | `SetIntercomSettings(ctx, hubID, enabled)` | `PUT /v1/hubs/{id}/intercom/settings` | `IntercomSettings` |
-| `ListIntercomSpeakers(ctx, hubID)` | `GET /v1/hubs/{id}/intercom/speakers` | `[]IntercomSpeaker` |
+| `ListIntercomSpeakers(ctx, hubID)` | `GET /v1/hubs/{id}/intercom/speakers` | `IntercomSpeakerList` (`Items` with `Kind`, `CanPlay`; `PolicySynced`, `UnavailableReason`) |
 | `UpdateIntercomSpeaker(ctx, hubID, clientID, IntercomSpeakerUpdate)` | `PATCH /v1/hubs/{id}/intercom/speakers/{client_id}` | `IntercomSpeaker` |
-| `Announce(ctx, hubID, AnnounceOptions)` | `POST /v1/hubs/{id}/intercom/announce` | `Announcement` |
+| `Announce(ctx, hubID, AnnounceOptions)` | `POST /v1/hubs/{id}/intercom/announce` (urgent needs `intercom:urgent` too) | `Announcement` (`Replayed`; deliveries have `Detail`) |
 | `GetAnnouncement(ctx, hubID, id)` | `GET /v1/hubs/{id}/intercom/announcements/{id}` | `Announcement` |
-| `CancelAnnouncement(ctx, hubID, id)` | `POST /v1/hubs/{id}/intercom/announcements/{id}/cancel` (`intercom:send`; 409 `not_cancellable`) | `Announcement` (`Status` `cancelled`, optional `HubConfirmed *bool`) |
+| `CancelAnnouncement(ctx, hubID, id)` | `POST /v1/hubs/{id}/intercom/announcements/{id}/cancel` (`intercom:send`; 409 `not_cancellable`, `AnnouncementStatus()`) | `Announcement` (`Status` `cancelled`, optional `HubConfirmed *bool`) |
 | `ListAnnouncements(ctx, hubID, AnnouncementListOptions)` | `GET /v1/hubs/{id}/intercom/announcements` | `AnnouncementList` |
 
+- Typed refusals (`errors.go`; constants `IntercomCode*`): `ErrUrgentScopeRequired` (kind of `ErrAuth`), `ErrUrgentBusy` (kind of `ErrRateLimited`; `UrgentScope()`), `ErrSkillNotInstalled`, `ErrNotASpeaker` (`SpeakerKind()`, `NotSpeakers()`), `ErrReservedName`, `ErrHubLocked`, `ErrImpersonationNotAllowed`, `ErrTooManyTargets` (`Matched()`), `ErrIntercomUnavailable` (`Reason()`) and `ErrIntercomPlatformDisabled` (kinds of `ErrIntercomDisabled`), `ErrIntercomNotConfigured`, `ErrManagedClient` (`RefusedClientRefs()`). Text rule: trimmed, 1-280 runes, no `<` `>`, control, bidi/format characters, invalid UTF-8, private use or separators (no NFC: a documented deviation); DND on needs a valid IANA timezone and `Start != End`; at most 50 names of 1-64 characters per target list; `Lang` a language tag; the key at most 128 printable ASCII characters.
 - Errors (`errors.go`): `ErrIntercomDisabled`, `ErrHubUnreachable` (502; the text may or may not have been spoken; `APIError.AnnouncementID()` names the `failed` record: read it before sending again, and use a new key), `ErrNotCancellable` (409), `ErrRateLimited`, matched with `errors.Is` on the `*APIError`; the plan error `ErrPlan` is HTTP 402 or 403 `plan_limit`.
 - `Announce` with `Wait` also needs `intercom:read` (it polls `GetAnnouncement`); a failed poll returns the accepted `Announcement` with the error.
 - `IntercomDNDUpdate.Enabled` is a required `*bool` (the API replaces the whole DND setting).

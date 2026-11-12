@@ -3,7 +3,7 @@
     "api-errors": {
       "implementation": {
         "control.go": "46b31845eb33d875668adf7727d86f66db5785f7b79dbb25b775b340831a6f6a",
-        "errors.go": "bdaa28d1789dc52dfff2d1c618b3a5a0f30539bb24f18deead8755ed322c5c2c"
+        "errors.go": "dbab9390d00ba4b3ee277ff4d4602be85ed9f73da021d0e22a1a45ffc8edaae3"
       },
       "reason": "apiErrorFromResponse() in control.go builds every non-2xx control-plane error from one decode of the body, and problemFields() in errors.go reads APIError.Code and ProblemDetail out of it beside the whole body as Problem; StatusCode, Detail and Error() are unchanged. Run against the shared api-error vectors, each served by a loopback httptest server and read back through GetHub, the configuration-merge read and the device-flow token poll, with what GetHub produced recorded.",
       "status": "required",
@@ -38,7 +38,7 @@
         "browser_login.go": "93539f9768c7fa5abccb44475c84f4b00e68de91b4867aeb43c500fb0581019c",
         "control.go": "46b31845eb33d875668adf7727d86f66db5785f7b79dbb25b775b340831a6f6a",
         "device_login.go": "824d0a073e74245bcb7722c201d657714f99eaf7886f7aa0e39a9d5bf031474b",
-        "errors.go": "bdaa28d1789dc52dfff2d1c618b3a5a0f30539bb24f18deead8755ed322c5c2c",
+        "errors.go": "dbab9390d00ba4b3ee277ff4d4602be85ed9f73da021d0e22a1a45ffc8edaae3",
         "loopback.go": "dd5423884ce18649c868816695a5321b8fb0d2c2a7eb41f3f7f5b2cd81b7472c",
         "loopback_other.go": "f688246cf4c4acf0941b5426de72a6ca1e419750429b70dc6fcb73cf866de367",
         "loopback_windows.go": "d62915e3168c2bdcbce99ece131da95d4f2b5497d4fb011a457f3f40a5662529",
@@ -62,7 +62,7 @@
       "implementation": {
         "chat_apps.go": "1a844e6ad71e5e10559800892c263a26950a5c75eab6d13c52ac29ab4df6d0e3",
         "control.go": "46b31845eb33d875668adf7727d86f66db5785f7b79dbb25b775b340831a6f6a",
-        "errors.go": "bdaa28d1789dc52dfff2d1c618b3a5a0f30539bb24f18deead8755ed322c5c2c"
+        "errors.go": "dbab9390d00ba4b3ee277ff4d4602be85ed9f73da021d0e22a1a45ffc8edaae3"
       },
       "reason": "chat_apps.go adds the owner routes under /v1/bridges to ControlPlane: ListChatAppConnectors, GetBridgeNetworks, ListBridges, CreateBridge (exactly one of Token and Secrets, refused locally otherwise; sends connector), GetBridge, UpdateBridge (only the fields set; If-Match only when ETag is set), ReplaceBridgeToken, ReplaceBridgeSecrets, ListBridgeChats, SendBridgeTestMessage, GetBridgeAvatar (bytes and content type) and DeleteBridge, answering typed models whose string enums keep unknown values. SecretValue prints [REDACTED] for every fmt verb, json.Marshal, MarshalText and slog; Reveal is called only to build the request body. APIError.Fields (errors.go) is read in apiErrorFromResponse (control.go) from the problem's fields or an object detail, strings only. chat_apps_test.go serves every route from a loopback httptest server and checks method, path, query, body and If-Match, parsing with missing optionals and unknown enum values, code/fields/plan/auth/retry-after on refusals, and that no secret reaches an error, a printed value, JSON or a log line.",
       "status": "required",
@@ -78,7 +78,7 @@
       "implementation": {
         "connections.go": "44e521e58188d7bc5b05348bd6db1f92eacdc7d328bce992826ecd2c2e55ced3",
         "control.go": "46b31845eb33d875668adf7727d86f66db5785f7b79dbb25b775b340831a6f6a",
-        "errors.go": "bdaa28d1789dc52dfff2d1c618b3a5a0f30539bb24f18deead8755ed322c5c2c"
+        "errors.go": "dbab9390d00ba4b3ee277ff4d4602be85ed9f73da021d0e22a1a45ffc8edaae3"
       },
       "reason": "WaitForAdmission in connections.go follows the Operation a create returned (BootstrapIdentityResult.Operation): ready is admitted; failed and timed_out are *AdmissionFailedError with the operation's code; no operation and 404 are admitted at once; a 5xx is ridden out; a 429 waits APIError.RetryAfter (the body's retry_after_seconds, then Retry-After, then RateLimit-Reset, read in control.go) or the poll interval when longer, and is a timeout at once when that is more than the time left; a 401/403 is the API's own *APIError (errors.Is ErrAuth), never a failed admission; any other refusal is *AdmissionFailedError whose Err keeps status, code and detail and whose ErrorCode stays empty; an unreachable API (ErrAPIUnreachable, from control.go) is returned as it is; each read is bounded by the deadline; the timeout is *AdmissionTimeoutError, errors.Is ErrConnection and ErrTimeout, ending 'it may still admit it later.'; a links.self on another origin (scheme, host, port, default ports spelled out) is refused unfetched. Run against the shared connection-admission vectors over a loopback httptest server that sends each case's headers, with {api_host}/{api_port} filled in and a closed port for an unreachable API.",
       "status": "required",
@@ -96,7 +96,7 @@
       "implementation": {
         "connections.go": "44e521e58188d7bc5b05348bd6db1f92eacdc7d328bce992826ecd2c2e55ced3",
         "control.go": "46b31845eb33d875668adf7727d86f66db5785f7b79dbb25b775b340831a6f6a",
-        "errors.go": "bdaa28d1789dc52dfff2d1c618b3a5a0f30539bb24f18deead8755ed322c5c2c"
+        "errors.go": "dbab9390d00ba4b3ee277ff4d4602be85ed9f73da021d0e22a1a45ffc8edaae3"
       },
       "reason": "BootstrapIdentityOptions.ConnectionType sends spec.connection_type; CreateClientIdentity checks the kind comes back and, when it does not, deletes the client with its etag and returns *UnsupportedConnectionTypeError, as it does for a 422 whose detail or code, or a validation error's loc or msg (under errors, or under detail when that is a list), names the field -- never an echoed input. The other refusals stay the *APIError every call already returned and are told apart with errors.Is: APIError.Is answers ErrAuth, ErrPlan and ErrAlreadyLinked from the status, code and detail, and LinkedClientID names the client that holds the link, so no existing caller sees a different error type. GetClient and DeleteClient (connections.go): read the etag when none is given, retry once on 412, and count 404 as deleted. Run against the shared connection-kinds vectors over a loopback httptest server, with the requests the server saw recorded beside each outcome.",
       "status": "required",
@@ -145,7 +145,7 @@
       "implementation": {
         "control.go": "46b31845eb33d875668adf7727d86f66db5785f7b79dbb25b775b340831a6f6a",
         "device_login.go": "824d0a073e74245bcb7722c201d657714f99eaf7886f7aa0e39a9d5bf031474b",
-        "errors.go": "bdaa28d1789dc52dfff2d1c618b3a5a0f30539bb24f18deead8755ed322c5c2c",
+        "errors.go": "dbab9390d00ba4b3ee277ff4d4602be85ed9f73da021d0e22a1a45ffc8edaae3",
         "native_auth.go": "9d6b0af21bfa1614aa36c28c48dc932c69b41a0e670f4a286d983f84f18bf228"
       },
       "reason": "BeginDeviceLogin, PollDeviceLogin and RevokeAPIToken in device_login.go, one step each, for a caller that runs its own loop; LoginWithBrowser in control.go now runs its loop over the same one-poll path. A pending poll is a *DeviceLoginPendingError carrying Interval, and slow_down lengthens the DeviceAuthorization's Interval for good; expiry and denial are *DeviceLoginExpiredError and *DeviceLoginDeniedError (errors.go), still matching ErrDeviceCodeExpired and ErrDeviceAccessDenied, and every one of them reaches the *APIError the API answered with. Every sign-in (password, native in native_auth.go, browser, device poll) goes through acceptToken, which sets AccessToken and TokenID from its own answer. Revoking the token in use is idempotent: a 401 on its own revoke counts as revoked, and revoking again sends nothing until the next sign-in. DeviceAuthorization and APIToken print with the device code and the token redacted. Run against the shared device-login vectors over a loopback httptest server, checking every request, with what the SDK produced recorded. 0.9.1: DeviceLoginOptions.ClientID and BeginDeviceLoginWithOptions send a registered app's client_id (HomeAssistantClientID is thalovant-home-assistant) and leave it out when empty; BeginDeviceLogin keeps its signature. DescribeDeviceLogin reads GET /v1/auth/device/codes/{user_code} as the approver into a DeviceLoginRequest, whose ClientVerified is true only with a ClientID. A 2xx token answer that is not a JSON object is a plain ErrAPI with no status. APIError.GoString keeps %#v from printing Problem, which can echo the request. 0.15.0: LoginWithBrowser runs through loginWithDevice (control.go), which opens the verification page with InteractiveLogin's Opener when one is given (openWith: on its own goroutine) and with the platform browser exactly as before otherwise; the device-login vectors and the existing LoginWithBrowser tests pass unchanged.",
@@ -164,7 +164,7 @@
       "implementation": {
         "client.go": "a1c0c470ccf7e5ccd592e5cedaa2d4f5708196b354f195bf248953af68a046b6",
         "context_mutex.go": "7e6043dbb6efc73d4e83d7edf8d709a26fec95453ba000900f7e053d60310065",
-        "errors.go": "bdaa28d1789dc52dfff2d1c618b3a5a0f30539bb24f18deead8755ed322c5c2c",
+        "errors.go": "dbab9390d00ba4b3ee277ff4d4602be85ed9f73da021d0e22a1a45ffc8edaae3",
         "home.go": "76a02d5faef835dded9fbcc9bc4e0db01f99876a52152d7ba345ddcad70c0735",
         "noise_folder.go": "12f9151ebbb5b8d87e618c60355a6f0880668213482c6af843606bbe02d3aa2f",
         "noise_store.go": "7e241a9e43cfb13587dcecde0b04258ddc765e88b48c886be2a9979219f5159a",
@@ -209,13 +209,13 @@
     "intercom": {
       "status": "required",
       "implementation": {
-        "intercom.go": "8642860fdf733733383890c478ef8b1b0f069691b222a8447e7d4b407b0486b8",
-        "errors.go": "bdaa28d1789dc52dfff2d1c618b3a5a0f30539bb24f18deead8755ed322c5c2c"
+        "intercom.go": "c936569f9b4e0205bfa4aa73d0f30c47b0523ec984a7765c3e7c2de54b9c06ff",
+        "errors.go": "dbab9390d00ba4b3ee277ff4d4602be85ed9f73da021d0e22a1a45ffc8edaae3"
       },
       "tests": {
-        "intercom_test.go": "01b12692f8d3b0e4956f596ce80bd96d1ef6f8aaa1089e23ce6aea2b22a09bc4"
+        "intercom_test.go": "b1003176bdd026d3a504e0c9a4bc54bfa7900c36ae4aed409f11553e3adc4827"
       },
-      "reason": "intercom.go adds every route under /v1/hubs/{hub_id}/intercom to ControlPlane: Announce (the text trimmed to 1-280 characters counted as runes and free of control characters, targets of exactly one of all, speakers (at most 50), rooms or groups, priority normal or urgent, repeat 1-10 times at 5-120 seconds for urgent only, an Idempotency-Key only when the caller sets one, and an optional Wait, which needs intercom:read as well, that refuses a negative WaitTimeout or PollInterval before the POST, polls a sending announcement until it completes, WaitTimeout passes (each poll is bounded by the time left, no poll starts once the deadline passed during the sleep, and the latest answer is returned) or the context ends, and returns the accepted announcement together with the error when a poll fails after the POST, the IdempotencyKey being the retry), GetAnnouncement, ListAnnouncements with limit and cursor, ListIntercomSpeakers, UpdateIntercomSpeaker sending only the fields set (ClearRoom sends room null; an empty non-nil Groups clears the groups; the do-not-disturb update needs an explicit Enabled, a nil being refused, because the API replaces the whole setting and stores a missing enabled as false), GetIntercomSettings and SetIntercomSettings, with the hub, speaker and announcement ids percent-escaped as one path segment and blank ids refused locally as ErrAPI; the models keep every status as an open string type; errors.go matches ErrIntercomDisabled (code intercom_disabled), ErrHubUnreachable (502 hub_unreachable) and ErrRateLimited (429) on the *APIError. Named Announce and *Intercom*, never a bare Intercom: the mesh already has an intercom frame. intercom_test.go drives each route through a loopback httptest server and proves the wire shape, the validation, the escaping, the polling (deadline, a stalled read, a failed poll) and the error kinds. Amendment 2 (client-side security review, contract section J): CancelAnnouncement (POST .../announcements/{id}/cancel, no body, intercom:send) returns the announcement, status cancelled, and an optional HubConfirmed *bool that is a real boolean or nil (false when the hub could not confirm); a 409 not_cancellable is ErrNotCancellable; the announcement status gains AnnouncementCancelled; APIError.AnnouncementID reads announcement_id from the problem (top or inside an object detail) for ErrHubUnreachable; the hub, speaker and announcement ids are refused locally, before any request, when empty or blank, a dot segment (. or ..), or holding /, ?, #, a backslash or a control character (validIntercomID), and are otherwise percent-encoded as one path segment; this SDK sets no request timeout, so the docs tell callers to give Announce a context of at least 20 seconds; AnnounceOptions redacts its text under every fmt verb and in log/slog (String, GoString, Format, LogValue); README, QUICK_FACTS and FAQ use a fresh idempotency key (thalovant.NewRequestID or a UUID) per announcement and say that the same key replays the stored result (Idempotency-Replayed: true) and never re-sends, that a replayed failed announcement stays failed, that a deliberate second send needs a new key and that after a 502 hub_unreachable the announcement (AnnouncementID) is read first, and the wording says intercom does not record or store speech instead of nothing listens and names the real controls (platform kill switch, per-hub switch, cancel, voice acknowledgement); intercom_test.go proves each of these, with a doc guard against constant keys and over-promising phrases."
+      "reason": "intercom.go adds every route under /v1/hubs/{hub_id}/intercom to ControlPlane: Announce (the text trimmed to 1-280 characters counted as runes and free of control characters, targets of exactly one of all, speakers (at most 50), rooms or groups, priority normal or urgent, repeat 1-10 times at 5-120 seconds for urgent only, an Idempotency-Key only when the caller sets one, and an optional Wait, which needs intercom:read as well, that refuses a negative WaitTimeout or PollInterval before the POST, polls a sending announcement until it completes, WaitTimeout passes (each poll is bounded by the time left, no poll starts once the deadline passed during the sleep, and the latest answer is returned) or the context ends, and returns the accepted announcement together with the error when a poll fails after the POST, the IdempotencyKey being the retry), GetAnnouncement, ListAnnouncements with limit and cursor, ListIntercomSpeakers, UpdateIntercomSpeaker sending only the fields set (ClearRoom sends room null; an empty non-nil Groups clears the groups; the do-not-disturb update needs an explicit Enabled, a nil being refused, because the API replaces the whole setting and stores a missing enabled as false), GetIntercomSettings and SetIntercomSettings, with the hub, speaker and announcement ids percent-escaped as one path segment and blank ids refused locally as ErrAPI; the models keep every status as an open string type; errors.go matches ErrIntercomDisabled (code intercom_disabled), ErrHubUnreachable (502 hub_unreachable) and ErrRateLimited (429) on the *APIError. Named Announce and *Intercom*, never a bare Intercom: the mesh already has an intercom frame. intercom_test.go drives each route through a loopback httptest server and proves the wire shape, the validation, the escaping, the polling (deadline, a stalled read, a failed poll) and the error kinds. Amendment 2 (client-side security review, contract section J): CancelAnnouncement (POST .../announcements/{id}/cancel, no body, intercom:send) returns the announcement, status cancelled, and an optional HubConfirmed *bool that is a real boolean or nil (false when the hub could not confirm); a 409 not_cancellable is ErrNotCancellable; the announcement status gains AnnouncementCancelled; APIError.AnnouncementID reads announcement_id from the problem (top or inside an object detail) for ErrHubUnreachable; the hub, speaker and announcement ids are refused locally, before any request, when empty or blank, a dot segment (. or ..), or holding /, ?, #, a backslash or a control character (validIntercomID), and are otherwise percent-encoded as one path segment; this SDK sets no request timeout, so the docs tell callers to give Announce a context of at least 20 seconds; AnnounceOptions redacts its text under every fmt verb and in log/slog (String, GoString, Format, LogValue); README, QUICK_FACTS and FAQ use a fresh idempotency key (thalovant.NewRequestID or a UUID) per announcement and say that the same key replays the stored result (Idempotency-Replayed: true) and never re-sends, that a replayed failed announcement stays failed, that a deliberate second send needs a new key and that after a 502 hub_unreachable the announcement (AnnouncementID) is read first, and the wording says intercom does not record or store speech instead of nothing listens and names the real controls (platform kill switch, per-hub switch, cancel, voice acknowledgement); intercom_test.go proves each of these, with a doc guard against constant keys and over-promising phrases. The final API (platform security review; Python digest 69badc4fb072): the scope intercom:urgent (IntercomUrgentScope), needed IN ADDITION to intercom:send for an urgent announcement and documented wherever the scopes are listed; IntercomSpeaker.Kind (default voice_satellite), CanPlay (default true, only an explicit false is false) and PolicySynced (*bool, on the speaker PATCH answer), IntercomSpeakerList with PolicySynced and UnavailableReason (which may be platform), IntercomDelivery.Detail; IntercomSpeakerUpdate carrying only Receive, Room/ClearRoom, Groups and DND; typed sentinels and IntercomCode constants for urgent_scope_required (a kind of ErrAuth), intercom_urgent_busy (a kind of ErrRateLimited, UrgentScope), skill_not_installed, not_a_speaker (SpeakerKind, NotSpeakers), reserved_name, hub_locked, impersonation_not_allowed, too_many_targets (Matched), intercom_unavailable (Reason) and intercom_disabled_platform (kinds of ErrIntercomDisabled), intercom_not_configured, managed_client (RefusedClientRefs), not_cancellable (AnnouncementStatus) and hub_unreachable (AnnouncementID), each read at the top of the problem or inside an object detail and decided by code whatever the status; one text rule checked before any request and never echoed: trimmed, 1-280 runes, no < or >, no character of the Unicode categories Cc, Cf, Cs, Co, Zl or Zp except the zero-width joiner and non-joiner, no invalid UTF-8 (deviation: no NFC normalisation, golang.org/x/text is not a dependency); DND that is on needs a valid IANA timezone (at most 64 characters, not padded; shape only where the machine has no timezone database) and Start != End, and any given timezone is checked; target lists of at most 50 names of 1-64 characters; Lang a language tag; the idempotency key at most 128 printable ASCII characters; and Announcement.Replayed from the Idempotency-Replayed: true response header, kept after Wait. Docs say that delivered means the hub handed the speech to the speaker's connection (no playback receipt) and that the platform switch ships off."
     },
     "inventory": {
       "implementation": {
@@ -233,7 +233,7 @@
     },
     "link-carriers": {
       "implementation": {
-        "errors.go": "bdaa28d1789dc52dfff2d1c618b3a5a0f30539bb24f18deead8755ed322c5c2c",
+        "errors.go": "dbab9390d00ba4b3ee277ff4d4602be85ed9f73da021d0e22a1a45ffc8edaae3",
         "noise_folder.go": "12f9151ebbb5b8d87e618c60355a6f0880668213482c6af843606bbe02d3aa2f",
         "session.go": "f9dc84f90210810902ee80bc59bd19a0ad0ef171b35fbb91c83336bfad84de35",
         "transport.go": "aaa79e977b85595fa526f11953fa6afc67b7574f635ad62f99e9e9475c778d81",
@@ -286,7 +286,7 @@
     "refusal": {
       "implementation": {
         "client.go": "a1c0c470ccf7e5ccd592e5cedaa2d4f5708196b354f195bf248953af68a046b6",
-        "errors.go": "bdaa28d1789dc52dfff2d1c618b3a5a0f30539bb24f18deead8755ed322c5c2c"
+        "errors.go": "dbab9390d00ba4b3ee277ff4d4602be85ed9f73da021d0e22a1a45ffc8edaae3"
       },
       "reason": "refusalBelongsToAsk() and failureError() in errors.go, used by AskWithOptions() in client.go, which counts asks, queries and fire-and-forget utterances inside the shared grace window -- recorded immediately before the publish and kept when the publish errors, since the transport can fail after the hub holds the frame. PolicyDeniedError carries Quota and UnansweredError is new, both still errors.Is ErrRuntime. Run against the shared refusal vectors, decoded as map[string]any so numbers arrive as float64, plus five end-to-end asks.",
       "status": "required",
@@ -357,7 +357,8 @@
     "6dfb3bb31ac7590591febef1c4d8372984ca6cdad4700381f869db30c38452df",
     "690784dbb9af67d32523958808442d2b6ec5ea2f09ab881e56940b35333952a3",
     "66bfb1ac58791122702bf56281a290a09da1ba3753596177827b4f99c194d960",
-    "a82b669bc2cbc499fe92ea549d3ea2535132f94bf35be0383fe786efd0284f6f"
+    "a82b669bc2cbc499fe92ea549d3ea2535132f94bf35be0383fe786efd0284f6f",
+    "69badc4fb072703e675ce50ae3a09765bf49cbf65efcc2fef5befb46f2b32a8c"
   ],
   "schema_version": 1
 }

@@ -1,23 +1,29 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom amendment 2: a replayed flag, problem scrubbing, caps.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom final API: `Replayed` and the caps are done; shared vectors matter more; NFC; `message` in `ProblemDetail`.
 
 # Suggestions
 
-## A `Replayed` field on `Announcement`
+## Scrub `input` and `ctx` from `Problem` on intercom calls
 
-- **Problem:** the API answers a reused `Idempotency-Key` with the stored announcement and `Idempotency-Replayed: true`; `Announcement` does not carry it, so a caller cannot tell a replay from a first send (security review H3).
-- **Proposal:** read the header in `controlInto` for the intercom routes and expose `Announcement.Replayed`; the same on every SDK, with the header in the loopback tests.
-- **Impact:** low effort; touches the reference digest and every consumer.
-
-## Scrub `input` and `ctx` from `Problem`, and cap lists and keys, on intercom calls
-
-- **Problem:** `APIError.Problem` keeps the whole API body; a regression in the API's error middleware would put the announcement text there (review L5). Rooms, groups and the key length are unchecked client-side (L6).
-- **Proposal:** in `Announce`, drop `input` and `ctx` from `Problem`; check `IdempotencyKey` (128) and rooms/groups (50).
+- **Problem:** `APIError.Problem` keeps the whole API body; a regression in the API's error middleware would put the announcement text there (review L5).
+- **Proposal:** in `Announce`, drop `input` and `ctx` from `Problem` before returning.
 - **Impact:** low; defence in depth.
+
+## NFC-normalise the announcement text
+
+- **Problem:** the API counts the 280 characters after NFC; this SDK counts as sent (no normaliser in the standard library, `golang.org/x/text` is not a dependency), so a decomposed text can be refused locally that the API accepts.
+- **Proposal:** either add `golang.org/x/text/unicode/norm` (one more module in the supply chain, already an indirect neighbour of `golang.org/x/net`) or drop the local count and let the API's 422 decide.
+- **Impact:** low effort; closes the one place the Go rule is stricter than the reference.
+
+## `ProblemDetail` does not read `message`
+
+- **Problem:** the final intercom problems carry their sentence in `message`; `ProblemDetail` reads `detail` only, so it is `""` for them.
+- **Proposal:** fall back to `message` when `detail` is absent, in every SDK at once, with a case in `api-error-vectors.json` (a shared-vector change, so a coordinated round).
+- **Impact:** low effort; touches every consumer's error type.
 
 ## Shared intercom vectors
 
-- **Problem:** `intercom` has no conformance vectors; text rules (control characters, trimming, rune count) are proved by each SDK's own tests.
-- **Proposal:** an `intercom-vectors.json` in the Python reference (validation and error-kind cases), claimed by the capability.
+- **Problem:** `intercom` has no conformance vectors; the text rule (NFC, 1-280, `<` `>`, control/bidi/format characters, lone surrogates), the do-not-disturb rule (valid IANA zone, `start != end`) and the problem-code to error-kind mapping are proved by each SDK's own tests and can drift between five implementations on different Unicode and timezone databases (the Go port already differs on NFC).
+- **Proposal:** an `intercom-vectors.json` in the Python reference (text, target, DND and error-kind cases), claimed by the capability.
 - **Impact:** low effort; one more file for every consumer.
 
 ## A typed result for the sign-ins

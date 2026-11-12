@@ -1,4 +1,4 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom amendment 2: cancel, key replay, ids, wording.
+Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom final API: urgent scope, CanPlay, Replayed, platform switch, text rule.
 
 # FAQ
 
@@ -23,8 +23,23 @@ An id that is `.`, `..`, empty, or holds `/`, `?`, `#`, a backslash or a control
 ## Does printing `AnnounceOptions` show the text?
 No. `AnnounceOptions` redacts the text (`<N chars>`) under every `fmt` verb and in `log/slog`; the request still carries it.
 
+## Why does an urgent `Announce` return `ErrUrgentScopeRequired`?
+An urgent announcement (and so every `Repeat`) needs the scope `intercom:urgent` in addition to `intercom:send`; nothing implies it. Nothing was spent: no rate token, no hub call. Sign in again with the scope (a paid plan), or send a normal announcement. `errors.Is(err, ErrAuth)` holds too.
+
+## Why is a Home Assistant link in the speaker list, but `Receive: true` fails with `ErrNotASpeaker`?
+A connection that cannot play speech (`CanPlay` false: `home_assistant`, `developer` and `embedded` unless its owner declared `spec.intercom.can_play: true` on the connection) is listed so it can be greyed out, but it cannot receive and is never part of `all`, a room or a group.
+
+## What does `Announcement.Replayed` mean?
+The API answered with `Idempotency-Replayed: true`: this is the stored announcement for your key, nothing new was sent, whatever its status. Do not tell the person it was sent anew.
+
+## Why does everything return `ErrIntercomPlatformDisabled`?
+Intercom ships dark: until the platform operator turns it on, `GetIntercomSettings` reads `UnavailableReason` `"platform"` for every hub and every write and announcement is a 503 `intercom_disabled_platform`. Reads and `CancelAnnouncement` still work.
+
+## Why does the Go SDK not normalise my text to NFC?
+The standard library has no normaliser and `golang.org/x/text` is not a dependency, so the 280 characters are counted as sent. A text in decomposed form (`e` + U+0301) counts two; the API composes it before counting. Compose the text first (or use `golang.org/x/text/unicode/norm` in your own code) if you are near the limit.
+
 ## Why was nobody spoken to?
-A speaker is skipped unless its `Receive` is true (`skipped_not_receiving`, even for urgent); a normal announcement is skipped inside quiet hours (`skipped_dnd`; urgent bypasses them); an offline speaker is `offline`. `errors.Is(err, ErrIntercomDisabled)` means the hub's switch is off or it is a kid or public hub.
+A speaker is skipped unless its `Receive` is true (`skipped_not_receiving`, even for urgent); a normal announcement is skipped inside quiet hours (`skipped_dnd`; urgent bypasses them); an offline speaker is `offline`. `errors.Is(err, ErrIntercomDisabled)` means the hub's switch is off (`ErrIntercomUnavailable`, a kind of it, a kid or public hub). `DeliveryDelivered` is not "heard": there is no playback receipt.
 
 ## How do I sign a person in from a CLI or a desktop tool?
 
