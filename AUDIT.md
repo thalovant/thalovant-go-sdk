@@ -1,4 +1,52 @@
-Last Edit: Claude Opus 5.5 - 2026-11-08 - Motive: Audit browser sign-in for 0.15.0 against the final reference (39e31d8), with the fixes from CodeRabbit's review of #90.
+Last Edit: Claude Sonnet 5.5 - 2026-11-12 - Motive: Intercom review round 2 (CodeRabbit PR 92): urgent-scope precedence, the accepted announcement kept on a malformed POST answer, docs aligned with the API.
+
+## 2026-11-11 — Intercom (0.16.0): `AnnounceOptions` printed the text (security review L4), now redacted
+
+`AnnounceOptions` (`intercom.go`) is a plain struct, so `%v`, `%+v`, `%#v`, `%d` or a `log/slog` handler printed `Text`. It now implements `String`, `GoString`, `Format` and `slog.LogValuer`, which print `<N chars>` (`intercom_test.go`, `TestIntercomAnnounceOptionsNeverPrintTheText`). Still open: `json.Marshal(options)` prints the field, because a `MarshalJSON` that hid it would make a caller who stores the options lose the text silently; nothing in the SDK marshals the struct (`announceBody` builds a map).
+
+## 2026-11-11 — Intercom (0.16.0): `APIError.Problem` keeps the whole API body (review L5)
+
+The API strips `input` and `ctx` from `/intercom/` errors, so the text does not reach `Problem` today; a regression would. Not in contract section J; proposed in `SUGGESTIONS.md`.
+
+Test run behind these entries: `go test -count=1 ./...` (Go 1.26, linux/amd64, 2026-11-11): 504 top-level tests, 503 passed, 0 failed, 1 skipped (`TestNoiseInteropAgainstLiveHub`); `gofmt` and `go vet` (linux, windows, darwin) clean.
+
+## 2026-11-11 — Intercom (0.16.0), final API: this SDK does not NFC-normalise the text
+
+`AnnouncementText` (`intercom.go`) trims, counts runes and refuses `<`, `>`, controls, bidirectional and other format characters, invalid UTF-8, private use and line/paragraph separators, as the API does; but the API (and the Python and Node SDKs) NFC-normalise first and count after. The Go standard library has no normaliser and `golang.org/x/text` is not a dependency (`go.mod`), so a decomposed text (`e` + U+0301 per letter) counts double here and can be refused locally that the API would accept once composed. The reverse, a text that NFC lengthens, is refused by the API (422), never sent short. Pinned by `TestIntercomTheTextIsTrimmedAndCountedAsSentWithoutNormalisation`. Documented in `README.md` and `FAQ.md`.
+
+## 2026-11-11 — Intercom (0.16.0), final API: the timezone and Unicode checks use this build's databases
+
+`validIntercomTimezone` (`intercom.go`) asks `time.LoadLocation`, so a name is valid when this machine's tz database (or `time/tzdata`, if the program imports it) knows it; the API asks its own, case-sensitively on Linux. Where no database exists (a minimal container without `/usr/share/zoneinfo`, Windows without a Go install) every name looks unknown, so a probe with `America/New_York` finds that out and only the shape is checked; the API decides (`TestIntercomTheZoneShapeIsTheFallbackOnlyWhereThereIsNoTimezoneDatabase`). `unicode.In` uses the Unicode version of the Go release (`go.mod` says go 1.26.9): a character assigned later than the API's Unicode can pass here and be refused there, or the reverse. The API's answer stays authoritative; the 422 is the fallback.
+
+## 2026-11-11 — Intercom (0.16.0), final API: `ListIntercomSpeakers` returns an `IntercomSpeakerList`
+
+It returned `[]IntercomSpeaker`. The list now carries `PolicySynced` and `UnavailableReason` beside the items, as `AnnouncementList` does, so the return type changed (the branch is unreleased; nothing on `main` calls it). `IntercomSpeaker.PolicySynced` is a `*bool` (nil on list items, set on the PATCH answer) and `IntercomDelivery.Detail` is a plain string where the other SDKs have null (`""` is "none").
+
+## 2026-11-11 — Intercom (0.16.0), final API: `APIError.ProblemDetail` does not read `message`
+
+The final intercom problems carry their sentence in `message`; `problemFields` (`errors.go`) reads `detail` only, so `ProblemDetail` is `""` for them (the sentence is in `Problem["message"]` and in `Error()`). Moving that is a shared api-error change for every SDK; proposed in `SUGGESTIONS.md`.
+
+## 2026-11-11 — Intercom (0.16.0), final API: fixed in this round
+
+- **Rooms, groups and the key length** (was L6): `intercomTargetsBody` caps every list at 50 names of 64 characters and `validIdempotencyKey` caps the key at 128 printable ASCII characters (`TestIntercomATargetListHoldsAtMost50NamesOfAtMost64Characters`, `TestIntercomAnIdempotencyKeyIsAtMost128PrintableASCIICharacters`).
+- **A replayed announcement is marked** (`Announcement.Replayed`, from `Idempotency-Replayed: true`, kept after `Wait`; `TestIntercomAReplayedAnnouncementSaysSoAndAFirstAnswerDoesNot`, `TestIntercomAReplayedSendingAnnouncementStaysReplayedAfterWait`).
+- **The text rule is the API's** (was: 1-280 and control characters only; `TestIntercomATextTheAPIWouldRefuseIsRefusedFirstAndNeverEchoed`).
+- **Quiet hours** that are on need a real IANA zone and `Start != End` (`TestIntercomAnUnusableDoNotDisturbIsRefusedBeforeAnythingIsSent`).
+- **`hub_unreachable` and `not_cancellable` decide by code**, whatever the status, as in the reference (`TestIntercomTheCodesDecideWhateverTheStatus`); the 13 new codes have typed refusals (`TestIntercomEachNewProblemCodeIsItsOwnTypedRefusal`).
+
+## 2026-11-12 — Intercom (0.16.0): fixed in review round 2 (CodeRabbit PR 92)
+
+- **A 403 with `urgent_scope_required` and the generic "Insufficient scopes" sentence was only an `ErrAuth`** (`errors.go`, `APIError.refusal`): the intercom code now wins (`intercom_test.go`, `TestIntercomTheUrgentScopeCodeBeatsTheGenericInsufficientScopesRefusal`).
+- **A POST answer with an `id` but no `status` dropped the announcement** (`intercom.go`, `Announce`): the partly decoded announcement now comes back with the error (`TestIntercomAnAnswerWithAnIDButNoStatusKeepsTheID`).
+- **Docs said `Wait` needs `intercom:read` as well, and that cancel is owner/admin only**: both were wrong against the API (`thalovant-api` `app/auth/utils.py:232`, `app/routes/intercom.py` `cancel_announcement`); corrected.
+
+## 2026-11-11 — Intercom (0.16.0): a poll that fails after the POST
+
+`ControlPlane.Announce` with `Wait` (`intercom.go`) sends the POST, then polls `GetAnnouncement` (`intercom:read`, which `intercom:send` implies: `thalovant-api` `app/auth/utils.py` `expand_granted_scopes`). A 429 or a network error fails a poll after the announcement was accepted. `Announce` now returns the last accepted `Announcement` with the error, so its ID is not lost (`intercom_test.go`, `TestIntercomAFailedPollKeepsTheAcceptedAnnouncement`); a retry still needs the same `IdempotencyKey` to avoid speaking it again.
+
+## 2026-11-11 — Intercom (0.16.0): the text is in the request body
+
+`announceBody` (`intercom.go`) builds the body that holds the text and `ControlPlane.Announce` sends it; nothing logs or returns it, and `Announcement` never carries it (`intercom_test.go`, `TestIntercomAnnounceSendsTheContractBody`). It is not redacted from an `*APIError` the API echoes it in (`APIError.Problem` keeps the body, `Error()` never prints it); the contract says the API never echoes it. The announcement listing shape (`items`, `next_cursor`) is taken from the contract; `data` and `cursor` are read too. Not exercised against a live API.
 
 ## 2026-11-06 — CVE-2026-78661 in golang.org/x/net
 

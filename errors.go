@@ -42,6 +42,87 @@ var (
 	// one link of its kind: HTTP 409 with code "home_assistant_already_linked".
 	// LinkedClientID names the connection that holds it.
 	ErrAlreadyLinked = errors.New("thalovant hub already linked")
+	// ErrIntercomDisabled matches an *APIError with code "intercom_disabled":
+	// intercom is off for the hub. It also matches the stronger cases, which
+	// turning the hub's switch on cannot change: ErrIntercomUnavailable (a kid
+	// hub or a public hub) and ErrIntercomPlatformDisabled (the platform's own
+	// switch).
+	ErrIntercomDisabled = errors.New("thalovant intercom disabled")
+	// ErrIntercomUnavailable matches an *APIError with code
+	// "intercom_unavailable" (HTTP 422): intercom is never available on this
+	// hub, a kid hub or a public hub; APIError.Reason says which. Not
+	// retryable. errors.Is(err, ErrIntercomDisabled) holds too.
+	ErrIntercomUnavailable = errors.New("thalovant intercom unavailable on this hub")
+	// ErrIntercomPlatformDisabled matches an *APIError with code
+	// "intercom_disabled_platform" (HTTP 503): intercom is switched off for the
+	// whole platform and ships that way until the operator turns it on. Nothing
+	// was written, sent or spent. Show an explanation, not an error toast;
+	// reads and CancelAnnouncement still work. errors.Is(err,
+	// ErrIntercomDisabled) holds too.
+	ErrIntercomPlatformDisabled = errors.New("thalovant intercom switched off for the platform")
+	// ErrIntercomNotConfigured matches an *APIError with code
+	// "intercom_not_configured" (HTTP 503): the operator has not finished
+	// setting intercom up. Nothing was sent.
+	ErrIntercomNotConfigured = errors.New("thalovant intercom not configured")
+	// ErrUrgentScopeRequired matches an *APIError with code
+	// "urgent_scope_required" (HTTP 403): an urgent announcement (and so every
+	// repeat) needs the scope intercom:urgent in addition to intercom:send.
+	// Nothing was spent. errors.Is(err, ErrAuth) holds too: sign in again with
+	// the scope, or send a normal announcement.
+	ErrUrgentScopeRequired = errors.New("thalovant urgent announcements need the intercom:urgent scope")
+	// ErrUrgentBusy matches an *APIError with code "intercom_urgent_busy"
+	// (HTTP 429): the urgent pool is full. APIError.UrgentScope says which
+	// pool (hub or platform) and RetryAfter when to ask again. Nothing was
+	// stored and no rate token was spent. errors.Is(err, ErrRateLimited) holds
+	// too.
+	ErrUrgentBusy = errors.New("thalovant urgent announcements are busy")
+	// ErrSkillNotInstalled matches an *APIError with code
+	// "skill_not_installed" (HTTP 409): an urgent announcement on a hub whose
+	// runtime has no active Intercom skill. Nothing was sent.
+	ErrSkillNotInstalled = errors.New("thalovant intercom skill not installed")
+	// ErrNotASpeaker matches an *APIError with code "not_a_speaker" (HTTP
+	// 422): Receive true, or a speakers target, on a connection that cannot
+	// play speech. APIError.SpeakerKind names the connection kind of a refused
+	// Receive; APIError.NotSpeakers lists the refused targets.
+	ErrNotASpeaker = errors.New("thalovant connection cannot play speech")
+	// ErrReservedName matches an *APIError with code "reserved_name" (HTTP
+	// 422): a connection named like the platform's own Intercom client.
+	ErrReservedName = errors.New("thalovant reserved connection name")
+	// ErrHubLocked matches an *APIError with code "hub_locked" (HTTP 403): the
+	// hub is locked and nothing was changed. (owner_locked and account_locked
+	// are plain *APIError values with Code set.)
+	ErrHubLocked = errors.New("thalovant hub locked")
+	// ErrImpersonationNotAllowed matches an *APIError with code
+	// "impersonation_not_allowed" (HTTP 403): an impersonated session cannot
+	// announce, enable intercom or change a speaker.
+	ErrImpersonationNotAllowed = errors.New("thalovant impersonated session not allowed")
+	// ErrTooManyTargets matches an *APIError with code "too_many_targets"
+	// (HTTP 422): all, a room or a group resolved to more than 50 speakers;
+	// APIError.Matched says how many. Naming that same room or group resolves
+	// to the same speakers: choose a narrower target or name at most 50.
+	ErrTooManyTargets = errors.New("thalovant too many announcement targets")
+	// ErrManagedClient matches an *APIError with code "managed_client" (HTTP
+	// 403): the platform's own Intercom client cannot be managed, given
+	// credentials or named in an access policy (APIError.RefusedClientRefs).
+	ErrManagedClient = errors.New("thalovant managed connection")
+	// ErrHubUnreachable matches an *APIError with code
+	// "hub_unreachable": the API could not reach the hub. Whether the text
+	// was spoken is not guaranteed either way (the hub may have spoken it and
+	// lost the answer). The API records the attempt as a "failed"
+	// announcement and names it in APIError.AnnouncementID. Do not resend
+	// blindly: read that announcement first. Reusing the same IdempotencyKey
+	// does not retry, it replays the stored failed record and never sends
+	// again; to send the text again on purpose, use a new key.
+	ErrHubUnreachable = errors.New("thalovant hub unreachable")
+	// ErrNotCancellable matches an *APIError with code "not_cancellable"
+	// (HTTP 409): CancelAnnouncement on an announcement that is not "sending"
+	// (it completed, failed or was cancelled already).
+	// APIError.AnnouncementStatus is its current status: read it instead of
+	// showing an error.
+	ErrNotCancellable = errors.New("thalovant announcement not cancellable")
+	// ErrRateLimited matches an *APIError that is HTTP 429 (and the full
+	// urgent pool, ErrUrgentBusy). RetryAfter says how long to wait.
+	ErrRateLimited = errors.New("thalovant rate limited")
 	// ErrUnsupportedConnectionType matches an *UnsupportedConnectionTypeError:
 	// the API could not make a connection of the kind asked for.
 	ErrUnsupportedConnectionType = errors.New("thalovant unsupported connection type")
@@ -394,7 +475,15 @@ func (e *APIError) GoString() string {
 }
 
 // Is reports whether the refusal is one a caller can branch on: ErrAuth,
-// ErrPlan or ErrAlreadyLinked. They are read from the status and the body, so
+// ErrPlan, ErrAlreadyLinked, ErrIntercomDisabled, ErrHubUnreachable,
+// ErrNotCancellable, ErrRateLimited, or one of the intercom refusals
+// (ErrUrgentScopeRequired, ErrUrgentBusy, ErrSkillNotInstalled, ErrNotASpeaker,
+// ErrReservedName, ErrHubLocked, ErrImpersonationNotAllowed, ErrTooManyTargets,
+// ErrIntercomUnavailable, ErrIntercomPlatformDisabled, ErrIntercomNotConfigured,
+// ErrManagedClient). Three of those are also a kind of an older refusal:
+// ErrUrgentScopeRequired is an ErrAuth, ErrUrgentBusy an ErrRateLimited, and
+// ErrIntercomUnavailable and ErrIntercomPlatformDisabled an ErrIntercomDisabled.
+// They are read from the status and the body, so
 // every control-plane call answers them the same way, and the error stays an
 // *APIError with every field it carried:
 //
@@ -410,11 +499,26 @@ func (e *APIError) GoString() string {
 func (e *APIError) Is(target error) bool {
 	switch target {
 	case ErrAuth:
-		return e.refusal() == ErrAuth
+		kind := e.refusal()
+		return kind == ErrAuth || kind == ErrUrgentScopeRequired
 	case ErrPlan:
 		return e.refusal() == ErrPlan
 	case ErrAlreadyLinked:
 		return e.refusal() == ErrAlreadyLinked
+	case ErrIntercomDisabled:
+		kind := e.refusal()
+		return kind == ErrIntercomDisabled || kind == ErrIntercomUnavailable || kind == ErrIntercomPlatformDisabled
+	case ErrHubUnreachable:
+		return e.refusal() == ErrHubUnreachable
+	case ErrNotCancellable:
+		return e.refusal() == ErrNotCancellable
+	case ErrRateLimited:
+		kind := e.refusal()
+		return kind == ErrRateLimited || kind == ErrUrgentBusy
+	case ErrIntercomUnavailable, ErrIntercomPlatformDisabled, ErrIntercomNotConfigured, ErrUrgentScopeRequired,
+		ErrUrgentBusy, ErrSkillNotInstalled, ErrNotASpeaker, ErrReservedName, ErrHubLocked,
+		ErrImpersonationNotAllowed, ErrTooManyTargets, ErrManagedClient:
+		return e.refusal() == target
 	}
 	return false
 }
@@ -426,17 +530,44 @@ func (e *APIError) refusal() error {
 	// apiErrorFromResponse does.
 	bodyCode, bodyDetail := problemFields(e.Problem)
 	code, detail := firstNonEmpty(e.Code, bodyCode), firstNonEmpty(e.ProblemDetail, bodyDetail)
+	intercom := intercomRefusals[code]
 	switch {
-	case e.StatusCode == 401 || e.StatusCode == 423 || (e.StatusCode == 403 && detail == "Insufficient scopes"):
+	case e.StatusCode == 401 || e.StatusCode == 423 || (e.StatusCode == 403 && detail == "Insufficient scopes" && intercom == nil):
 		// A token that is unknown, expired or revoked; a locked account; or a
-		// token without the scope: signing in again is the way out of each.
+		// token without the scope: signing in again is the way out of each. A
+		// 403 that names an intercom code (ErrUrgentScopeRequired is the one
+		// that is a refusal of scope) is that code's own refusal instead.
 		return ErrAuth
 	case e.StatusCode == 402 || (e.StatusCode == 403 && code == "plan_limit"):
 		return ErrPlan
 	case e.StatusCode == 409 && code == "home_assistant_already_linked":
 		return ErrAlreadyLinked
+	case intercom != nil:
+		// The intercom codes decide by code, whatever the status.
+		return intercom
+	case e.StatusCode == 429:
+		return ErrRateLimited
 	}
 	return nil
+}
+
+// intercomRefusals is the refusal kind of each intercom problem code.
+var intercomRefusals = map[string]error{
+	IntercomCodeDisabled:                ErrIntercomDisabled,
+	IntercomCodeUnavailable:             ErrIntercomUnavailable,
+	IntercomCodeDisabledPlatform:        ErrIntercomPlatformDisabled,
+	IntercomCodeNotConfigured:           ErrIntercomNotConfigured,
+	IntercomCodeUrgentScopeRequired:     ErrUrgentScopeRequired,
+	IntercomCodeUrgentBusy:              ErrUrgentBusy,
+	IntercomCodeSkillNotInstalled:       ErrSkillNotInstalled,
+	IntercomCodeNotASpeaker:             ErrNotASpeaker,
+	IntercomCodeReservedName:            ErrReservedName,
+	IntercomCodeHubLocked:               ErrHubLocked,
+	IntercomCodeImpersonationNotAllowed: ErrImpersonationNotAllowed,
+	IntercomCodeTooManyTargets:          ErrTooManyTargets,
+	IntercomCodeManagedClient:           ErrManagedClient,
+	IntercomCodeHubUnreachable:          ErrHubUnreachable,
+	IntercomCodeNotCancellable:          ErrNotCancellable,
 }
 
 // LinkedClientID is the connection that already holds a hub's link, named by
@@ -457,6 +588,94 @@ func (e *APIError) LinkedClientID() string {
 	}
 	return ""
 }
+
+// problemMember is a member of the problem body, at its top or inside a
+// detail that is itself an object (FastAPI's envelope); nil when absent.
+func (e *APIError) problemMember(key string) any {
+	if e.Problem == nil {
+		return nil
+	}
+	nested, _ := e.Problem["detail"].(map[string]any)
+	for _, source := range []map[string]any{e.Problem, nested} {
+		if value, ok := source[key]; ok {
+			return value
+		}
+	}
+	return nil
+}
+
+// problemString is a non-empty string member of the problem, or "".
+func (e *APIError) problemString(key string) string {
+	if text, ok := e.problemMember(key).(string); ok && text != "" {
+		return text
+	}
+	return ""
+}
+
+// problemStrings is the non-empty string entries of a list member of the
+// problem; nil when it is absent or not a list.
+func (e *APIError) problemStrings(key string) []string {
+	list, ok := e.problemMember(key).([]any)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, item := range list {
+		if text, ok := item.(string); ok && text != "" {
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
+// AnnouncementID is the announcement the API recorded for an ErrHubUnreachable
+// refusal (502 hub_unreachable): read it with GetAnnouncement before sending
+// again. "" when the answer names none. It is read from the body's
+// announcement_id, at the top or inside a detail that is itself an object.
+func (e *APIError) AnnouncementID() string { return e.problemString("announcement_id") }
+
+// AnnouncementStatus is the current status of the announcement an
+// ErrNotCancellable refusal (409 not_cancellable) names: completed, partial,
+// failed or cancelled (open). Refresh the result with GetAnnouncement instead
+// of showing an error. "" when the answer names none.
+func (e *APIError) AnnouncementStatus() string { return e.problemString("announcement_status") }
+
+// Reason is why an ErrIntercomUnavailable refusal (422 intercom_unavailable)
+// says intercom cannot run on the hub: "kid_hub" or "public_hub" (open). ""
+// when the answer names none.
+func (e *APIError) Reason() string { return e.problemString("reason") }
+
+// UrgentScope says which pool an ErrUrgentBusy refusal (429
+// intercom_urgent_busy) found full: "hub" or "platform" (open). "" when the
+// answer names none.
+func (e *APIError) UrgentScope() string { return e.problemString("scope") }
+
+// SpeakerKind is the connection kind of a refused Receive (ErrNotASpeaker,
+// 422 not_a_speaker): "home_assistant", "developer", "embedded"... "" when the
+// answer names none.
+func (e *APIError) SpeakerKind() string { return e.problemString("kind") }
+
+// NotSpeakers lists the named connections that cannot play speech in a
+// refused announcement (ErrNotASpeaker, 422 not_a_speaker); nil otherwise.
+func (e *APIError) NotSpeakers() []string { return e.problemStrings("not_speakers") }
+
+// Matched is how many speakers a refused announcement (ErrTooManyTargets, 422
+// too_many_targets) resolved to. ok is false when the answer names no whole,
+// non-negative count.
+func (e *APIError) Matched() (matched int, ok bool) {
+	value, isNumber := e.problemMember("matched").(float64)
+	if !isNumber || value < 0 || value != math.Trunc(value) || value > maxJSONInteger {
+		return 0, false
+	}
+	return int(value), true
+}
+
+// maxJSONInteger is the largest whole number every JSON decoder holds exactly.
+const maxJSONInteger = 1<<53 - 1
+
+// RefusedClientRefs lists the managed connections an access policy named
+// (ErrManagedClient, 403 managed_client); nil otherwise.
+func (e *APIError) RefusedClientRefs() []string { return e.problemStrings("refused_client_refs") }
 
 // DeviceLoginPendingError is a device sign-in nobody has approved yet: poll
 // again after Interval. A slow_down answer has already lengthened it, for good,
