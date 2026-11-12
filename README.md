@@ -327,10 +327,16 @@ sent, err := api.Announce(ctx, hubID, thalovant.AnnounceOptions{
 	Text: "Wake up", Targets: thalovant.AllSpeakers(), Priority: thalovant.IntercomPriorityUrgent,
 	Repeat: &thalovant.IntercomRepeat{Times: 10, IntervalSeconds: 60}, IdempotencyKey: thalovant.NewRequestID(),
 })
-if err != nil {
-	return err // refused (ErrUrgentScopeRequired, ErrUrgentBusy, ...): nothing to cancel, sent.ID is empty
+if sent.ID == "" {
+	return err // refused (ErrUrgentScopeRequired, ErrUrgentBusy, ...): nothing was accepted, so nothing to cancel
 }
-stopped, err := api.CancelAnnouncement(ctx, hubID, sent.ID) // intercom:send
+// An error can also come back WITH an announcement (the POST was accepted but its answer was
+// malformed): keep the ID, stop it, then report the original error.
+stopped, cancelErr := api.CancelAnnouncement(ctx, hubID, sent.ID) // intercom:send
+if err != nil {
+	return err
+}
+err = cancelErr
 // stopped.Status == "cancelled"; stopped.HubConfirmed is a *bool: false when the hub could not confirm
 ```
 
