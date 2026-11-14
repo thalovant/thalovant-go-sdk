@@ -1,5 +1,3 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-12 - Motive: Intercom review round 2 (CodeRabbit PR 92): urgent-scope precedence, the accepted announcement kept on a malformed POST answer, docs aligned with the API.
-
 # Changelog
 
 ## 0.17.1 — Unreleased

@@ -1,5 +1,3 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom final API: urgent scope, CanPlay, Replayed, platform switch, text rule.
-
 # FAQ
 
 ## Is intercom a safety system, and why is there no `Intercom()` method?

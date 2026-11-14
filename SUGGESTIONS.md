@@ -1,5 +1,3 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom final API: `Replayed` and the caps are done; shared vectors matter more; NFC; `message` in `ProblemDetail`.
-
 # Suggestions
 
 ## Scrub `input` and `ctx` from `Problem` on intercom calls
