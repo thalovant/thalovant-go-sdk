@@ -5,14 +5,14 @@ Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom final API: urgent s
 | Item | Value |
 | :--- | :--- |
 | Module | `github.com/thalovant/thalovant-go-sdk` (package `thalovant`) |
-| Version | 0.16.0 (`VERSION` and `const Version` in `version.go`, kept equal by `TestVersionMatchesVersionFile`; the Auto Release workflow bumps both for a patch release) |
+| Version | 0.17.0 (`VERSION` and `const Version` in `version.go`, kept equal by `TestVersionMatchesVersionFile`; the Auto Release workflow bumps both for a patch release) |
 | Go | 1.26.9 or newer (`go.mod`) |
 | Data-plane entry points | `NewClient`, `NewClientFromConfig`, `Client.Ask`, `Client.Intents`, `HubSession` |
 | Control-plane entry points | `NewControlPlane`, `NewDefaultControlPlane`, methods on `*ControlPlane` (`control.go`, `hub_skills.go`, `chat_apps.go`, `browser_login.go`) |
 | Sign-in entry points | `InteractiveLogin` (chooser), `BrowserLogin` (browser, PKCE on a loopback redirect), `LoginWithBrowser` (device login, unchanged), `BeginDeviceLogin`/`PollDeviceLogin`, `RevokeAPIToken` |
 | Errors | `*APIError` (`StatusCode`, `Code`, `ProblemDetail`, `Problem`, `Fields`, `RetryAfter`); `ErrAPI`, `ErrAuth`, `ErrPlan`, `ErrAPIUnreachable` (`errors.go`) |
 | Validation | `test -z "$(gofmt -l .)"`, `go vet ./...`, `go test -race -count=1 ./...` |
-| Parity contract | `contracts/sdk-parity.json`, checked by the Python SDK's `scripts/check-sdk-parity.py --consumer thalovant-go-sdk`; reference digests accepted: `57c7e71f6456…` (current) and `6dfb3bb31ac7…` (browser-login final candidate, Python 39e31d8) |
+| Parity contract | `contracts/sdk-parity.json`, checked by the Python SDK's `scripts/check-sdk-parity.py --consumer thalovant-go-sdk`; reference digests accepted: `8687c8429e28…` (connector-connections candidate), `57c7e71f6456…` and `6dfb3bb31ac7…` (browser-login final candidate, Python 39e31d8) |
 | Conformance results | `contracts/conformance-results.json`, written by `THALOVANT_CONFORMANCE_OUT=contracts/conformance-results.json go test ./...` |
 
 ## Browser sign-in (`browser_login.go`, `loopback.go`)

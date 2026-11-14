@@ -126,6 +126,41 @@ var (
 	// ErrUnsupportedConnectionType matches an *UnsupportedConnectionTypeError:
 	// the API could not make a connection of the kind asked for.
 	ErrUnsupportedConnectionType = errors.New("thalovant unsupported connection type")
+	// ErrConnectionTypeUnavailable matches a link (home_assistant or connector)
+	// refused on this hub (HTTP 422 connection_type_unavailable): a link is
+	// made only on the caller's own hub or one Thalovant runs. APIError.Reason
+	// is "hub_operated_by_another_account". It is a kind of
+	// ErrUnsupportedConnectionType, so a handler for that keeps working, and
+	// CreateClientIdentity returns it as a *ConnectionTypeUnavailableError.
+	ErrConnectionTypeUnavailable = errors.New("thalovant connection type unavailable on this hub")
+	// ErrConnectorsInvalid matches an *APIError with code "connectors_invalid"
+	// (HTTP 422): a home bridge's spec.connectors is empty, repeated or names
+	// an id it may not serve. APIError.Reason says which ("duplicate",
+	// "own_kind", "unknown_or_malformed") and APIError.Known lists the ids a
+	// bridge may serve.
+	ErrConnectorsInvalid = errors.New("thalovant connectors invalid")
+	// ErrOwnerOnlyBesideLink matches an *APIError (HTTP 403) with code
+	// device_owner_only_beside_home_link, setup_session_owner_only_beside_home_link
+	// or device_identity_owner_only_beside_home_link: only the account owner, from
+	// their own session, may add a device beside a home link.
+	// APIError.LinkClientID names the link.
+	ErrOwnerOnlyBesideLink = errors.New("thalovant owner only beside a home link")
+	// ErrHubScaleOutBreaksLinks matches an *APIError with code
+	// "hub_scale_out_breaks_links" (HTTP 409): a hub that carries links does not
+	// scale out. APIError.Links counts them; remove the links first.
+	ErrHubScaleOutBreaksLinks = errors.New("thalovant hub scale-out breaks links")
+	// ErrIdempotencyKeySpent matches an *APIError with code
+	// "idempotency_key_spent" (HTTP 409): the key made something that was since
+	// removed. Send the request again with a new key.
+	ErrIdempotencyKeySpent = errors.New("thalovant idempotency key spent")
+	// ErrPrivateHubOnly matches an *APIError with code
+	// "skill_config_private_hub_only" (HTTP 422): the setting is for a private
+	// hub only. APIError.Settings names them.
+	ErrPrivateHubOnly = errors.New("thalovant setting is for a private hub only")
+	// ErrCredentialsNotReplayed matches a *CredentialsNotReplayedError: a
+	// connection create was answered from an earlier request with the same
+	// Idempotency-Key, which carries no credentials.
+	ErrCredentialsNotReplayed = errors.New("thalovant credentials not replayed")
 	// ErrHubRefused reports that a hub turned the connection's credentials
 	// away. It always travels with ErrConnection. A new connection is refused
 	// until its hub admits it, so a HubSession's Run treats it as "not yet"
@@ -505,6 +540,13 @@ func (e *APIError) Is(target error) bool {
 		return e.refusal() == ErrPlan
 	case ErrAlreadyLinked:
 		return e.refusal() == ErrAlreadyLinked
+	case ErrUnsupportedConnectionType, ErrConnectionTypeUnavailable:
+		// Only the unavailable code is a kind of ErrUnsupportedConnectionType
+		// here; an unknown or ambiguous kind is told apart by
+		// CreateClientIdentity, which knows what it asked for.
+		return e.refusal() == ErrConnectionTypeUnavailable
+	case ErrConnectorsInvalid, ErrOwnerOnlyBesideLink, ErrHubScaleOutBreaksLinks, ErrIdempotencyKeySpent, ErrPrivateHubOnly:
+		return e.refusal() == target
 	case ErrIntercomDisabled:
 		kind := e.refusal()
 		return kind == ErrIntercomDisabled || kind == ErrIntercomUnavailable || kind == ErrIntercomPlatformDisabled
@@ -542,6 +584,8 @@ func (e *APIError) refusal() error {
 		return ErrPlan
 	case e.StatusCode == 409 && code == "home_assistant_already_linked":
 		return ErrAlreadyLinked
+	case connectionRefusals[connectionRefusalKey{e.StatusCode, code}] != nil:
+		return connectionRefusals[connectionRefusalKey{e.StatusCode, code}]
 	case intercom != nil:
 		// The intercom codes decide by code, whatever the status.
 		return intercom
@@ -549,6 +593,57 @@ func (e *APIError) refusal() error {
 		return ErrRateLimited
 	}
 	return nil
+}
+
+// The code of every refusal the connection routes gained with home links and
+// home bridges. Read APIError.Code first; each code's kind is named beside it.
+// A code not listed here is an ordinary *APIError.
+const (
+	// ConnectionCodeTypeUnavailable (422): no link on this hub; ErrConnectionTypeUnavailable.
+	ConnectionCodeTypeUnavailable = "connection_type_unavailable"
+	// ConnectionCodeTypeUnknown (422): the kind is not one the API creates;
+	// APIError.Known lists the ones it does. An ErrUnsupportedConnectionType
+	// from CreateClientIdentity.
+	ConnectionCodeTypeUnknown = "connection_type_unknown"
+	// ConnectionCodeTypeAmbiguous (422): connection_type and connectionType were
+	// both sent and differ. An ErrUnsupportedConnectionType from CreateClientIdentity.
+	ConnectionCodeTypeAmbiguous = "connection_type_ambiguous"
+	// ConnectionCodeConnectorsInvalid (422): ErrConnectorsInvalid.
+	ConnectionCodeConnectorsInvalid = "connectors_invalid"
+	// ConnectionCodeDeviceOwnerOnly (403): ErrOwnerOnlyBesideLink.
+	ConnectionCodeDeviceOwnerOnly = "device_owner_only_beside_home_link"
+	// ConnectionCodeSetupSessionOwnerOnly (403): ErrOwnerOnlyBesideLink.
+	ConnectionCodeSetupSessionOwnerOnly = "setup_session_owner_only_beside_home_link"
+	// ConnectionCodeDeviceIdentityOwnerOnly (403): ErrOwnerOnlyBesideLink.
+	ConnectionCodeDeviceIdentityOwnerOnly = "device_identity_owner_only_beside_home_link"
+	// ConnectionCodeHubScaleOutBreaksLinks (409): ErrHubScaleOutBreaksLinks.
+	ConnectionCodeHubScaleOutBreaksLinks = "hub_scale_out_breaks_links"
+	// ConnectionCodeIdempotencyKeySpent (409): ErrIdempotencyKeySpent.
+	ConnectionCodeIdempotencyKeySpent = "idempotency_key_spent"
+	// ConnectionCodePrivateHubOnly (422): ErrPrivateHubOnly.
+	ConnectionCodePrivateHubOnly = "skill_config_private_hub_only"
+	// ConnectionCodeIdempotentReplay is not an error code: the replay.code of a
+	// connection answered from an earlier request with the same key.
+	ConnectionCodeIdempotentReplay = "idempotent_replay"
+)
+
+// connectionRefusalKey is a refusal's status and code.
+type connectionRefusalKey struct {
+	status int
+	code   string
+}
+
+// connectionRefusals is the refusal kind of each connection problem, by status
+// and code.
+var connectionRefusals = map[connectionRefusalKey]error{
+	{422, ConnectionCodeTypeUnavailable}:         ErrConnectionTypeUnavailable,
+	{422, ConnectionCodeConnectorsInvalid}:       ErrConnectorsInvalid,
+	{403, ConnectionCodeDeviceOwnerOnly}:         ErrOwnerOnlyBesideLink,
+	{403, ConnectionCodeSetupSessionOwnerOnly}:   ErrOwnerOnlyBesideLink,
+	{403, ConnectionCodeDeviceIdentityOwnerOnly}: ErrOwnerOnlyBesideLink,
+	{409, ConnectionCodeHubScaleOutBreaksLinks}:  ErrHubScaleOutBreaksLinks,
+	{409, ConnectionCodeIdempotencyKeySpent}:     ErrIdempotencyKeySpent,
+	{422, ConnectionCodePrivateHubOnly}:          ErrPrivateHubOnly,
 }
 
 // intercomRefusals is the refusal kind of each intercom problem code.
@@ -673,6 +768,29 @@ func (e *APIError) Matched() (matched int, ok bool) {
 // maxJSONInteger is the largest whole number every JSON decoder holds exactly.
 const maxJSONInteger = 1<<53 - 1
 
+// Known lists the ids a refused kind or connector list may use
+// (ErrConnectorsInvalid, or a 422 connection_type_unknown); nil when the answer
+// names none.
+func (e *APIError) Known() []string { return e.problemStrings("known") }
+
+// LinkClientID is the link that closes an ErrOwnerOnlyBesideLink refusal; ""
+// when the answer names none.
+func (e *APIError) LinkClientID() string { return e.problemString("link_client_id") }
+
+// Links is how many links a hub carries, from an ErrHubScaleOutBreaksLinks
+// refusal. ok is false when the answer names no whole, non-negative count.
+func (e *APIError) Links() (links int, ok bool) {
+	value, isNumber := e.problemMember("links").(float64)
+	if !isNumber || value < 0 || value != math.Trunc(value) || value > maxJSONInteger {
+		return 0, false
+	}
+	return int(value), true
+}
+
+// Settings names the settings an ErrPrivateHubOnly refusal is about; nil when
+// the answer names none.
+func (e *APIError) Settings() []string { return e.problemStrings("settings") }
+
 // RefusedClientRefs lists the managed connections an access policy named
 // (ErrManagedClient, 403 managed_client); nil otherwise.
 func (e *APIError) RefusedClientRefs() []string { return e.problemStrings("refused_client_refs") }
@@ -775,6 +893,74 @@ func (e *UnsupportedConnectionTypeError) Error() string {
 func (e *UnsupportedConnectionTypeError) Unwrap() []error {
 	return []error{ErrUnsupportedConnectionType, apiErrorOrSentinel(e.APIError)}
 }
+
+// ConnectionTypeUnavailableError reports that a link cannot be made on this
+// hub (HTTP 422 connection_type_unavailable): a link, of either kind, is made
+// only on the caller's own hub or one Thalovant runs. Nothing was made, so
+// nothing is deleted. It is a kind of UnsupportedConnectionTypeError: it matches
+// ErrConnectionTypeUnavailable, ErrUnsupportedConnectionType and ErrAPI, and
+// errors.As reaches both the *UnsupportedConnectionTypeError and the *APIError
+// the API answered with.
+type ConnectionTypeUnavailableError struct {
+	// Unsupported is the unsupported-kind error this is a kind of; its
+	// APIError is the API's refusal.
+	Unsupported *UnsupportedConnectionTypeError
+}
+
+// Reason is why (an open value, such as "hub_operated_by_another_account"); ""
+// when the answer did not say.
+func (e *ConnectionTypeUnavailableError) Reason() string {
+	if e.Unsupported == nil || e.Unsupported.APIError == nil {
+		return ""
+	}
+	return e.Unsupported.APIError.Reason()
+}
+
+func (e *ConnectionTypeUnavailableError) Error() string {
+	reason := e.Reason()
+	if reason == "" {
+		reason = "no reason given"
+	}
+	return fmt.Sprintf("%v: a link cannot be made on this hub (%s); choose your own hub or one Thalovant runs", ErrConnectionTypeUnavailable, reason)
+}
+
+// Unwrap makes a ConnectionTypeUnavailableError match
+// ErrConnectionTypeUnavailable and, through the unsupported-kind error,
+// ErrUnsupportedConnectionType and ErrAPI.
+func (e *ConnectionTypeUnavailableError) Unwrap() []error {
+	if e.Unsupported == nil {
+		return []error{ErrConnectionTypeUnavailable, ErrUnsupportedConnectionType}
+	}
+	return []error{ErrConnectionTypeUnavailable, e.Unsupported}
+}
+
+// CredentialsNotReplayedError reports that a connection create was answered
+// from an earlier request with the same Idempotency-Key (the header
+// Idempotent-Replayed: true, or a replay marker in the body). The connection
+// exists, but its credentials were in the first answer only: the platform does
+// not store them, so a replay carries none. The SDK does not hand back an
+// identity it made up. Download the identity from the owner's own session, or
+// delete the connection and create it again with a new key. It matches
+// ErrCredentialsNotReplayed.
+type CredentialsNotReplayedError struct {
+	// Client is the replayed connection, without credentials.
+	Client map[string]any
+}
+
+// ClientID is the connection's id; "" when the answer carried none.
+func (e *CredentialsNotReplayedError) ClientID() string {
+	id, _ := e.Client["id"].(string)
+	return id
+}
+
+func (e *CredentialsNotReplayedError) Error() string {
+	return fmt.Sprintf("%v: this create was answered from an earlier request with the same Idempotency-Key; "+
+		"the connection exists, but its credentials were in the first answer only and are not stored. "+
+		"Download its identity from the owner's session, or delete it and create it again with a new key", ErrCredentialsNotReplayed)
+}
+
+// Unwrap makes a CredentialsNotReplayedError match ErrCredentialsNotReplayed.
+func (e *CredentialsNotReplayedError) Unwrap() error { return ErrCredentialsNotReplayed }
 
 // AdmissionTimeoutError reports that a new connection was not admitted by its
 // hub within the wait. It is a connection error and a timeout at once --
