@@ -22,6 +22,11 @@ const (
 	// ConnectionTypeHomeAssistant is a hub's Home Assistant link. A hub holds
 	// at most one: a second is refused with ErrAlreadyLinked.
 	ConnectionTypeHomeAssistant = "home_assistant"
+	// ConnectionTypeConnector is a home bridge: a link that serves the connector
+	// ids in spec.connectors (music_assistant today). Home Assistant has the
+	// kind above and is never one of a bridge's connectors. The API validates
+	// the ids; see ErrConnectorsInvalid.
+	ConnectionTypeConnector = "connector"
 )
 
 const (
@@ -46,6 +51,68 @@ func (r BootstrapIdentityResult) ConnectionType() string {
 	spec, _ := r.Client["spec"].(map[string]any)
 	kind, _ := spec["connection_type"].(string)
 	return kind
+}
+
+// Serves is what a new link will serve: the "serves" block of the create
+// answer, with "devices" (id, name, connection_type, active), "count" and
+// "warning". A link answers the same account's devices on the same hub and
+// nobody else's. It is nil for any other kind, and from an API that does not
+// say.
+func (r BootstrapIdentityResult) Serves() map[string]any {
+	serves, _ := r.Client["serves"].(map[string]any)
+	return serves
+}
+
+// ServesWarning is the warning in Serves: this link will serve none of the
+// account's devices (none, or all paused). "" when there is none.
+func (r BootstrapIdentityResult) ServesWarning() string {
+	warning, _ := r.Serves()["warning"].(string)
+	return warning
+}
+
+// isReplay reports a create answered from an earlier request with the same
+// Idempotency-Key: the header Idempotent-Replayed: true (not the intercom
+// header, Idempotency-Replayed), or a replay marker in the body.
+func isReplay(client map[string]any, header http.Header) bool {
+	if strings.EqualFold(strings.TrimSpace(header.Get("Idempotent-Replayed")), "true") {
+		return true
+	}
+	marker, _ := client["replay"].(map[string]any)
+	code, _ := marker["code"].(string)
+	return code == ConnectionCodeIdempotentReplay
+}
+
+// clientSecretKeys are the keys, lower-cased without "_" or "-", that never
+// survive into a replayed resource.
+var clientSecretKeys = map[string]bool{
+	"initialidentify": true, "initialidentifytoken": true, "apikey": true, "accesskey": true,
+	"password": true, "cryptokey": true, "token": true, "accesstoken": true, "refreshtoken": true,
+	"authorization": true, "clientsecret": true, "privatekey": true, "secret": true,
+	"apisecret": true, "secretkey": true, "credentials": true,
+}
+
+// scrubClientSecrets deep-copies a client resource without its secret-bearing
+// keys, wherever they appear. Reference keys such as apiKeyRef are kept: they
+// point at vault entries and hold no secret.
+func scrubClientSecrets(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(typed))
+		for key, item := range typed {
+			if clientSecretKeys[strings.ReplaceAll(strings.ReplaceAll(strings.ToLower(key), "_", ""), "-", "")] {
+				continue
+			}
+			out[key] = scrubClientSecrets(item)
+		}
+		return out
+	case []any:
+		out := make([]any, len(typed))
+		for i, item := range typed {
+			out[i] = scrubClientSecrets(item)
+		}
+		return out
+	}
+	return value
 }
 
 // operationFromAny reads the operation a create answered with, or nil when it

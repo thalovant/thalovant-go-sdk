@@ -123,6 +123,11 @@ type BootstrapIdentityResult struct {
 	// Operation tracks the hub admitting the new connection, about ninety
 	// seconds; WaitForAdmission follows it. nil when the API sent none.
 	Operation *OperationResource
+	// Replayed is true when the API answered from an earlier create with the
+	// same Idempotency-Key. A replay carries no credentials, so
+	// CreateClientIdentity returns a *CredentialsNotReplayedError instead of a
+	// result: this is always false on a result you hold.
+	Replayed bool
 }
 
 type AnalyticsOverviewOptions struct {
@@ -963,6 +968,23 @@ func (c *ControlPlane) CreateClient(ctx context.Context, payload map[string]any,
 	return c.request(ctx, http.MethodPost, "/v1/clients", payload, map[string]string{"Idempotency-Key": idempotencyKey}, true)
 }
 
+// createClientWithHeader is CreateClient with the response headers beside the
+// body (for Idempotent-Replayed).
+func (c *ControlPlane) createClientWithHeader(ctx context.Context, payload map[string]any, idempotencyKey string) (map[string]any, http.Header, error) {
+	status, raw, header, err := c.send(ctx, http.MethodPost, "/v1/clients", payload, map[string]string{"Idempotency-Key": idempotencyKey}, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	if status < 200 || status > 299 {
+		return nil, nil, apiErrorFromResponse(status, raw, header)
+	}
+	result, decodeErr := decodeControlJSON(raw)
+	if decodeErr != nil {
+		return nil, nil, &APIError{StatusCode: status, Detail: "invalid JSON response"}
+	}
+	return result, header, nil
+}
+
 func (c *ControlPlane) CreateClientIdentityForHubID(ctx context.Context, hubID string, opts BootstrapIdentityOptions) (BootstrapIdentityResult, error) {
 	hub, err := c.GetHub(ctx, hubID)
 	if err != nil {
@@ -983,6 +1005,21 @@ func (c *ControlPlane) CreateClientIdentityForHubID(ctx context.Context, hubID s
 // already holds the one link of its kind; APIError.LinkedClientID names it) and
 // ErrAuth (sign in again). Each still carries the *APIError the API answered
 // with.
+//
+// ConnectionTypeConnector makes a home bridge; name what it serves in
+// Spec["connectors"] (each id once; see ErrConnectorsInvalid). A link, of either
+// kind, is made only on the caller's own hub or one Thalovant runs
+// (*ConnectionTypeUnavailableError, a kind of *UnsupportedConnectionTypeError),
+// and it serves only the caller's own devices on that hub: read the result's
+// Serves and ServesWarning.
+//
+// The platform issues the connection's access key and password: an apiKey or
+// password in the spec is ignored by an API that has this behaviour, and the
+// identity returned is the one in the answer. A create answered from an
+// earlier request with the same IdempotencyKey carries no credentials and
+// returns a *CredentialsNotReplayedError (ErrCredentialsNotReplayed), never an
+// identity made up here. An answer without credentials that is not a replay
+// keeps the locally generated pair, for an API that honours it.
 //
 // The result's Operation tracks the hub admitting the connection, about ninety
 // seconds; WaitForAdmission waits for it.
@@ -1035,14 +1072,28 @@ func (c *ControlPlane) CreateClientIdentity(ctx context.Context, hub map[string]
 	if opts.OwnerID != "" {
 		payload["owner_id"] = opts.OwnerID
 	}
-	client, err := c.CreateClient(ctx, payload, opts.IdempotencyKey)
+	idempotencyKey := opts.IdempotencyKey
+	if idempotencyKey == "" {
+		idempotencyKey = NewRequestID()
+	}
+	client, responseHeader, err := c.createClientWithHeader(ctx, payload, idempotencyKey)
 	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && errors.Is(apiErr, ErrConnectionTypeUnavailable) {
+			return BootstrapIdentityResult{}, &ConnectionTypeUnavailableError{
+				Unsupported: &UnsupportedConnectionTypeError{ConnectionType: connectionType, APIError: apiErr},
+			}
+		}
 		if connectionType != "" {
 			if apiErr, refused := refusesConnectionType(err); refused {
 				return BootstrapIdentityResult{}, &UnsupportedConnectionTypeError{ConnectionType: connectionType, APIError: apiErr}
 			}
 		}
 		return BootstrapIdentityResult{}, err
+	}
+	if isReplay(client, responseHeader) {
+		scrubbed, _ := scrubClientSecrets(client).(map[string]any)
+		return BootstrapIdentityResult{}, &CredentialsNotReplayedError{Client: scrubbed}
 	}
 	if connectionType != "" {
 		if err := c.requireConnectionType(ctx, client, connectionType); err != nil {

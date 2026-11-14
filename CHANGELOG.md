@@ -2,6 +2,16 @@ Last Edit: Claude Sonnet 5.5 - 2026-11-12 - Motive: Intercom review round 2 (Cod
 
 # Changelog
 
+## 0.17.0 — Unreleased
+
+Home bridges and the rules the API enforces around links. Ports thalovant-python-sdk 0.13.0 (reference digest `8687c8429e28`; its `docs/home-link-porting.md`, section "connector-connections", is the brief). It depends on thalovant-api #521, which is not deployed yet; everything here is additive and safe against an API that does not have it (unknown fields are ignored).
+
+- `ConnectionTypeConnector` (`"connector"`) is the second link kind next to `ConnectionTypeHomeAssistant`: `CreateClientIdentity(ctx, hub, BootstrapIdentityOptions{ConnectionType: ConnectionTypeConnector, Spec: map[string]any{"connectors": []any{"music_assistant"}}})` makes a home bridge. The SDK does not validate the connector ids; the API does.
+- The platform issues a connection's credentials (an `apiKey` or `password` in a spec is ignored) and the identity returned is the one in the answer's `initial_identify`. An answer with none that is not a replay keeps the old fallback.
+- A create answered from an earlier request with the same `IdempotencyKey` (header `Idempotent-Replayed: true`, or a `replay` object with `code: "idempotent_replay"`) carries no credentials: `CreateClientIdentity` returns a `*CredentialsNotReplayedError` (`ErrCredentialsNotReplayed`, `ClientID()`, `Client` without secrets) and never an identity it made up. `BootstrapIdentityResult` gains `Replayed` (always false on a result you hold), `Serves()` (`devices`, `count`, `warning`) and `ServesWarning()`.
+- New refusals, told apart with `errors.Is` and still the `*APIError` the API answered with (code read at the top of the problem or inside an object `detail`, matched with its status): `ErrConnectionTypeUnavailable` (422 `connection_type_unavailable`; a kind of `ErrUnsupportedConnectionType`, returned by `CreateClientIdentity` as a `*ConnectionTypeUnavailableError` with `Reason()`), `ErrConnectorsInvalid` (422; `Reason()`, `Known()`), `ErrOwnerOnlyBesideLink` (403, three codes; `LinkClientID()`), `ErrHubScaleOutBreaksLinks` (409; `Links()`), `ErrIdempotencyKeySpent` (409) and `ErrPrivateHubOnly` (422 `skill_config_private_hub_only`; `Settings()`). The codes are exported as `ConnectionCode*`. A code not listed is an ordinary `*APIError`.
+- Evidence: `connector_connections_test.go`; parity capability `connector-connections`.
+
 ## 0.16.0 — Unreleased
 
 Intercom. Every addition is new API. Ports thalovant-python-sdk 0.12.0 (reference digest `69badc4fb072`; its `docs/intercom-porting.md` is the brief).
