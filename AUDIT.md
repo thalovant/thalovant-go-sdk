@@ -1,5 +1,3 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-12 - Motive: Intercom review round 2 (CodeRabbit PR 92): urgent-scope precedence, the accepted announcement kept on a malformed POST answer, docs aligned with the API.
-
 ## 2026-11-11 — Intercom (0.16.0): `AnnounceOptions` printed the text (security review L4), now redacted
 
 `AnnounceOptions` (`intercom.go`) is a plain struct, so `%v`, `%+v`, `%#v`, `%d` or a `log/slog` handler printed `Text`. It now implements `String`, `GoString`, `Format` and `slog.LogValuer`, which print `<N chars>` (`intercom_test.go`, `TestIntercomAnnounceOptionsNeverPrintTheText`). Still open: `json.Marshal(options)` prints the field, because a `MarshalJSON` that hid it would make a caller who stores the options lose the text silently; nothing in the SDK marshals the struct (`announceBody` builds a map).

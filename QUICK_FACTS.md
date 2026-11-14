@@ -1,5 +1,3 @@
-Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom final API: urgent scope, speaker Kind/CanPlay/PolicySynced, typed refusals, one text rule, Replayed.
-
 # Quick Facts
 
 | Item | Value |
