@@ -5,7 +5,7 @@ Last Edit: Claude Sonnet 5.5 - 2026-11-11 - Motive: Intercom final API: urgent s
 | Item | Value |
 | :--- | :--- |
 | Module | `github.com/thalovant/thalovant-go-sdk` (package `thalovant`) |
-| Version | 0.17.0 (`VERSION` and `const Version` in `version.go`, kept equal by `TestVersionMatchesVersionFile`; the Auto Release workflow bumps both for a patch release) |
+| Version | 0.17.1 (`VERSION` and `const Version` in `version.go`, kept equal by `TestVersionMatchesVersionFile`; the Auto Release workflow bumps both for a patch release) |
 | Go | 1.26.9 or newer (`go.mod`) |
 | Data-plane entry points | `NewClient`, `NewClientFromConfig`, `Client.Ask`, `Client.Intents`, `HubSession` |
 | Control-plane entry points | `NewControlPlane`, `NewDefaultControlPlane`, methods on `*ControlPlane` (`control.go`, `hub_skills.go`, `chat_apps.go`, `browser_login.go`) |
