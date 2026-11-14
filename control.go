@@ -1085,7 +1085,9 @@ func (c *ControlPlane) CreateClientIdentity(ctx context.Context, hub map[string]
 			}
 		}
 		if connectionType != "" {
-			if apiErr, refused := refusesConnectionType(err); refused {
+			// Only an error no typed refusal claimed gets the text check: a connectors_invalid
+			// whose detail names connection_type stays ErrConnectorsInvalid.
+			if apiErr, refused := refusesConnectionType(err); refused && apiErr.refusal() == nil {
 				return BootstrapIdentityResult{}, &UnsupportedConnectionTypeError{ConnectionType: connectionType, APIError: apiErr}
 			}
 		}

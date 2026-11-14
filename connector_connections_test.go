@@ -308,6 +308,17 @@ func TestConnectorAStructuredRefusalInsideDetailIsReadToo(t *testing.T) {
 	}
 }
 
+func TestConnectorAConnectorsRefusalThatNamesConnectionTypeStaysItself(t *testing.T) {
+	api, _ := ccAPI(t, ccReply{status: 422, body: map[string]any{
+		"detail": "Invalid connectors for connection_type connector", "code": "connectors_invalid",
+		"reason": "duplicate", "known": []any{"music_assistant"}}})
+	_, err := api.CreateClientIdentity(context.Background(), ccHub, BootstrapIdentityOptions{Name: "Bridge", ConnectionType: "connector"})
+	var apiErr *APIError
+	if !errors.Is(err, ErrConnectorsInvalid) || errors.Is(err, ErrUnsupportedConnectionType) || !errors.As(err, &apiErr) || apiErr.Reason() != "duplicate" {
+		t.Fatalf("%T %v", err, err)
+	}
+}
+
 func TestConnectorAnUnlistedCodeStaysAPlainAPIError(t *testing.T) {
 	api, _ := ccAPI(t, ccProblem(409, "something_new", nil))
 	_, err := api.CreateClientIdentity(context.Background(), ccHub, BootstrapIdentityOptions{Name: "X"})
