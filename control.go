@@ -1171,7 +1171,12 @@ func (r BootstrapIdentityResult) Summary(includeSecrets bool) map[string]any {
 		"selected_protocol": r.SelectedProtocol(),
 	}
 	if r.Endpoint != nil {
-		summary["selected_endpoint"] = r.Endpoint.Endpoint
+		if includeSecrets {
+			summary["selected_endpoint"] = r.Endpoint.Endpoint
+		} else {
+			// An endpoint written as https://user:pass@host carries credentials.
+			summary["selected_endpoint"] = redactEndpointCredentials(r.Endpoint.Endpoint)
+		}
 	}
 	return summary
 }

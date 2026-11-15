@@ -126,3 +126,7 @@ No. The enums are string types; an unknown value is kept as sent. Treat an unkno
 
 Connectors without chat discovery answer `ManualEntry: true`. Type the ids yourself; they must
 match the connector's `Targets.Pattern` (from `ListChatAppConnectors`).
+
+## Does printing a `CreateClientIdentity` result leak the access key and password?
+
+No. `fmt` (`%v`, `%+v`, `%#v`, `%s`, `%q`, `%d`), `log/slog` and `json.Marshal` of a `BootstrapIdentityResult`, an `Identity`, a `ControlPlane`, an `APIToken` and the other secret-bearing types print `[REDACTED]` (`redaction.go`). To save the identity, marshal `result.Identity` (the identity-file form keeps the values) or read `result.Identity.AccessKey` on purpose; `result.Client` is the raw API map and prints what the API sent.

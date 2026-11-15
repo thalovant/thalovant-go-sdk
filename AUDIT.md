@@ -1,3 +1,7 @@
+## 2026-11-15 — Fixed in 0.17.2: secrets printed by `fmt`, `slog` and `json` of a create result
+
+Evidence: `go test` before the fix failed `TestSecretBearingTypesRedactUnderEveryVerb` for `BootstrapIdentityResult` (`%v` through `Client["initial_identify"]`, `control.go` `CreateClientIdentity`), `Identity` and `MqttBrokerCredentials` (`%#v`, `%d`, slog JSON; `identity.go`), `ControlPlane` (`%#v`), `NativeSignIn` and `ClientContextOptions`. All are now redacted by `redaction.go`. Still by design: `json.Marshal(Identity)` and `json.Marshal(MqttBrokerCredentials)` carry the real values (identity file and wire form); the exported fields and `Summary(true)` reveal on request; `Client`/`Hub` are plain maps, so `fmt.Println(result.Client)` prints what the API sent (`initial_identify`): print the result, not its raw map.
+
 ## 2026-11-11 — Intercom (0.16.0): `AnnounceOptions` printed the text (security review L4), now redacted
 
 `AnnounceOptions` (`intercom.go`) is a plain struct, so `%v`, `%+v`, `%#v`, `%d` or a `log/slog` handler printed `Text`. It now implements `String`, `GoString`, `Format` and `slog.LogValuer`, which print `<N chars>` (`intercom_test.go`, `TestIntercomAnnounceOptionsNeverPrintTheText`). Still open: `json.Marshal(options)` prints the field, because a `MarshalJSON` that hid it would make a caller who stores the options lose the text silently; nothing in the SDK marshals the struct (`announceBody` builds a map).
