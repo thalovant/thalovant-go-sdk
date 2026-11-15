@@ -76,7 +76,7 @@
     },
     "connection-admission": {
       "implementation": {
-        "connections.go": "7c64afde7add705dfcb143c37c043c90c120a9431300ca0e2c3d55dadf30df89",
+        "connections.go": "0e6f7c7a0dfdf94c60f6e4e88250b4d2a2f8aff2c085c89eae259a72061a33dc",
         "control.go": "87e696acd107535a479d06f5382edac253e5000adeef92d06b893efc32c1c548",
         "errors.go": "d1a52f4f0e8b64049ebe3ddbede1d817265e57548f163aa23a148770d4ec3741"
       },
@@ -94,7 +94,7 @@
     },
     "connection-kinds": {
       "implementation": {
-        "connections.go": "7c64afde7add705dfcb143c37c043c90c120a9431300ca0e2c3d55dadf30df89",
+        "connections.go": "0e6f7c7a0dfdf94c60f6e4e88250b4d2a2f8aff2c085c89eae259a72061a33dc",
         "control.go": "87e696acd107535a479d06f5382edac253e5000adeef92d06b893efc32c1c548",
         "errors.go": "d1a52f4f0e8b64049ebe3ddbede1d817265e57548f163aa23a148770d4ec3741"
       },
@@ -112,7 +112,7 @@
     },
     "connector-connections": {
       "implementation": {
-        "connections.go": "7c64afde7add705dfcb143c37c043c90c120a9431300ca0e2c3d55dadf30df89",
+        "connections.go": "0e6f7c7a0dfdf94c60f6e4e88250b4d2a2f8aff2c085c89eae259a72061a33dc",
         "control.go": "87e696acd107535a479d06f5382edac253e5000adeef92d06b893efc32c1c548",
         "errors.go": "d1a52f4f0e8b64049ebe3ddbede1d817265e57548f163aa23a148770d4ec3741"
       },
