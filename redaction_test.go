@@ -18,8 +18,9 @@ func secretBearing() map[string]any {
 		MQTT: &MqttBrokerCredentials{Endpoint: "mqtts://b:8883", Username: "LEAK-user", Password: "LEAK-mqtt", TLS: true},
 	}
 	client := map[string]any{
-		"id":   "client-1",
-		"spec": map[string]any{"apiKey": "LEAK-spec-key", "password": "LEAK-spec-password", "connectors": []any{"jellyfin"}},
+		"id":        "client-1",
+		"callbacks": []any{"https://cb:LEAK-cb-url@cb.example.com/path"},
+		"spec":      map[string]any{"apiKey": "LEAK-spec-key", "password": "LEAK-spec-password", "connectors": []any{"jellyfin"}},
 		"initial_identify": map[string]any{
 			"access_key": "LEAK-access", "password": "LEAK-password",
 			"mqtt": map[string]any{"username": "LEAK-user", "password": "LEAK-mqtt"},
@@ -28,7 +29,7 @@ func secretBearing() map[string]any {
 	}
 	result := BootstrapIdentityResult{
 		Identity: identity,
-		Hub:      map[string]any{"id": "hub-1", "domain": "home.example.com"},
+		Hub:      map[string]any{"id": "hub-1", "domain": "home.example.com", "data_plane_endpoints": map[string]any{"wss": "wss://u:LEAK-hub-url@home.example.com"}},
 		Client:   client,
 		Endpoint: &SelectedHubEndpoint{Protocol: ProtocolWSS, Endpoint: "wss://u:LEAK-url@hub.example.com"},
 	}

@@ -6,7 +6,7 @@ Secrets no longer print. Found by installing 0.17.1 from the registry and printi
 
 - `BootstrapIdentityResult`, `Identity`, `MqttBrokerCredentials`, `ControlPlane`, `APIToken`, `DeviceAuthorization`, `NativeSignIn` and `ClientContextOptions` implement `String`, `GoString`, `Format` and `slog.LogValuer` (`redaction.go`): `%v`, `%+v`, `%#v`, `%s`, `%q`, `%x`, `%d`, `fmt.Sprint` and the `log/slog` JSON and text handlers print `[REDACTED]` for a secret. A result prints its `Hub` and `Client` maps with the minted secrets replaced (`apiKey`, `password`, `access_key`, `initial_identify`, `initial_identify_token`, the MQTT login).
 - `json.Marshal(result)` encodes `Summary(false)`. `json.Marshal(result.Identity)` still carries the real values: it is the identity-file form. The fields themselves (`result.Identity.AccessKey`, `result.Client[...]`) are unchanged.
-- `Summary(false)` strips `user:password@` from `selected_endpoint`.
+- `Summary(false)` strips `user:password@` from `selected_endpoint` and from URL values inside the raw hub and client maps; a `NativeSignIn` prints no `state`, not even in its URL.
 - Evidence: `redaction_test.go`.
 
 ## 0.17.1 — 2026-11-14

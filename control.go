@@ -1250,6 +1250,9 @@ func redactSensitiveTree(value any) any {
 			cloned[i] = redactSensitiveTree(rv.Index(i).Interface())
 		}
 		return cloned
+	case reflect.String:
+		// A URL value such as a data-plane endpoint can carry user:password@.
+		return redactURLUserinfo(rv.String())
 	default:
 		return value
 	}

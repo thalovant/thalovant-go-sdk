@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/url"
 	"strconv"
+	"strings"
 )
 
 // This file closes the gaps the String methods leave. A type with only String
@@ -14,7 +16,10 @@ import (
 // handler. Format answers every verb, GoString answers %#v, and LogValue
 // answers slog, so no fmt verb or logger prints a secret from these types.
 // json.Marshal of Identity and MqttBrokerCredentials is unchanged: it is the
-// identity-file and wire form and must keep the real values.
+// identity-file and wire form and must keep the real values. LogValue therefore
+// protects an Identity logged as a direct slog attribute only: one nested in a
+// map, a slice or a struct is encoded by slog.JSONHandler with encoding/json
+// and keeps its secrets, so do not log such containers.
 
 // writeRedacted writes plain for every verb, quoted for %q, and goSyntax for %#v.
 func writeRedacted(state fmt.State, verb rune, plain string, goSyntax string) {
@@ -26,6 +31,36 @@ func writeRedacted(state fmt.State, verb rune, plain string, goSyntax string) {
 	default:
 		_, _ = io.WriteString(state, plain)
 	}
+}
+
+// redactURLUserinfo strips user:password@ from a string that is a URL carrying
+// it, for display. Any other string is returned as it is.
+func redactURLUserinfo(value string) string {
+	if !strings.Contains(value, "://") || !strings.Contains(value, "@") {
+		return value
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.User == nil {
+		return value
+	}
+	parsed.User = nil
+	return parsed.String()
+}
+
+// redactAuthorizationState replaces the state query parameter of an
+// authorization URL, which carries the attempt's state, for display.
+func redactAuthorizationState(value string) string {
+	parsed, err := url.Parse(value)
+	if err != nil {
+		return value
+	}
+	query := parsed.Query()
+	if !query.Has("state") {
+		return value
+	}
+	query.Set("state", secretPlaceholder)
+	parsed.RawQuery = query.Encode()
+	return parsed.String()
 }
 
 // GoString keeps %#v from printing the access key, the password or the broker
@@ -82,7 +117,7 @@ func (a DeviceAuthorization) LogValue() slog.Value { return slog.StringValue(a.S
 // redacted.
 func (s NativeSignIn) String() string {
 	return fmt.Sprintf("NativeSignIn{AuthorizationURL:%q State:%s Verifier:%s RedirectURI:%q}",
-		s.AuthorizationURL, redactSecret(s.State), redactSecret(s.Verifier), s.RedirectURI)
+		redactAuthorizationState(s.AuthorizationURL), redactSecret(s.State), redactSecret(s.Verifier), s.RedirectURI)
 }
 
 // GoString keeps %#v from printing the state and the verifier.
@@ -124,7 +159,7 @@ func (o ClientContextOptions) LogValue() slog.Value { return slog.StringValue(o.
 func (r BootstrapIdentityResult) String() string {
 	endpoint := "<nil>"
 	if r.Endpoint != nil {
-		endpoint = fmt.Sprintf("{Protocol:%s Endpoint:%q}", r.Endpoint.Protocol, redactEndpointCredentials(r.Endpoint.Endpoint))
+		endpoint = fmt.Sprintf("{Protocol:%s Endpoint:%q}", r.Endpoint.Protocol, redactURLUserinfo(r.Endpoint.Endpoint))
 	}
 	operation := "<nil>"
 	if r.Operation != nil {
