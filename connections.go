@@ -23,7 +23,7 @@ const (
 	// at most one: a second is refused with ErrAlreadyLinked.
 	ConnectionTypeHomeAssistant = "home_assistant"
 	// ConnectionTypeConnector is a home bridge: a link that serves the connector
-	// ids in spec.connectors (music_assistant today). Home Assistant has the
+	// ids in spec.connectors (jellyfin and music_assistant today). Home Assistant has the
 	// kind above and is never one of a bridge's connectors. The API validates
 	// the ids; see ErrConnectorsInvalid.
 	ConnectionTypeConnector = "connector"

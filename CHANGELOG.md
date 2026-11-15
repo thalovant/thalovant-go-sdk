@@ -1,6 +1,16 @@
 # Changelog
 
-## 0.17.1 — Unreleased
+## 0.17.2 — Unreleased
+
+Secrets no longer print. Found by installing 0.17.1 from the registry and printing a `CreateClientIdentity` result: `fmt.Sprintf("%v", result)` printed the access key and password, because the result's raw `Client` map holds `initial_identify`, and `%#v` of an `Identity` printed them because only `String` was defined. No exported signature changes.
+
+- `BootstrapIdentityResult`, `Identity`, `MqttBrokerCredentials`, `ControlPlane`, `APIToken`, `DeviceAuthorization`, `NativeSignIn` and `ClientContextOptions` implement `String`, `GoString`, `Format` and `slog.LogValuer` (`redaction.go`): `%v`, `%+v`, `%#v`, `%s`, `%q`, `%x`, `%d`, `fmt.Sprint` and the `log/slog` JSON and text handlers print `[REDACTED]` for a secret. A result prints its `Hub` and `Client` maps with the minted secrets replaced (`apiKey`, `password`, `access_key`, `initial_identify`, `initial_identify_token`, the MQTT login).
+- `json.Marshal(result)` encodes `Summary(false)`. `json.Marshal(result.Identity)` still carries the real values: it is the identity-file form. The fields themselves (`result.Identity.AccessKey`, `result.Client[...]`) are unchanged.
+- `Summary(false)` strips `user:password@` from `selected_endpoint` and from URL values inside the raw hub and client maps; a `NativeSignIn` prints no `state`, not even in its URL.
+- Security hardening: upgrading from 0.17.1 is advised; 0.17.1 stays published. The connector ids are `jellyfin` and `music_assistant` in the docs.
+- Evidence: `redaction_test.go`.
+
+## 0.17.1 — 2026-11-14
 
 - A `connectors_invalid` refusal whose detail names `connection_type` stays `ErrConnectorsInvalid`: the legacy text check that makes an unsupported-kind error now applies only to an error no typed refusal claimed. Acknowledges the Python reference digest `45c675d31752`.
 

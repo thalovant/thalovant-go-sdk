@@ -126,3 +126,7 @@ No. The enums are string types; an unknown value is kept as sent. Treat an unkno
 
 Connectors without chat discovery answer `ManualEntry: true`. Type the ids yourself; they must
 match the connector's `Targets.Pattern` (from `ListChatAppConnectors`).
+
+## Does printing a `CreateClientIdentity` result leak the access key and password?
+
+No. `fmt` (`%v`, `%+v`, `%#v`, `%s`, `%q`, `%d`) and `log/slog` print `[REDACTED]` for the secrets of a `BootstrapIdentityResult`, an `Identity`, a `ControlPlane`, an `APIToken` and the other secret-bearing types (`redaction.go`); the raw `Hub` and `Client` maps inside a result have their minted secrets replaced and `user:password@` stripped from URLs. JSON is different: only `json.Marshal(result)` is redacted (it encodes `Summary(false)`). `json.Marshal(result.Identity)` and `json.Marshal` of an `MqttBrokerCredentials` carry the real values, because that is the identity-file form: never marshal them into a log. For `log/slog`, an `Identity` is redacted as a direct attribute only; one nested in a map, slice or struct goes through `encoding/json` in `slog.JSONHandler` and keeps its secrets. `result.Client` is a plain map: `fmt.Println(result.Client)` prints what the API sent.
